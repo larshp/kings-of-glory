@@ -1,0 +1,25 @@
+{
+  "name": "@kings/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node node_modules/vite/bin/vite.js",
+    "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json && node node_modules/vite/bin/vite.js build",
+    "test": "node ../../node_modules/vitest/vitest.mjs run",
+    "typecheck": "node ../../node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
+    "lint": "node ../../node_modules/eslint/bin/eslint.js src"
+  },
+  "dependencies": {
+    "@kings/simulation": "workspace:*",
+    "pixi.js": "^8.10.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "vite": "^6.3.5"
+  }
+}

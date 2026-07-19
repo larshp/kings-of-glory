@@ -1,0 +1,10 @@
+{
+  "name": "@kings/server-runtime",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "dependencies": { "@kings/protocol": "workspace:*", "@kings/simulation": "workspace:*", "pg": "^8.16.3" },
+  "devDependencies": { "@types/pg": "^8.15.5" },
+  "scripts": { "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json", "test": "node ../../node_modules/vitest/vitest.mjs run --passWithNoTests", "typecheck": "node ../../node_modules/typescript/bin/tsc --noEmit -p tsconfig.json", "lint": "node ../../node_modules/eslint/bin/eslint.js src" }
+}

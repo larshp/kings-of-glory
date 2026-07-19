@@ -80,3 +80,38 @@ packages/
   pathfinding/      Navigation and logistics algorithms
   server-runtime/   WebSocket and PostgreSQL integration
 ```
+
+## Local development
+
+Prerequisites: Node.js 22 or newer and Corepack. The repository pins pnpm 10.14.0.
+
+```powershell
+corepack enable
+pnpm install --frozen-lockfile
+pnpm build
+pnpm test
+pnpm lint
+```
+
+Start the authoritative world host in one terminal and the browser client in another:
+
+```powershell
+pnpm --filter @kings/server dev
+pnpm --filter @kings/client dev
+```
+
+The server listens on `http://localhost:3001/health` and WebSocket clients connect on port 3001. Vite serves the client URL it prints (normally `http://localhost:5173`). The client uses a stable per-tab development identity; production authentication is intentionally deferred.
+
+To exercise the durable-world adapter, run PostgreSQL 16 or newer and start the server with a connection string. Startup applies the forward-only initial schema and restores the newest completed checkpoint before accepting clients.
+
+```powershell
+$env:PERSISTENCE = 'postgres'
+$env:DATABASE_URL = 'postgres://kings:kings@localhost:5432/kings_of_glory'
+pnpm --filter @kings/server dev
+```
+
+`PERSISTENCE=memory` remains the default for local UI work. PostgreSQL mode journals accepted commands before applying them, saves a completed checkpoint every 300 ticks, and writes one final checkpoint during graceful shutdown. See [001_initial.sql](packages/server-runtime/migrations/001_initial.sql) for the initial schema.
+
+## Current vertical slice
+
+This first increment provides a strict TypeScript workspace, a platform-independent deterministic simulation, a versioned JSON WebSocket handshake, a single authoritative world host, durable checkpoint/journal foundations, and a React/PixiJS isometric placeholder map. A connected player can gather ore and place a smelter; tests verify deterministic replay, duplicate-command rejection, and checkpoint recovery.

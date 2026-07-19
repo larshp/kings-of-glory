@@ -7,6 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "inspect": "node dist/inspect.js",
     "load": "node dist/load.js",
+    "soak": "node dist/soak.js",
     "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
     "test": "node ../../node_modules/vitest/vitest.mjs run --passWithNoTests",
     "typecheck": "node ../../node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",

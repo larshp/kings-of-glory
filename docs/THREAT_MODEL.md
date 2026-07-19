@@ -14,13 +14,20 @@
 | Persistent-state corruption     | Commands are journaled before mutation; completed checkpoints have state hashes and are inspected read-only before recovery.                                                                                    |
 | PvP damage                      | The protocol has no attack command. Server-controlled threats target non-center buildings only.                                                                                                                 |
 
+## Environmental pressure
+
+Environmental events are validated content definitions, not client-controlled timers. The first event,
+acid rain, selects one completed owned building in a stable order every 100 ticks and applies one point
+of damage. Damaged producers pause until an authorized player repairs them. This keeps the event
+auditable, provides a clear recovery action, and cannot create a PvP damage path.
+
 ## Deliberate production boundary
 
 The current development identity is not public authentication. Do not run a public service until production account/session authentication, TLS termination, password or external-identity flows, moderation, secrets management, and a security review are implemented. Production origin enforcement reduces browser-origin abuse; it does not replace authentication.
 
 ## Verification cadence
 
-- Run `pnpm format:check`, `pnpm build`, `pnpm test`, and `pnpm lint` for every change.
-- Run `pnpm --filter @kings/server load` when simulation, protocol, or serialization costs change.
+- Run `npm run format:check`, `npm run build`, `npm run test`, and `npm run lint` for every change.
+- Run `npm --prefix apps/server run load` when simulation, protocol, or serialization costs change.
 - Run the checkpoint inspector before restoring a manually supplied checkpoint.
 - Treat any duplicate-resource, authorization, hidden-state, or recovery failure as a release blocker and add a regression test at the lowest practical level.

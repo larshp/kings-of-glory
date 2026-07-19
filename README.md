@@ -18,7 +18,7 @@ The global server owns the authoritative state: clients submit commands, the ser
 
 ```text
 Browser client
-+ PixiJS world renderer
++ Canvas 2D world renderer
 + React interface
 + Input and camera controls
 + WebSocket connection
@@ -45,7 +45,7 @@ The world is divided into chunks internally, but multiplayer chunks are not sepa
 ## Technology
 
 - **Language:** TypeScript for the client, server, simulation, and shared types
-- **World rendering:** PixiJS
+- **World rendering:** Canvas 2D
 - **Interface:** React
 - **Browser tooling:** Vite
 - **Server runtime:** Node.js
@@ -70,7 +70,7 @@ Redis, a separate caching layer, microservices, matchmaking, and Docker are not 
 
 ```text
 apps/
-  client/           Browser client using PixiJS and React
+  client/           Browser client using Canvas 2D and React
   server/           Authoritative global-world server
 
 packages/
@@ -83,7 +83,7 @@ packages/
 
 ## Local development
 
-Prerequisites: Node.js 22.16.0 (see `.nvmrc`) and pnpm 10.14.0. Corepack is one way to supply pnpm, but is not required. GitHub Actions runs the same locked install, format, lint, build, and test gate on pull requests and `main`. The npm scripts select `pnpm.cmd` automatically on Windows, so `npm run dev` works even when PowerShell blocks `pnpm.ps1`.
+Prerequisites: Node.js 22.16.0 (see `.nvmrc`) and pnpm 10.14.0. Corepack is one way to supply pnpm, but is not required. To install the pinned package manager without Corepack, run `npm install --global pnpm@10.14.0`. GitHub Actions runs the same locked install, format, lint, build, and test gate on pull requests and `main`. The npm scripts select `pnpm.cmd` automatically on Windows, so `npm run dev` works even when PowerShell blocks `pnpm.ps1`.
 
 ```powershell
 corepack enable
@@ -99,33 +99,38 @@ After dependencies are installed, you can also start both applications with:
 npm run dev
 ```
 
-Start the authoritative world host in one terminal and the browser client in another:
+Start the authoritative world host in one terminal and the browser client in another without
+calling `pnpm` directly:
 
 ```powershell
-pnpm --filter @kings/server dev
-pnpm --filter @kings/client dev
+npm --prefix apps/server run dev
+npm --prefix apps/client run dev
 ```
 
 Or start both with `npm run dev`; the npm wrapper uses the Windows command shim when needed.
 
-The server listens on `http://localhost:3001/health` and WebSocket clients connect on port 3001. Vite serves the client URL it prints (normally `http://localhost:5173`). The client uses a stable per-tab development identity; production authentication is intentionally deferred.
+The server listens on `http://127.0.0.1:3001/health` and WebSocket clients connect on port 3001. Vite serves the client at `http://127.0.0.1:5173`. By default the client connects to the same hostname as the page, so local `127.0.0.1` and LAN development addresses work; set `VITE_SERVER_URL` to override it. The client uses a stable per-tab development identity; production authentication is intentionally deferred.
 
 To exercise the durable-world adapter, run PostgreSQL 16 or newer and start the server with a connection string. Startup applies the forward-only initial schema and restores the newest completed checkpoint before accepting clients.
 
 ```powershell
 $env:PERSISTENCE = 'postgres'
 $env:DATABASE_URL = 'postgres://kings:kings@localhost:5432/kings_of_glory'
-pnpm --filter @kings/server dev
+npm --prefix apps/server run dev
 ```
 
 `PERSISTENCE=memory` remains the default for local UI work. PostgreSQL mode journals accepted commands before applying them, saves a completed checkpoint every 300 ticks, retains the newest three completed checkpoints with replayable journal history, and writes one final checkpoint during graceful shutdown. See [001_initial.sql](packages/server-runtime/migrations/001_initial.sql) for the initial schema.
 
-The server exposes `/health`, `/ready`, and a Prometheus-compatible `/metrics` endpoint. `/health` reports whether the process is live; `/ready` returns `503` during maintenance so traffic can drain before the final checkpoint. Metrics include full-state and delta message/byte totals plus state-build time, so snapshot regressions are observable. In production set `NODE_ENV=production` and a comma-separated `ALLOWED_ORIGINS` list; WebSocket connections from other origins are rejected. Each connection is rate-limited to 30 messages per second, heartbeats every 15 seconds, and is disconnected when its buffered outbound data exceeds 1 MB or it remains silent for 45 seconds.
+Operational procedures for failed deployments, storage failures, runaway ticks, client floods, and
+world rollback are in the [operations runbook](docs/runbooks/operations.md).
 
-To inspect a serialized checkpoint state without changing it, build the workspace and run `pnpm --filter @kings/server inspect path/to/checkpoint.json`. The inspector reports invalid owners, overlapping buildings, invalid inventories, malformed populations, and dangling threat targets.
+The server exposes `/health`, `/ready`, and a Prometheus-compatible `/metrics` endpoint. `/health` reports whether the process is live; `/ready` returns `503` during maintenance so traffic can drain before the final checkpoint. Metrics include full-state and delta message/byte totals, state-build time, the latest checkpoint tick, restore duration, journal lag, pending commands, and total buffered outbound bytes, so snapshot and slow-client regressions are observable. The first-slice recovery objective is zero accepted-command data loss and a five-minute verified recovery; see the [checkpoint recovery runbook](docs/runbooks/checkpoint-recovery.md). Structured connection, disconnect, and command-failure logs include a correlation ID but never include a command payload. In production set `NODE_ENV=production` and a comma-separated `ALLOWED_ORIGINS` list; WebSocket connections from other origins are rejected. Each connection is rate-limited to 30 messages per second, heartbeats every 15 seconds, and is disconnected when its buffered outbound data exceeds 1 MB or it remains silent for 45 seconds.
 
-Run the deterministic bot baseline with `pnpm --filter @kings/server load [players] [ticks]`. It reports duration, tick throughput, command count, entity count, and final state hash; record these values when evaluating performance changes.
+To inspect a serialized checkpoint state without changing it, build the workspace and run `npm --prefix apps/server run inspect -- path/to/checkpoint.json`. The inspector reports invalid owners, overlapping buildings, invalid inventories, malformed populations, dangling threat targets, incomplete checkpoints, and mismatched checkpoint hashes.
+
+Run the deterministic bot baseline with `npm --prefix apps/server run load -- [players] [ticks] [buildings-per-player]`. It reports duration, tick throughput, command count, entity count, final state hash, and end-of-run memory with deltas; record these values when evaluating performance changes.
+See [the current first-slice baseline](docs/performance-baseline.md) for a reproducible 20-player run.
 
 ## Current vertical slice
 
-This increment provides a strict TypeScript workspace, a platform-independent deterministic simulation, a versioned JSON WebSocket handshake, a single authoritative world host, durable checkpoint/journal foundations, and a React/PixiJS isometric map. Players can gather ore, construct smelters, storage, and housing, move items through building inventories, link storage to smelters for deterministic ore delivery, and grow an aggregated workforce. Tests cover deterministic replay, command rejection, resource conservation, content validation, protocol shape validation, and checkpoint recovery.
+This increment provides a strict TypeScript workspace, a platform-independent deterministic simulation, a versioned JSON WebSocket handshake, a single authoritative world host, durable checkpoint/journal foundations, and a React/Canvas 2D isometric map. Players gather finite ore deposits (gray map tiles) and timber groves (brown map tiles), construct smelters, workshops, storage, housing, and hearths, turn ore into ingots and ingots plus wood into tools, and build recipe-validated links that automate storage-to-smelter and smelter-to-workshop delivery. The HUD explains a producer's actual recipe duration and missing inputs; housing, jobs, and a completed hearth determine settlement wellbeing. Players repair damage from acid rain or raiders. Tests cover deterministic replay, command rejection, resource conservation, content validation, protocol shape validation, snapshot migration, and checkpoint recovery.

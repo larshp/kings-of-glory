@@ -2,10 +2,18 @@ import { describe, expect, it } from 'vitest';
 import {
   type Connection,
   GlobalWorldHost,
+  INITIAL_MIGRATION_SQL,
   MemoryWorldPersistence,
+  snapshotDirtyChunk,
   type WorldPersistence,
 } from '../src/index.js';
-import { advanceTick, createWorld } from '@kings/simulation';
+import {
+  advanceTick,
+  chunkKeyFor,
+  createWorld,
+  joinPlayer,
+  nearestOreTile,
+} from '@kings/simulation';
 import { parseEnvironment } from '../src/env.js';
 
 const connection = (): Connection & { messages: string[] } => ({
@@ -15,8 +23,67 @@ const connection = (): Connection & { messages: string[] } => ({
   },
   close() {},
 });
+const oreTileFor = (host: GlobalWorldHost, playerId = 'player-a') => {
+  const player = host.world.players[playerId]!;
+  const tile = nearestOreTile(
+    host.world.seed,
+    player.plot.x + Math.floor(player.plot.size / 2),
+    player.plot.y + Math.floor(player.plot.size / 2),
+    8,
+  );
+  if (!tile) throw new Error(`Expected a nearby ore deposit for ${playerId}`);
+  return tile;
+};
+
+class InterruptedCheckpointPersistence extends MemoryWorldPersistence {
+  interruptNextCheckpoint = false;
+
+  override async saveCheckpoint(
+    state: Parameters<MemoryWorldPersistence['saveCheckpoint']>[0],
+    dirtyChunks?: Parameters<MemoryWorldPersistence['saveCheckpoint']>[1],
+  ) {
+    if (this.interruptNextCheckpoint) throw new Error('checkpoint writer interrupted');
+    return super.saveCheckpoint(state, dirtyChunks);
+  }
+}
 
 describe('durable world recovery', () => {
+  it('defines the full initial durable-world schema, including sessions', () => {
+    expect(INITIAL_MIGRATION_SQL.join('\n')).toContain('CREATE TABLE IF NOT EXISTS sessions');
+  });
+
+  it('serializes only entities and mined tiles that belong to a dirty chunk', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const center = world.buildings['center-player-a']!;
+    const chunk = chunkKeyFor(center.x, center.y);
+    world.minedTiles[`${center.x}:${center.y}`] = 1;
+    world.minedTiles['-32:0'] = 1;
+    const chunkSnapshot = snapshotDirtyChunk(world, chunk);
+    expect(chunkSnapshot.buildings).toEqual({ [center.id]: center });
+    expect(chunkSnapshot.minedTiles).toEqual({ [`${center.x}:${center.y}`]: 1 });
+    expect(chunkSnapshot.threats).toEqual({});
+  });
+
+  it('records dirty chunks with a completed checkpoint', async () => {
+    const persistence = new MemoryWorldPersistence();
+    const host = new GlobalWorldHost(1, persistence);
+    const client = connection();
+    await host.connect(client, 'player-a');
+    const ore = oreTileFor(host);
+    await host.command(client, {
+      id: 'gather-dirty-chunk',
+      playerId: 'player-a' as never,
+      sequence: 1,
+      type: 'gather',
+      ...ore,
+    });
+    await host.checkpoint();
+    expect((await persistence.loadLatestCheckpoint())?.dirtyChunks).toContain(
+      chunkKeyFor(ore.x, ore.y),
+    );
+  });
+
   it('retains a recoverable checkpoint window and compacts only covered journal entries', async () => {
     const persistence: WorldPersistence = new MemoryWorldPersistence();
     const world = createWorld();
@@ -52,6 +119,27 @@ describe('durable world recovery', () => {
     ]);
   });
 
+  it('recovers the previous completed checkpoint when the next checkpoint is interrupted', async () => {
+    const persistence = new InterruptedCheckpointPersistence();
+    const host = new GlobalWorldHost(77, persistence);
+    const client = connection();
+    await host.connect(client, 'player-a');
+    await host.command(client, {
+      id: 'journaled-before-interruption',
+      playerId: 'player-a' as never,
+      sequence: 1,
+      type: 'gather',
+      ...oreTileFor(host),
+    });
+    persistence.interruptNextCheckpoint = true;
+    await expect(host.checkpoint()).rejects.toThrow('checkpoint writer interrupted');
+
+    const recovered = new GlobalWorldHost(1, persistence);
+    await recovered.restore();
+    expect(recovered.world.seed).toBe(77);
+    expect(recovered.world.players['player-a']?.inventory.ore).toBe(1);
+  });
+
   it('restores a completed checkpoint and replays later journaled commands', async () => {
     const persistence = new MemoryWorldPersistence();
     const initial = new GlobalWorldHost(77, persistence);
@@ -64,8 +152,7 @@ describe('durable world recovery', () => {
       playerId: 'player-a' as never,
       sequence: 1,
       type: 'gather',
-      x: 12,
-      y: 0,
+      ...oreTileFor(initial),
     });
 
     const restored = new GlobalWorldHost(1, persistence);
@@ -89,8 +176,7 @@ describe('durable world recovery', () => {
       playerId: 'player-a' as never,
       sequence: 1,
       type: 'gather',
-      x: 12,
-      y: 0,
+      ...oreTileFor(host),
     });
     expect(host.world.players['player-a']?.inventory.ore).toBe(0);
     expect(client.messages.at(-1)).toContain('persistence-failed');
@@ -111,15 +197,17 @@ describe('durable world recovery', () => {
         players: Record<string, unknown>;
         buildings: Record<
           string,
-          { ownerId: string; inventory: { ore: number; wood: number; ingot: number } }
+          { ownerId: string; inventory: { ore: number; wood: number; ingot: number; tool: number } }
         >;
+        territory: Record<string, string>;
         processedCommands: string[];
       };
     };
     expect(Object.keys(message.state.players)).toEqual(['player-a']);
     for (const building of Object.values(message.state.buildings))
       if (building.ownerId === 'player-b')
-        expect(building.inventory).toEqual({ ore: 0, wood: 0, ingot: 0 });
+        expect(building.inventory).toEqual({ ore: 0, wood: 0, ingot: 0, tool: 0 });
+    expect(Object.values(message.state.territory)).toContain('player-b');
     expect(message.state.processedCommands).toEqual([]);
   });
 
@@ -135,11 +223,47 @@ describe('durable world recovery', () => {
     await host.tick();
     host.resync(first);
     const message = JSON.parse(first.messages.at(-1)!) as {
-      state: { minedTiles: Record<string, number>; processedCommands: string[]; seed?: number };
+      state: {
+        minedTiles: Record<string, number>;
+        processedCommands: string[];
+        seed?: number;
+        randomState?: number;
+      };
     };
     expect(message.state.minedTiles).toEqual({ '12:0': 1 });
     expect(message.state.processedCommands).toEqual([]);
     expect(message.state.seed).toBeUndefined();
+    expect(message.state.randomState).toBeUndefined();
+  });
+
+  it('sends a full relevant-world snapshot when an explored viewport chunk is subscribed', async () => {
+    const host = new GlobalWorldHost();
+    const client = connection();
+    await host.connect(client, 'player-a');
+    joinPlayer(host.world, 'player-b');
+    host.world.players['player-a']!.exploredChunks['2:0'] = true;
+    host.world.buildings.hidden = {
+      ...host.world.buildings['center-player-a']!,
+      id: 'hidden' as never,
+      ownerId: 'player-b' as never,
+      x: 32,
+      y: 0,
+    };
+    host.setInterest(client, [{ x: 2, y: 0 }]);
+    const message = JSON.parse(client.messages.at(-1)!) as {
+      type: string;
+      state?: { buildings: Record<string, unknown>; terrain: Record<string, unknown> };
+    };
+    expect(message.type).toBe('state');
+    expect(message.state?.buildings.hidden).toBeDefined();
+    expect(message.state?.terrain['32:0']).toBeDefined();
+
+    host.setInterest(client, [{ x: 1, y: 0 }]);
+    const narrowed = JSON.parse(client.messages.at(-1)!) as {
+      state?: { buildings: Record<string, unknown>; terrain: Record<string, unknown> };
+    };
+    expect(narrowed.state?.buildings.hidden).toBeUndefined();
+    expect(narrowed.state?.terrain['32:0']).toBeUndefined();
   });
 
   it('exposes only relevant settlement state and inventories to authorized logistics members', async () => {
@@ -189,6 +313,23 @@ describe('durable world recovery', () => {
       'settlement-player-b',
     ]);
     expect(message.state.buildings['center-player-a']?.inventory.ore).toBe(2);
+    await host.command(owner, {
+      id: 'remove-logistics',
+      playerId: 'player-a' as never,
+      sequence: 3,
+      type: 'removeSettlementMember',
+      settlementId: 'settlement-player-a',
+      targetPlayerId: 'player-b' as never,
+    });
+    host.resync(logistics);
+    const revoked = JSON.parse(logistics.messages.at(-1)!) as {
+      state: {
+        settlements: Record<string, unknown>;
+        buildings: Record<string, { inventory: { ore: number; wood: number; ingot: number } }>;
+      };
+    };
+    expect(Object.keys(revoked.state.settlements)).toEqual(['settlement-player-b']);
+    expect(revoked.state.buildings['center-player-a']).toBeUndefined();
   });
 
   it('runs the two-player gather, produce, defend, reconnect, and restore loop', async () => {
@@ -207,30 +348,37 @@ describe('durable world recovery', () => {
       x: 12,
       y: 0,
     });
+    host.world.players['player-a']!.inventory.ingot = 1;
     await host.command(alice, {
-      id: 'build-tower',
+      id: 'research-metallurgy',
       playerId: 'player-a' as never,
       sequence: 2,
-      type: 'placeWatchtower',
-      x: 13,
-      y: 0,
+      type: 'research',
+      technologyId: 'metallurgy',
     });
     const smelter = Object.values(host.world.buildings).find(
       (building) => building.ownerId === 'player-a' && building.kind === 'smelter',
     )!;
     for (let index = 0; index < 10; index += 1) await host.tick();
     await host.command(alice, {
-      id: 'gather',
+      id: 'build-tower',
       playerId: 'player-a' as never,
       sequence: 3,
-      type: 'gather',
-      x: 12,
+      type: 'placeWatchtower',
+      x: 13,
       y: 0,
+    });
+    await host.command(alice, {
+      id: 'gather',
+      playerId: 'player-a' as never,
+      sequence: 4,
+      type: 'gather',
+      ...oreTileFor(host),
     });
     await host.command(alice, {
       id: 'load',
       playerId: 'player-a' as never,
-      sequence: 4,
+      sequence: 5,
       type: 'transfer',
       buildingId: smelter.id,
       item: 'ore',
@@ -241,7 +389,7 @@ describe('durable world recovery', () => {
     await host.command(alice, {
       id: 'unload',
       playerId: 'player-a' as never,
-      sequence: 5,
+      sequence: 6,
       type: 'transfer',
       buildingId: smelter.id,
       item: 'ingot',
@@ -251,7 +399,7 @@ describe('durable world recovery', () => {
     await host.command(alice, {
       id: 'gift',
       playerId: 'player-a' as never,
-      sequence: 6,
+      sequence: 7,
       type: 'transferToPlayer',
       targetPlayerId: 'player-b' as never,
       item: 'ingot',

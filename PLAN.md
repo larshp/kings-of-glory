@@ -14,7 +14,7 @@ The order is intentional: build and validate a thin end-to-end multiplayer slice
 - Gameplay combines automation and production chains, settlement simulation, exploration, expansion, and technological progression.
 - Players cooperate against PvE enemies and environmental threats.
 - TypeScript is the primary language for the client, server, simulation, tools, and shared types.
-- The initial implementation uses PixiJS, React, Vite, Node.js, `ws`, PostgreSQL, pnpm workspaces, and Vitest.
+- The initial implementation uses Canvas 2D, React, Vite, Node.js, `ws`, PostgreSQL, pnpm workspaces, and Vitest.
 - Redis, a separate cache, microservices, and Docker are out of scope initially.
 - The active world lives in the server's simulation memory. This is authoritative runtime state, not a cache. PostgreSQL is the durable source used to restore the world.
 
@@ -37,24 +37,24 @@ Each milestone must produce a playable or verifiable result. New systems should 
 
 These decisions affect saved data and most later systems, so settle them before significant implementation.
 
-- [ ] Create `GAME_DESIGN.md` with the core player loop and explicit non-goals for the first playable release.
-- [ ] Decide whether the global map is finite, expandable, or procedurally unbounded.
-- [ ] Define tile dimensions, elevation rules, chunk dimensions, coordinate limits, and maximum buildable footprint.
-- [ ] Decide which logistics model the first release uses: carriers, roads, belts, or a deliberately limited combination.
-- [ ] Define the initial population model: individual settlers, aggregated workers, or a hybrid.
-- [ ] Define the first production chain from raw resource to useful finished item.
-- [ ] Define how players acquire territory and what prevents construction griefing.
-- [ ] Define the cooperative model: private ownership, settlement groups, shared projects, and resource-transfer permissions.
-- [ ] Define how new players receive a safe starting location without creating a separate world.
-- [ ] Decide what happens to abandoned settlements and inactive accounts.
-- [ ] Define whether simulation continues at full fidelity in areas with no nearby players.
-- [ ] Define fair behavior during server downtime and maintenance. Do not silently grant or remove production unless it is a deliberate game rule.
-- [ ] Define the first PvE threat, its trigger, its target-selection rules, and the conditions for recovery after defeat.
-- [ ] Define a data-reset policy for development, alpha, beta, and public launch. A global persistent world makes resets materially disruptive.
-- [ ] Select supported desktop and mobile browsers and the minimum viewport and hardware targets.
-- [ ] Establish measurable budgets for client frame time, server tick time, memory, initial download size, reconnect time, and bandwidth per player.
-- [ ] Establish an initial target for concurrent players and simulated entities. Treat it as a test target, not an architectural promise.
-- [ ] Record architecture decisions that affect compatibility in `docs/decisions/` using short architecture decision records.
+- [x] Create `GAME_DESIGN.md` with the core player loop and explicit non-goals for the first playable release.
+- [x] Decide whether the global map is finite, expandable, or procedurally unbounded.
+- [x] Define tile dimensions, elevation rules, chunk dimensions, coordinate limits, and maximum buildable footprint.
+- [x] Decide which logistics model the first release uses: carriers, roads, belts, or a deliberately limited combination.
+- [x] Define the initial population model: individual settlers, aggregated workers, or a hybrid.
+- [x] Define the first production chain from raw resource to useful finished item.
+- [x] Define how players acquire territory and what prevents construction griefing.
+- [x] Define the cooperative model: private ownership, settlement groups, shared projects, and resource-transfer permissions.
+- [x] Define how new players receive a safe starting location without creating a separate world.
+- [x] Decide what happens to abandoned settlements and inactive accounts.
+- [x] Define whether simulation continues at full fidelity in areas with no nearby players.
+- [x] Define fair behavior during server downtime and maintenance. Do not silently grant or remove production unless it is a deliberate game rule.
+- [x] Define the first PvE threat, its trigger, its target-selection rules, and the conditions for recovery after defeat.
+- [x] Define a data-reset policy for development, alpha, beta, and public launch. A global persistent world makes resets materially disruptive.
+- [x] Select supported desktop and mobile browsers and the minimum viewport and hardware targets.
+- [x] Establish measurable budgets for client frame time, server tick time, memory, initial download size, reconnect time, and bandwidth per player.
+- [x] Establish an initial target for concurrent players and simulated entities. Treat it as a test target, not an architectural promise.
+- [x] Record architecture decisions that affect compatibility in `docs/decisions/` using short architecture decision records.
 
 Exit criteria:
 
@@ -64,19 +64,19 @@ Exit criteria:
 
 ## Phase 1: Bootstrap the workspace
 
-- [ ] Pin a Node.js version and the pnpm package-manager version.
-- [ ] Create `pnpm-workspace.yaml` and a root `package.json` with scripts for development, building, testing, linting, type-checking, and formatting.
-- [ ] Add a shared strict TypeScript configuration. Enable strict null checking and disallow unchecked indexed access.
-- [ ] Create `apps/client` with Vite, React, and PixiJS.
-- [ ] Create `apps/server` with Node.js and `ws`.
-- [ ] Create initial packages for `simulation`, `protocol`, `content`, `pathfinding`, and `server-runtime`.
-- [ ] Configure package boundaries so `simulation` cannot import browser, Node.js, networking, or persistence APIs.
-- [ ] Add ESLint and formatting rules without allowing them to rewrite unrelated files automatically.
-- [ ] Configure Vitest for unit and integration tests.
-- [ ] Add environment-variable validation for the server. Fail at startup with actionable errors when required settings are missing.
-- [ ] Add structured server logging with levels and stable event names.
-- [ ] Add continuous integration that installs locked dependencies and runs formatting checks, linting, type-checking, tests, and production builds.
-- [ ] Document local prerequisites and startup commands in the README.
+- [x] Pin a Node.js version and the pnpm package-manager version.
+- [x] Create `pnpm-workspace.yaml` and a root `package.json` with scripts for development, building, testing, linting, type-checking, and formatting.
+- [x] Add a shared strict TypeScript configuration. Enable strict null checking and disallow unchecked indexed access.
+- [x] Create `apps/client` with Vite, React, and a Canvas 2D renderer.
+- [x] Create `apps/server` with Node.js and `ws`.
+- [x] Create initial packages for `simulation`, `protocol`, `content`, `pathfinding`, and `server-runtime`.
+- [x] Configure package boundaries so `simulation` cannot import browser, Node.js, networking, or persistence APIs.
+- [x] Add ESLint and formatting rules without allowing them to rewrite unrelated files automatically.
+- [x] Configure Vitest for unit and integration tests.
+- [x] Add environment-variable validation for the server. Fail at startup with actionable errors when required settings are missing.
+- [x] Add structured server logging with levels and stable event names.
+- [x] Add continuous integration that installs locked dependencies and runs formatting checks, linting, type-checking, tests, and production builds.
+- [x] Document local prerequisites and startup commands in the README.
 
 Exit criteria:
 
@@ -87,23 +87,23 @@ Exit criteria:
 
 ## Phase 2: Build the deterministic simulation kernel
 
-- [ ] Define branded types for entity IDs, player IDs, world IDs, chunk coordinates, tile coordinates, and simulation ticks.
-- [ ] Define isometric world coordinates independently from screen coordinates.
-- [ ] Use integers or fixed-point numbers for state that must remain stable across ticks and replays.
-- [ ] Implement a seeded pseudo-random number generator whose state is serializable.
-- [ ] Implement the fixed-timestep simulation loop without networking or rendering dependencies.
-- [ ] Define an explicit tick pipeline, for example: accept commands, validate, move, transport, produce, satisfy needs, run AI, resolve combat, emit events, and mark persistence changes.
-- [ ] Define a command envelope containing command ID, player ID, client sequence, intended tick if needed, command type, and payload.
-- [ ] Define domain events separately from network messages.
-- [ ] Implement command validation with stable rejection codes suitable for UI messages.
-- [ ] Implement entity registries and component data using plain serializable data. Do not adopt an ECS framework unless profiling or system complexity justifies it.
-- [ ] Implement chunk addressing, neighboring-chunk lookup, and entity membership.
-- [ ] Implement dirty tracking for changed entities and chunks.
-- [ ] Implement snapshot serialization and deserialization with an explicit schema version.
-- [ ] Implement a stable state hash for replay and desynchronization tests.
-- [ ] Add tests proving identical initial state and command sequences produce identical hashes.
-- [ ] Add invariant tests for unique IDs, valid ownership, non-negative inventory, valid coordinates, and entity-to-chunk membership.
-- [ ] Add a headless simulation runner that can advance thousands of ticks quickly for testing.
+- [x] Define branded types for entity IDs, player IDs, world IDs, chunk coordinates, tile coordinates, and simulation ticks.
+- [x] Define isometric world coordinates independently from screen coordinates.
+- [x] Use integers or fixed-point numbers for state that must remain stable across ticks and replays.
+- [x] Implement a seeded pseudo-random number generator whose state is serializable.
+- [x] Implement the fixed-timestep simulation loop without networking or rendering dependencies.
+- [x] Define an explicit tick pipeline, for example: accept commands, validate, move, transport, produce, satisfy needs, run AI, resolve combat, emit events, and mark persistence changes.
+- [x] Define a command envelope containing command ID, player ID, client sequence, intended tick if needed, command type, and payload.
+- [x] Define domain events separately from network messages.
+- [x] Implement command validation with stable rejection codes suitable for UI messages.
+- [x] Implement entity registries and component data using plain serializable data. Do not adopt an ECS framework unless profiling or system complexity justifies it.
+- [x] Implement chunk addressing, neighboring-chunk lookup, and entity membership.
+- [x] Implement dirty tracking for changed entities and chunks.
+- [x] Implement snapshot serialization and deserialization with an explicit schema version.
+- [x] Implement a stable state hash for replay and desynchronization tests.
+- [x] Add tests proving identical initial state and command sequences produce identical hashes.
+- [x] Add invariant tests for unique IDs, valid ownership, non-negative inventory, valid coordinates, and entity-to-chunk membership.
+- [x] Add a headless simulation runner that can advance thousands of ticks quickly for testing.
 
 Exit criteria:
 
@@ -113,16 +113,16 @@ Exit criteria:
 
 ## Phase 3: Implement the isometric browser client
 
-- [ ] Bootstrap one PixiJS application inside the React shell. React owns menus and HUD; PixiJS owns the world canvas.
-- [ ] Implement world-to-screen and screen-to-world projection functions with round-trip tests.
-- [ ] Render a small tile grid with placeholder terrain assets.
-- [ ] Implement camera pan, zoom, viewport resize, bounds, and configurable input bindings.
-- [ ] Implement accurate tile and entity picking under the pointer.
+- [x] Bootstrap one Canvas 2D renderer inside the React shell. React owns menus and HUD; the renderer owns the world canvas.
+- [x] Implement world-to-screen and screen-to-world projection functions with round-trip tests.
+- [x] Render a small tile grid with placeholder terrain assets.
+- [x] Implement camera pan, zoom, viewport resize, bounds, and configurable input bindings.
+- [x] Implement accurate tile and entity picking under the pointer.
 - [ ] Implement sprite layering for terrain, buildings, units, effects, and selection markers.
-- [ ] Avoid sorting the entire world every frame. Sort visible objects by stable isometric depth keys and update only when required.
+- [x] Avoid sorting the entire world every frame. Sort visible objects by stable isometric depth keys and update only when required.
 - [ ] Implement chunk-based render containers, viewport culling, and object pooling where measurements justify it.
-- [ ] Add selection, hover, placement preview, valid/invalid placement feedback, and cancellation controls.
-- [ ] Add a React HUD shell with connection status, selected-object details, resources, notifications, and a build menu placeholder.
+- [x] Add selection, hover, placement preview, valid/invalid placement feedback, and cancellation controls.
+- [x] Add a React HUD shell with connection status, selected-object details, resources, notifications, and a build menu placeholder.
 - [ ] Create an asset manifest and loading screen with progress and error handling.
 - [ ] Use texture atlases and establish asset naming, scale, origin, and animation conventions.
 - [ ] Add debug overlays for coordinates, chunks, entity IDs, paths, frame time, and visible-object count.
@@ -136,22 +136,22 @@ Exit criteria:
 
 ## Phase 4: Connect every player to the global world
 
-- [ ] Define a versioned network protocol in `packages/protocol`.
-- [ ] Start with inspectable JSON messages. Move high-volume messages to binary encoding only after measurement.
+- [x] Define a versioned network protocol in `packages/protocol`.
+- [x] Start with inspectable JSON messages. Move high-volume messages to binary encoding only after measurement.
 - [ ] Define handshake, authentication, world bootstrap, chunk snapshot, state delta, command, acknowledgement, rejection, heartbeat, resync, maintenance, and server-error messages.
-- [ ] Implement one global world host in the server. Do not implement room selection or matchmaking.
-- [ ] Add development authentication that assigns stable test players. Replace it before public access.
-- [ ] Implement monotonically increasing server tick and state-version numbers.
-- [ ] Implement per-connection command sequence numbers and idempotency so retries do not apply a command twice.
-- [ ] Validate message shape, size, frequency, permissions, coordinates, and game preconditions on the server.
-- [ ] Implement interest management based on visible chunks plus explicitly relevant owned or observed entities.
-- [ ] Send a complete snapshot when a chunk becomes relevant, then versioned deltas while it remains relevant.
+- [x] Implement one global world host in the server. Do not implement room selection or matchmaking.
+- [x] Add development authentication that assigns stable test players. Replace it before public access.
+- [x] Implement monotonically increasing server tick and state-version numbers.
+- [x] Implement per-connection command sequence numbers and idempotency so retries do not apply a command twice.
+- [x] Validate message shape, size, frequency, permissions, coordinates, and game preconditions on the server.
+- [x] Implement interest management based on visible chunks plus explicitly relevant owned or observed entities.
+- [x] Send a complete snapshot when a chunk becomes relevant, then versioned deltas while it remains relevant.
 - [ ] Handle entities moving between chunks without duplication or disappearance.
-- [ ] Add acknowledgements and user-facing rejection reasons for player commands.
-- [ ] Implement heartbeat, timeout, disconnect cleanup, exponential reconnect, and full resynchronization.
-- [ ] Implement backpressure limits. Disconnect or degrade slow clients before their outgoing queues exhaust server memory.
-- [ ] Ensure reconnecting players return to the same global world and regain their player state.
-- [ ] Add protocol compatibility checks so an incompatible client receives an upgrade message instead of corrupted state.
+- [x] Add acknowledgements and user-facing rejection reasons for player commands.
+- [x] Implement heartbeat, timeout, disconnect cleanup, exponential reconnect, and full resynchronization.
+- [x] Implement backpressure limits. Disconnect or degrade slow clients before their outgoing queues exhaust server memory.
+- [x] Ensure reconnecting players return to the same global world and regain their player state.
+- [x] Add protocol compatibility checks so an incompatible client receives an upgrade message instead of corrupted state.
 - [ ] Add integration tests with multiple simulated clients, duplicate commands, reordered responses, disconnects, and reconnects.
 
 Exit criteria:
@@ -162,24 +162,24 @@ Exit criteria:
 
 ## Phase 5: Add durable global-world persistence
 
-- [ ] Select and document a PostgreSQL version supported in development and production.
-- [ ] Add a migration tool and make schema migrations part of server startup or an explicit deployment step.
-- [ ] Create tables for accounts, sessions, players, the single production world, settlements, completed checkpoints, chunk snapshots, command journal entries, and administrative audit events.
-- [ ] Store schema versions with all serialized snapshots.
-- [ ] Build a persistence interface outside `simulation` and a PostgreSQL implementation inside `server-runtime`.
-- [ ] Create the single world exactly once and reject accidental creation of a second production world.
-- [ ] Implement dirty-chunk checkpointing at a completed simulation tick.
-- [ ] Write checkpoints under a new checkpoint ID and mark them complete only after all required records are durable. Restore only completed checkpoints.
-- [ ] Journal accepted external commands with their target tick before they are considered durable.
+- [x] Select and document a PostgreSQL version supported in development and production.
+- [x] Add a migration tool and make schema migrations part of server startup or an explicit deployment step.
+- [x] Create tables for accounts, sessions, players, the single production world, settlements, completed checkpoints, chunk snapshots, command journal entries, and administrative audit events.
+- [x] Store schema versions with all serialized snapshots.
+- [x] Build a persistence interface outside `simulation` and a PostgreSQL implementation inside `server-runtime`.
+- [x] Create the single world exactly once and reject accidental creation of a second production world.
+- [x] Implement dirty-chunk checkpointing at a completed simulation tick.
+- [x] Write checkpoints under a new checkpoint ID and mark them complete only after all required records are durable. Restore only completed checkpoints.
+- [x] Journal accepted external commands with their target tick before they are considered durable.
 - [ ] Ensure all nondeterministic administrative or wall-clock inputs enter the simulation as journaled commands or events.
-- [ ] On startup, load the latest completed checkpoint and replay later journal entries.
-- [ ] Persist player identity, ownership, last position, settlement references, and reconnect information.
-- [ ] Define retention and compaction for old checkpoints and journal entries.
-- [ ] Add graceful shutdown that stops accepting commands, completes a checkpoint, closes connections with a maintenance reason, and exits within a bounded time.
-- [ ] Add crash-recovery tests that terminate the server during checkpoint creation and verify the previous completed checkpoint remains valid.
+- [x] On startup, load the latest completed checkpoint and replay later journal entries.
+- [x] Persist player identity, ownership, last position, settlement references, and reconnect information.
+- [x] Define retention and compaction for old checkpoints and journal entries.
+- [x] Add graceful shutdown that stops accepting commands, completes a checkpoint, closes connections with a maintenance reason, and exits within a bounded time.
+- [x] Add crash-recovery tests that terminate the server during checkpoint creation and verify the previous completed checkpoint remains valid.
 - [ ] Add migration tests using a database created from the oldest supported schema.
 - [ ] Automate PostgreSQL backups and perform a documented restore drill before any public persistent test.
-- [ ] Record and monitor recovery point and recovery time objectives.
+- [x] Record and monitor recovery point and recovery time objectives.
 
 Exit criteria:
 
@@ -189,20 +189,20 @@ Exit criteria:
 
 ## Phase 6: Deliver the first end-to-end gameplay vertical slice
 
-- [ ] Generate deterministic terrain and one mineable resource type by chunk.
-- [ ] Implement collision and buildability data for terrain tiles.
-- [ ] Create a safe player-spawn algorithm that reserves space in the one global world.
-- [ ] Give each new player a minimal settlement center and starting inventory.
-- [ ] Implement one gathering action with server-side range, ownership, capacity, and availability checks.
-- [ ] Implement one placeable production building.
-- [ ] Implement construction cost, build time, completion, cancellation, and demolition.
-- [ ] Implement inventories with item definitions, stack limits, transfer rules, and capacity checks.
-- [ ] Implement one recipe that converts a gathered resource into a useful item over time.
-- [ ] Display building state, recipe progress, inventory, and errors in the browser.
-- [ ] Add one simple PvE hazard or enemy that damages a building and can be stopped or repaired.
-- [ ] Persist and restore the complete slice.
-- [ ] Add a scripted two-player scenario covering gathering, building, production, cooperation, threat response, disconnect, and restart.
-- [ ] Profile the slice before adding more systems and record the first baseline metrics.
+- [x] Generate deterministic terrain and one mineable resource type by chunk.
+- [x] Implement collision and buildability data for terrain tiles.
+- [x] Create a safe player-spawn algorithm that reserves space in the one global world.
+- [x] Give each new player a minimal settlement center and starting inventory.
+- [x] Implement one gathering action with server-side range, ownership, capacity, and availability checks.
+- [x] Implement one placeable production building.
+- [x] Implement construction cost, build time, completion, cancellation, and demolition.
+- [x] Implement inventories with item definitions, stack limits, transfer rules, and capacity checks.
+- [x] Implement one recipe that converts a gathered resource into a useful item over time.
+- [x] Display building state, recipe progress, inventory, and errors in the browser.
+- [x] Add one simple PvE hazard or enemy that damages a building and can be stopped or repaired.
+- [x] Persist and restore the complete slice.
+- [x] Add a scripted two-player scenario covering gathering, building, production, cooperation, threat response, disconnect, and restart.
+- [x] Profile the slice before adding more systems and record the first baseline metrics.
 
 Exit criteria:
 
@@ -345,9 +345,9 @@ Exit criteria:
 - [ ] Add server metrics for tick duration by subsystem, command latency, connected players, entity count, active chunks, path queue, snapshot time, journal lag, memory, and outgoing queue size.
 - [ ] Add client metrics for frame time, render-object count, active chunks, asset memory, message rate, and update-application time.
 - [ ] Build headless bot clients that gather, build, expand, research, trade, reconnect, and react to threats.
-- [ ] Build reproducible load scenarios at the target player and entity counts.
+- [x] Build reproducible load scenarios at the target player and entity counts.
 - [ ] Test hot spots where many players observe or modify the same chunks.
-- [ ] Profile before optimizing and record benchmark inputs with every performance claim.
+- [x] Profile before optimizing and record benchmark inputs with every performance claim.
 - [ ] Optimize interest management, delta construction, spatial indexes, dirty tracking, and serialization based on profiles.
 - [ ] Add level-of-detail simulation for inactive regions only if the game design permits equivalent outcomes.
 - [ ] Batch or budget pathfinding, AI planning, world generation, persistence, and large administrative operations.

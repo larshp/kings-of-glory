@@ -3,12 +3,15 @@ import {
   type ClientWorldDelta,
   type ClientWorldState,
   type ServerMessage,
+  type TerrainTile,
 } from '@kings/protocol';
 import {
   advanceTick,
   applyCommand,
   createWorld,
+  chunkKeyFor,
   deserializeWorld,
+  diffWorld,
   joinPlayer,
   snapshot,
   terrainAt,
@@ -28,6 +31,8 @@ export interface WorldHostMetrics {
   readonly lastCommandDurationMs: number;
   readonly checkpointFailures: number;
   readonly lastCheckpointDurationMs: number;
+  readonly lastCheckpointTick: number;
+  readonly lastRecoveryDurationMs: number;
   readonly fullStateMessages: number;
   readonly fullStateBytes: number;
   readonly deltaStateMessages: number;
@@ -45,7 +50,8 @@ const deltaFrom = (previous: ClientWorldState, next: ClientWorldState): ClientWo
 
 export class GlobalWorldHost {
   #world: WorldState;
-  #connections = new Map<Connection, string>();
+  #checkpointBaseline: WorldState;
+  #connections = new Map<Connection, { playerId: string; visibleChunks?: Set<string> }>();
   #clientStates = new Map<Connection, { version: number; state: ClientWorldState }>();
   #version = 0;
   #checkpointInProgress = false;
@@ -55,6 +61,8 @@ export class GlobalWorldHost {
   #lastCommandDurationMs = 0;
   #checkpointFailures = 0;
   #lastCheckpointDurationMs = 0;
+  #lastCheckpointTick = 0;
+  #lastRecoveryDurationMs = 0;
   #fullStateMessages = 0;
   #fullStateBytes = 0;
   #deltaStateMessages = 0;
@@ -67,6 +75,7 @@ export class GlobalWorldHost {
     private readonly checkpointIntervalTicks = 300,
   ) {
     this.#world = createWorld(seed);
+    this.#checkpointBaseline = snapshot(this.#world);
   }
 
   get world(): WorldState {
@@ -83,6 +92,8 @@ export class GlobalWorldHost {
       lastCommandDurationMs: this.#lastCommandDurationMs,
       checkpointFailures: this.#checkpointFailures,
       lastCheckpointDurationMs: this.#lastCheckpointDurationMs,
+      lastCheckpointTick: this.#lastCheckpointTick,
+      lastRecoveryDurationMs: this.#lastRecoveryDurationMs,
       fullStateMessages: this.#fullStateMessages,
       fullStateBytes: this.#fullStateBytes,
       deltaStateMessages: this.#deltaStateMessages,
@@ -92,13 +103,20 @@ export class GlobalWorldHost {
   }
 
   async restore(): Promise<void> {
-    await this.persistence.migrate();
-    const checkpoint = await this.persistence.loadLatestCheckpoint();
-    if (!checkpoint) return;
-    this.#world = deserializeWorld(checkpoint.state);
-    for (const entry of await this.persistence.loadJournalAfter(this.#world.tick)) {
-      while (this.#world.tick < entry.targetTick) advanceTick(this.#world);
-      applyCommand(this.#world, entry.command);
+    const startedAt = performance.now();
+    try {
+      await this.persistence.migrate();
+      const checkpoint = await this.persistence.loadLatestCheckpoint();
+      if (!checkpoint) return;
+      this.#world = deserializeWorld(checkpoint.state);
+      this.#checkpointBaseline = snapshot(this.#world);
+      this.#lastCheckpointTick = checkpoint.tick;
+      for (const entry of await this.persistence.loadJournalAfter(this.#world.tick)) {
+        while (this.#world.tick < entry.targetTick) advanceTick(this.#world);
+        applyCommand(this.#world, entry.command);
+      }
+    } finally {
+      this.#lastRecoveryDurationMs = performance.now() - startedAt;
     }
   }
 
@@ -107,8 +125,8 @@ export class GlobalWorldHost {
     const joined = joinPlayer(candidate, playerId);
     if (joined.length > 0) await this.saveCheckpoint(candidate);
     this.#world = candidate;
-    this.#connections.set(connection, playerId);
-    const state = this.clientStateFor(playerId);
+    this.#connections.set(connection, { playerId });
+    const state = this.clientStateFor(connection, playerId);
     this.#clientStates.set(connection, { version: this.#version, state });
     this.sendState(connection, {
       type: 'welcome',
@@ -126,9 +144,19 @@ export class GlobalWorldHost {
   }
 
   resync(connection: Connection): void {
-    const playerId = this.#connections.get(connection);
+    const playerId = this.#connections.get(connection)?.playerId;
     if (!playerId) return;
     this.sendFullState(connection, playerId);
+  }
+
+  /** Replaces the viewport chunks a client is observing and immediately snapshots new chunks. */
+  setInterest(connection: Connection, chunks: readonly { x: number; y: number }[]): void {
+    const connectionState = this.#connections.get(connection);
+    if (!connectionState) return;
+    const visibleChunks = new Set(chunks.map((chunk) => chunkKeyFor(chunk.x * 16, chunk.y * 16)));
+    const added = [...visibleChunks].some((chunk) => !connectionState.visibleChunks?.has(chunk));
+    connectionState.visibleChunks = visibleChunks;
+    if (added) this.sendFullState(connection, connectionState.playerId);
   }
 
   async command(
@@ -136,7 +164,7 @@ export class GlobalWorldHost {
     command: Parameters<typeof applyCommand>[1],
   ): Promise<void> {
     const startedAt = performance.now();
-    const playerId = this.#connections.get(connection);
+    const playerId = this.#connections.get(connection)?.playerId;
     try {
       if (!playerId || playerId !== command.playerId) {
         this.#rejectedCommands += 1;
@@ -194,12 +222,12 @@ export class GlobalWorldHost {
 
   private broadcastState(): void {
     this.#version += 1;
-    for (const [connection, playerId] of this.#connections)
+    for (const [connection, { playerId }] of this.#connections)
       this.sendDeltaState(connection, playerId);
   }
 
   private sendDeltaState(connection: Connection, playerId: string): void {
-    const state = this.clientStateFor(playerId);
+    const state = this.clientStateFor(connection, playerId);
     const previous = this.#clientStates.get(connection);
     if (!previous || previous.version !== this.#version - 1) {
       this.#clientStates.set(connection, { version: this.#version, state });
@@ -216,28 +244,38 @@ export class GlobalWorldHost {
   }
 
   private sendFullState(connection: Connection, playerId: string): void {
-    const state = this.clientStateFor(playerId);
+    const state = this.clientStateFor(connection, playerId);
     this.#clientStates.set(connection, { version: this.#version, state });
     this.sendState(connection, { type: 'state', version: this.#version, state });
   }
 
-  private clientStateFor(playerId: string): ClientWorldState {
+  private clientStateFor(connection: Connection, playerId: string): ClientWorldState {
     const startedAt = performance.now();
     try {
-      return this.stateFor(playerId);
+      return this.stateFor(playerId, this.#connections.get(connection)?.visibleChunks);
     } finally {
       this.#lastStateBuildDurationMs = performance.now() - startedAt;
     }
   }
 
-  private stateFor(playerId: string): ClientWorldState {
+  private stateFor(playerId: string, requestedChunks?: ReadonlySet<string>): ClientWorldState {
     const state = snapshot(this.#world);
+    const territory: Record<string, string> = Object.fromEntries(
+      Object.values(state.players).flatMap((owner) =>
+        Object.keys(owner.territoryCells).map((sector) => [sector, owner.id]),
+      ),
+    );
     const player = state.players[playerId];
     if (!player) {
-      const { seed, ...visibleState } = state;
+      const { seed, randomState, ...visibleState } = state;
       void seed;
-      return { ...visibleState, terrain: {} };
+      void randomState;
+      return { ...visibleState, terrain: {}, territory };
     }
+    const visibleChunks = requestedChunks ?? new Set(Object.keys(player.exploredChunks));
+    const relevantChunks = new Set(
+      [...visibleChunks].filter((chunk) => player.exploredChunks[chunk]),
+    );
     state.players = { [playerId]: player };
     state.processedCommands = [];
     state.minedTiles = Object.fromEntries(
@@ -245,7 +283,7 @@ export class GlobalWorldHost {
         const [xText, yText] = tile.split(':');
         const x = Number(xText);
         const y = Number(yText);
-        return player.exploredChunks[`${Math.floor(x / 16)}:${Math.floor(y / 16)}`];
+        return relevantChunks.has(chunkKeyFor(x, y));
       }),
     );
     state.transfers = state.transfers.filter(
@@ -257,17 +295,17 @@ export class GlobalWorldHost {
       ),
     );
     for (const [id, building] of Object.entries(state.buildings)) {
-      const chunk = `${Math.floor(building.x / 16)}:${Math.floor(building.y / 16)}`;
+      const chunk = chunkKeyFor(building.x, building.y);
       const sharedRoles = Object.values(state.settlements)
         .filter((settlement) => settlement.members[building.ownerId])
         .map((settlement) => settlement.members[playerId])
         .filter((role): role is 'owner' | 'builder' | 'logistics' | 'member' => Boolean(role));
       const isShared = sharedRoles.length > 0;
       const canViewInventory = sharedRoles.some((role) => role === 'owner' || role === 'logistics');
-      if (building.ownerId !== playerId && !isShared && !player.exploredChunks[chunk])
+      if (building.ownerId !== playerId && !isShared && !relevantChunks.has(chunk))
         delete state.buildings[id];
       else if (building.ownerId !== playerId && !canViewInventory)
-        building.inventory = { ore: 0, wood: 0, ingot: 0 };
+        building.inventory = { ore: 0, wood: 0, ingot: 0, tool: 0 };
     }
     for (const [id, threat] of Object.entries(state.threats))
       if (!state.buildings[threat.targetBuildingId]) delete state.threats[id];
@@ -277,8 +315,8 @@ export class GlobalWorldHost {
           state.buildings[link.sourceBuildingId] && state.buildings[link.targetBuildingId],
       ),
     );
-    const terrain: Record<string, 'grass' | 'water' | 'ore'> = {};
-    for (const chunk of Object.keys(player.exploredChunks)) {
+    const terrain: Record<string, TerrainTile> = {};
+    for (const chunk of relevantChunks) {
       const [xText, yText] = chunk.split(':');
       const chunkX = Number(xText);
       const chunkY = Number(yText);
@@ -289,9 +327,10 @@ export class GlobalWorldHost {
           terrain[`${x}:${y}`] = terrainAt(this.#world.seed, x, y);
         }
     }
-    const { seed, ...visibleState } = state;
+    const { seed, randomState, ...visibleState } = state;
     void seed;
-    return { ...visibleState, terrain };
+    void randomState;
+    return { ...visibleState, terrain, territory };
   }
 
   private send(connection: Connection, message: ServerMessage): void {
@@ -317,7 +356,10 @@ export class GlobalWorldHost {
   private async saveCheckpoint(state = this.#world): Promise<void> {
     const startedAt = performance.now();
     try {
-      await this.persistence.saveCheckpoint(state);
+      const dirtyChunks = diffWorld(this.#checkpointBaseline, state).chunks;
+      await this.persistence.saveCheckpoint(state, dirtyChunks);
+      this.#checkpointBaseline = snapshot(state);
+      this.#lastCheckpointTick = state.tick;
     } catch (error) {
       this.#checkpointFailures += 1;
       throw error;
@@ -330,8 +372,10 @@ export class GlobalWorldHost {
 export { parseEnvironment, type ServerEnvironment } from './env.js';
 export {
   createPostgresWorldPersistence,
+  INITIAL_MIGRATION_SQL,
   MemoryWorldPersistence,
   PostgresWorldPersistence,
+  snapshotDirtyChunk,
   type CompletedCheckpoint,
   type JournalEntry,
   type WorldPersistence,

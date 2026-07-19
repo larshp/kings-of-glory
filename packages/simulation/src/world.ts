@@ -9,17 +9,22 @@ import {
 } from './commands.js';
 import {
   buildings as buildingDefinitions,
+  environmentalEvents,
+  recipes,
   technologies,
   threats as threatDefinitions,
   type TechnologyId,
 } from '@kings/content';
 import { findPath, manhattanDistance } from '@kings/pathfinding';
 import { stableHash } from './hash.js';
+import { createRandomState, takeRandomIndex, type RandomState } from './random.js';
+import { chunkKeyFor } from './spatial.js';
 
 export interface Inventory {
   ore: number;
   wood: number;
   ingot: number;
+  tool: number;
 }
 export type ItemId = keyof Inventory;
 export interface Plot {
@@ -51,7 +56,8 @@ export interface PlayerState {
 }
 export interface Building {
   id: BuildingId;
-  kind: 'settlement-center' | 'smelter' | 'storage' | 'housing' | 'watchtower';
+  kind:
+    'settlement-center' | 'smelter' | 'workshop' | 'storage' | 'housing' | 'hearth' | 'watchtower';
   ownerId: PlayerId;
   x: number;
   y: number;
@@ -92,11 +98,13 @@ export interface LogisticsLink {
   ownerId: PlayerId;
   sourceBuildingId: BuildingId;
   targetBuildingId: BuildingId;
-  item: 'ore';
+  item: ItemId;
 }
 export interface WorldState {
-  schemaVersion: 11;
+  schemaVersion: 15;
   seed: number;
+  /** Server-only deterministic PRNG state. Never expose this to clients. */
+  randomState: RandomState;
   tick: number;
   players: Record<string, PlayerState>;
   buildings: Record<string, Building>;
@@ -125,32 +133,126 @@ export interface WorldEvent {
     | 'settlementMemberChanged';
   playerId?: PlayerId;
   buildingId?: BuildingId;
+  environmentalEventId?: keyof typeof environmentalEvents;
   threatId?: string;
   targetPlayerId?: PlayerId;
 }
 
+/**
+ * The authoritative order for one completed tick. Commands are validated before
+ * this function is called; every phase below observes the results of the phases
+ * before it. Keep this list and `advanceTick` in lock-step when adding systems.
+ */
+export const TICK_PIPELINE = [
+  'advance-clock',
+  'research-and-population',
+  'construction-and-production',
+  'environmental-events',
+  'logistics',
+  'threat-spawning',
+  'threat-navigation-and-combat',
+  'emit-events-and-mark-changes',
+] as const;
+export type TickPhase = (typeof TICK_PIPELINE)[number];
+
 const INVENTORY_CAPACITY = 100;
 const ORE_PER_NODE = 10;
-const CHUNK_SIZE = 16;
 const TERRITORY_CELL_SIZE = 8;
-const emptyInventory = (): Inventory => ({ ore: 0, wood: 0, ingot: 0 });
+const RESOURCE_SECTOR_SIZE = 8;
+const emptyInventory = (): Inventory => ({ ore: 0, wood: 0, ingot: 0, tool: 0 });
 const tileKey = (x: number, y: number) => `${x}:${y}`;
-const terrainNoise = (seed: number, x: number, y: number) =>
-  Math.abs(Math.imul(seed ^ x, 73856093) ^ Math.imul(y, 19349663)) % 23;
-export const terrainAt = (seed: number, x: number, y: number): 'grass' | 'water' | 'ore' => {
+const coordinateNoise = (seed: number, x: number, y: number) =>
+  Math.abs(Math.imul(seed ^ x, 73856093) ^ Math.imul(y, 19349663));
+const terrainNoise = (seed: number, x: number, y: number) => coordinateNoise(seed, x, y) % 23;
+const resourceNodeAt = (seed: number, x: number, y: number): 'ore' | 'wood' | undefined => {
+  const sectorX = Math.floor(x / RESOURCE_SECTOR_SIZE);
+  const sectorY = Math.floor(y / RESOURCE_SECTOR_SIZE);
+  const oreX = coordinateNoise(seed ^ 0x4f1bbcdd, sectorX, sectorY) % RESOURCE_SECTOR_SIZE;
+  const oreY = coordinateNoise(seed ^ 0x19a4e6d3, sectorX, sectorY) % RESOURCE_SECTOR_SIZE;
+  let woodX = coordinateNoise(seed ^ 0x74e1a2b9, sectorX, sectorY) % RESOURCE_SECTOR_SIZE;
+  const woodY = coordinateNoise(seed ^ 0x2b6d9c41, sectorX, sectorY) % RESOURCE_SECTOR_SIZE;
+  if (woodX === oreX && woodY === oreY) woodX = (woodX + 1) % RESOURCE_SECTOR_SIZE;
+  const localX = x - sectorX * RESOURCE_SECTOR_SIZE;
+  const localY = y - sectorY * RESOURCE_SECTOR_SIZE;
+  if (localX === oreX && localY === oreY) return 'ore';
+  if (localX === woodX && localY === woodY) return 'wood';
+  return undefined;
+};
+export const terrainAt = (
+  seed: number,
+  x: number,
+  y: number,
+): 'grass' | 'water' | 'ore' | 'wood' => {
+  const resource = resourceNodeAt(seed, x, y);
+  if (resource) return resource;
   const value = terrainNoise(seed, x, y);
   if (value === 0) return 'water';
-  return value % 4 === 0 ? 'ore' : 'grass';
+  return 'grass';
 };
-const inventoryTotal = (inventory: Inventory) => inventory.ore + inventory.wood + inventory.ingot;
-const woodCostFor = (kind: Building['kind']) => (kind === 'smelter' ? 3 : 2);
+/** Finds a deterministic reachable ore deposit around a point, if one exists within the range. */
+export const nearestOreTile = (seed: number, x: number, y: number, range: number) => {
+  return nearestResourceTile(seed, x, y, range, 'ore');
+};
+export const nearestResourceTile = (
+  seed: number,
+  x: number,
+  y: number,
+  range: number,
+  resource: 'ore' | 'wood',
+) => {
+  for (let distance = 0; distance <= range; distance += 1)
+    for (let offsetX = -distance; offsetX <= distance; offsetX += 1) {
+      const offsetY = distance - Math.abs(offsetX);
+      const candidates = offsetY === 0 ? [y] : [y - offsetY, y + offsetY];
+      for (const candidateY of candidates) {
+        const candidateX = x + offsetX;
+        if (terrainAt(seed, candidateX, candidateY) === resource)
+          return { x: candidateX, y: candidateY };
+      }
+    }
+  return undefined;
+};
+const inventoryTotal = (inventory: Inventory) =>
+  inventory.ore + inventory.wood + inventory.ingot + inventory.tool;
+const inventoryItems: readonly ItemId[] = ['ore', 'wood', 'ingot', 'tool'];
+const hasInvalidInventory = (inventory: Inventory) =>
+  inventoryItems.some((item) => !Number.isSafeInteger(inventory[item]) || inventory[item] < 0);
+const woodCostFor = (kind: Building['kind']) => buildingDefinitions[kind].cost.wood;
 const canStore = (inventory: Inventory, capacity: number, item: ItemId, amount: number) =>
   Number.isInteger(amount) &&
   amount > 0 &&
   inventoryTotal(inventory) + amount <= capacity &&
   inventory[item] + amount <= INVENTORY_CAPACITY;
+type ProductionRecipe = {
+  readonly input: Readonly<Partial<Record<ItemId, number>>>;
+  readonly output: Readonly<Partial<Record<ItemId, number>>>;
+  readonly ticks: number;
+};
+const recipeFor = (kind: Building['kind']): ProductionRecipe | undefined => {
+  const definition = buildingDefinitions[kind];
+  if (!('recipe' in definition)) return undefined;
+  return Object.values(recipes).find((recipe) => recipe.id === definition.recipe);
+};
+const isProducer = (kind: Building['kind']) => recipeFor(kind) !== undefined;
+const acceptsRecipeInput = (building: Building, item: ItemId) =>
+  Boolean(recipeFor(building.kind)?.input[item]);
+const canStartRecipe = (building: Building, recipe: ProductionRecipe) =>
+  Object.entries(recipe.input).every(
+    ([item, amount]) => building.inventory[item as ItemId] >= (amount ?? 0),
+  ) &&
+  Object.entries(recipe.output).every(([item, amount]) =>
+    canStore(building.inventory, building.inventoryCapacity, item as ItemId, amount ?? 0),
+  );
+const consumeRecipe = (building: Building, recipe: ProductionRecipe) => {
+  for (const [item, amount] of Object.entries(recipe.input))
+    building.inventory[item as ItemId] -= amount ?? 0;
+};
+const produceRecipe = (building: Building, recipe: ProductionRecipe) => {
+  for (const [item, amount] of Object.entries(recipe.output))
+    building.inventory[item as ItemId] += amount ?? 0;
+};
 const floorDiv = (value: number, divisor: number) => Math.floor(value / divisor);
-const chunkKey = (x: number, y: number) => `${floorDiv(x, CHUNK_SIZE)}:${floorDiv(y, CHUNK_SIZE)}`;
+const chunkKey = (x: number, y: number) => chunkKeyFor(x, y);
 const territoryKey = (x: number, y: number) =>
   `${floorDiv(x, TERRITORY_CELL_SIZE)}:${floorDiv(y, TERRITORY_CELL_SIZE)}`;
 const territoryNeighbors = (key: string) => {
@@ -160,7 +262,7 @@ const territoryNeighbors = (key: string) => {
   return [`${x + 1}:${y}`, `${x - 1}:${y}`, `${x}:${y + 1}`, `${x}:${y - 1}`];
 };
 
-const plotFor = (ordinal: number): Plot => {
+const plotCandidate = (ordinal: number): Plot => {
   const radius = Math.floor(ordinal / 4) + 1;
   const side = ordinal % 4;
   const positions = [
@@ -173,9 +275,34 @@ const plotFor = (ordinal: number): Plot => {
   return { x, y, size: 8 };
 };
 
+const plotsOverlap = (left: Plot, right: Plot) =>
+  left.x < right.x + right.size &&
+  left.x + left.size > right.x &&
+  left.y < right.y + right.size &&
+  left.y + left.size > right.y;
+
+/**
+ * Allocates the next unclaimed radial plot with a buildable center. The scan is
+ * deterministic and the 12-tile spacing keeps the 8×8 settlement plots apart.
+ */
+const plotFor = (state: WorldState): Plot => {
+  const claimed = Object.values(state.players).map((player) => player.plot);
+  for (let ordinal = 0; ; ordinal += 1) {
+    const candidate = plotCandidate(ordinal);
+    const centerX = candidate.x + candidate.size - 2;
+    const centerY = candidate.y + candidate.size - 2;
+    if (
+      terrainAt(state.seed, centerX, centerY) !== 'water' &&
+      !claimed.some((plot) => plotsOverlap(plot, candidate))
+    )
+      return candidate;
+  }
+};
+
 export const createWorld = (seed = 1): WorldState => ({
-  schemaVersion: 11,
+  schemaVersion: 15,
   seed,
+  randomState: createRandomState(seed),
   tick: 0,
   players: {},
   buildings: {},
@@ -190,11 +317,11 @@ export const createWorld = (seed = 1): WorldState => ({
 export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
   if (state.players[id]) return [];
   const typedId = playerId(id);
-  const plot = plotFor(Object.keys(state.players).length);
+  const plot = plotFor(state);
   state.players[id] = {
     id: typedId,
     plot,
-    inventory: { ore: 0, wood: 5, ingot: 0 },
+    inventory: { ore: 0, wood: 5, ingot: 0, tool: 0 },
     population: { total: 2, capacity: 2, satisfaction: 100, employed: 0, unemployed: 2 },
     exploredChunks: { [chunkKey(plot.x, plot.y)]: true },
     territoryCells: plotTerritory(plot),
@@ -212,19 +339,20 @@ export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
     invitations: {},
   };
   const centerId = buildingId(`center-${id}`);
+  const center = buildingDefinitions['settlement-center'];
   state.buildings[centerId] = {
     id: centerId,
     kind: 'settlement-center',
     ownerId: typedId,
     x: plot.x + plot.size - 2,
     y: plot.y + plot.size - 2,
-    health: 25,
-    maxHealth: 25,
+    health: center.maxHealth,
+    maxHealth: center.maxHealth,
     progress: 0,
-    constructionTicks: 0,
+    constructionTicks: center.constructionTicks,
     inventory: emptyInventory(),
-    inventoryCapacity: INVENTORY_CAPACITY,
-    populationCapacity: 2,
+    inventoryCapacity: center.inventoryCapacity,
+    populationCapacity: center.populationCapacity,
     jobPriority: 0,
   };
   return [{ type: 'playerJoined', playerId: typedId }];
@@ -310,6 +438,10 @@ export const applyCommand = (
   });
   const player = state.players[command.playerId];
   if (!player) return reject('unknown-player');
+  if (!Number.isSafeInteger(command.sequence) || command.sequence < 1)
+    return reject('out-of-order-command');
+  if ('x' in command && (!Number.isSafeInteger(command.x) || !Number.isSafeInteger(command.y)))
+    return reject('invalid-coordinate');
   if (state.processedCommands.includes(command.id)) return reject('duplicate-command');
   if (command.sequence <= player.lastSequence) return reject('out-of-order-command');
   const accept = (events: WorldEvent[]) => {
@@ -320,11 +452,12 @@ export const applyCommand = (
   if (command.type === 'gather') {
     if (distance(player.plot, command.x, command.y) > 8) return reject('out-of-range');
     const key = tileKey(command.x, command.y);
-    if (terrainAt(state.seed, command.x, command.y) === 'water') return reject('resource-depleted');
+    const resource = terrainAt(state.seed, command.x, command.y);
+    if (resource !== 'ore' && resource !== 'wood') return reject('resource-depleted');
     if ((state.minedTiles[key] ?? 0) >= ORE_PER_NODE) return reject('resource-depleted');
     if (inventoryTotal(player.inventory) >= INVENTORY_CAPACITY) return reject('inventory-full');
     state.minedTiles[key] = (state.minedTiles[key] ?? 0) + 1;
-    player.inventory.ore += 1;
+    player.inventory[resource] += 1;
     return accept([{ type: 'gathered', playerId: player.id }]);
   }
   if (command.type === 'explore') {
@@ -353,8 +486,12 @@ export const applyCommand = (
       )
     )
       return reject('technology-locked');
-    if (player.inventory.ingot < (technology.cost.ingot ?? 0)) return reject('insufficient-ore');
-    player.inventory.ingot -= technology.cost.ingot ?? 0;
+    const unmetCost = Object.entries(technology.cost).find(
+      ([item, amount]) => player.inventory[item as ItemId] < (amount ?? 0),
+    );
+    if (unmetCost) return reject('insufficient-resources');
+    for (const [item, amount] of Object.entries(technology.cost))
+      player.inventory[item as ItemId] -= amount ?? 0;
     player.research.activeTechnology = technology.id;
     player.research.ticksRemaining = technology.ticks;
     return accept([]);
@@ -434,14 +571,25 @@ export const applyCommand = (
     delete settlement.members[player.id];
     return accept([{ type: 'settlementMemberChanged', playerId: player.id }]);
   }
+  if (command.type === 'removeSettlementMember') {
+    const settlement = state.settlements[command.settlementId];
+    if (!settlement) return reject('unknown-settlement');
+    if (settlement.ownerId !== player.id) return reject('settlement-permission-denied');
+    if (!settlement.members[command.targetPlayerId]) return reject('not-settlement-member');
+    if (settlement.ownerId === command.targetPlayerId)
+      return reject('cannot-remove-settlement-owner');
+    delete settlement.members[command.targetPlayerId];
+    return accept([{ type: 'settlementMemberChanged', playerId: command.targetPlayerId }]);
+  }
   if (command.type === 'createLogisticsLink') {
     const source = state.buildings[command.sourceBuildingId];
     const target = state.buildings[command.targetBuildingId];
     if (!source || !target) return reject('unknown-building');
     if (
       source.id === target.id ||
-      source.kind !== 'storage' ||
-      target.kind !== 'smelter' ||
+      (source.kind !== 'storage' && !isProducer(source.kind)) ||
+      !isProducer(target.kind) ||
+      !acceptsRecipeInput(target, command.item) ||
       source.constructionTicks > 0 ||
       target.constructionTicks > 0
     )
@@ -480,13 +628,17 @@ export const applyCommand = (
   }
   const isPlacement =
     command.type === 'placeSmelter' ||
+    command.type === 'placeWorkshop' ||
     command.type === 'placeStorage' ||
     command.type === 'placeHousing' ||
+    command.type === 'placeHearth' ||
     command.type === 'placeWatchtower';
   const building =
     command.type === 'placeSmelter' ||
+    command.type === 'placeWorkshop' ||
     command.type === 'placeStorage' ||
     command.type === 'placeHousing' ||
+    command.type === 'placeHearth' ||
     command.type === 'placeWatchtower'
       ? undefined
       : state.buildings[command.buildingId];
@@ -503,11 +655,18 @@ export const applyCommand = (
     const kind =
       command.type === 'placeSmelter'
         ? 'smelter'
-        : command.type === 'placeStorage'
-          ? 'storage'
-          : command.type === 'placeHousing'
-            ? 'housing'
-            : 'watchtower';
+        : command.type === 'placeWorkshop'
+          ? 'workshop'
+          : command.type === 'placeStorage'
+            ? 'storage'
+            : command.type === 'placeHousing'
+              ? 'housing'
+              : command.type === 'placeHearth'
+                ? 'hearth'
+                : 'watchtower';
+    const definition = buildingDefinitions[kind];
+    if (definition.requiredTechnology && !player.research.unlocked[definition.requiredTechnology])
+      return reject('technology-locked');
     const woodCost = woodCostFor(kind);
     if (player.inventory.wood < woodCost) return reject('insufficient-wood');
     const id = buildingId(`${kind}-${state.tick}-${Object.keys(state.buildings).length}`);
@@ -518,14 +677,14 @@ export const applyCommand = (
       ownerId: player.id,
       x: command.x,
       y: command.y,
-      health: kind === 'smelter' ? 10 : 15,
-      maxHealth: kind === 'smelter' ? 10 : 15,
+      health: definition.maxHealth,
+      maxHealth: definition.maxHealth,
       progress: 0,
-      constructionTicks: kind === 'smelter' ? 10 : 5,
+      constructionTicks: definition.constructionTicks,
       inventory: emptyInventory(),
-      inventoryCapacity: kind === 'smelter' ? 20 : kind === 'storage' ? 200 : 0,
-      populationCapacity: kind === 'housing' ? 4 : 0,
-      jobPriority: kind === 'smelter' ? 1 : 0,
+      inventoryCapacity: definition.inventoryCapacity,
+      populationCapacity: definition.populationCapacity,
+      jobPriority: isProducer(kind) ? 1 : 0,
     };
     return accept([{ type: 'buildingPlaced', playerId: player.id, buildingId: id }]);
   }
@@ -556,17 +715,19 @@ export const applyCommand = (
       inventoryTotal(player.inventory) + inventoryTotal(building.inventory) > INVENTORY_CAPACITY ||
       player.inventory.ore + building.inventory.ore > INVENTORY_CAPACITY ||
       player.inventory.wood + building.inventory.wood > INVENTORY_CAPACITY ||
-      player.inventory.ingot + building.inventory.ingot > INVENTORY_CAPACITY
+      player.inventory.ingot + building.inventory.ingot > INVENTORY_CAPACITY ||
+      player.inventory.tool + building.inventory.tool > INVENTORY_CAPACITY
     )
       return reject('inventory-full');
     player.inventory.ore += building.inventory.ore;
     player.inventory.wood += building.inventory.wood;
     player.inventory.ingot += building.inventory.ingot;
+    player.inventory.tool += building.inventory.tool;
     delete state.buildings[building.id];
     return accept([{ type: 'buildingDemolished', playerId: player.id, buildingId: building.id }]);
   }
   if (command.type === 'setJobPriority') {
-    if (building.kind !== 'smelter') return reject('wrong-building');
+    if (!isProducer(building.kind)) return reject('wrong-building');
     building.jobPriority = command.priority;
     return accept([]);
   }
@@ -588,11 +749,11 @@ export const applyCommand = (
   if (command.type === 'smelt') {
     if (building.kind !== 'smelter') return reject('wrong-building');
     if (building.progress > 0) return reject('busy');
-    if (building.inventory.ore < 1) return reject('insufficient-ore');
-    if (!canStore(building.inventory, building.inventoryCapacity, 'ingot', 1))
-      return reject('inventory-full');
-    building.inventory.ore -= 1;
-    building.progress = 3;
+    const recipe = recipeFor(building.kind);
+    if (!recipe || !canStartRecipe(building, recipe))
+      return reject(building.inventory.ore < 1 ? 'insufficient-ore' : 'inventory-full');
+    consumeRecipe(building, recipe);
+    building.progress = recipe.ticks;
     return accept([]);
   }
   building.health = Math.min(building.maxHealth, building.health + 2);
@@ -600,9 +761,11 @@ export const applyCommand = (
 };
 
 export const advanceTick = (state: WorldState): WorldEvent[] => {
+  // Phase 1: advance-clock.
   state.tick += 1;
   const events: WorldEvent[] = [];
   const staffedSmelters = new Set<BuildingId>();
+  // Phase 2: research-and-population.
   for (const player of Object.values(state.players)) {
     if (player.research.activeTechnology) {
       player.research.ticksRemaining -= 1;
@@ -614,24 +777,27 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
     player.population.capacity = Object.values(state.buildings)
       .filter((building) => building.ownerId === player.id && building.constructionTicks === 0)
       .reduce((capacity, building) => capacity + building.populationCapacity, 0);
-    if (
-      state.tick % 200 === 0 &&
-      player.population.total < player.population.capacity &&
-      player.population.satisfaction >= 50
-    )
-      player.population.total += 1;
-    const smelters = Object.values(state.buildings)
+    if (state.tick % 200 === 0) {
+      if (
+        player.population.total < player.population.capacity &&
+        player.population.satisfaction >= 50
+      )
+        player.population.total += 1;
+      else if (player.population.total > 2 && player.population.satisfaction < 50)
+        player.population.total -= 1;
+    }
+    const producers = Object.values(state.buildings)
       .filter(
         (building) =>
           building.ownerId === player.id &&
-          building.kind === 'smelter' &&
+          isProducer(building.kind) &&
           building.constructionTicks === 0 &&
           building.jobPriority > 0,
       )
       .sort(
         (left, right) => right.jobPriority - left.jobPriority || left.id.localeCompare(right.id),
       );
-    const staffed = smelters.slice(0, player.population.total);
+    const staffed = producers.slice(0, player.population.total);
     player.population.employed = staffed.length;
     player.population.unemployed = player.population.total - staffed.length;
     const shelterSatisfaction = player.population.capacity >= player.population.total ? 60 : 0;
@@ -639,9 +805,22 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
       player.population.total === 0
         ? 40
         : Math.floor((player.population.employed * 40) / player.population.total);
-    player.population.satisfaction = shelterSatisfaction + workSatisfaction;
-    for (const smelter of staffed) staffedSmelters.add(smelter.id);
+    const serviceSatisfaction = Object.values(state.buildings).some(
+      (building) =>
+        building.ownerId === player.id &&
+        building.kind === 'hearth' &&
+        building.constructionTicks === 0 &&
+        building.health === building.maxHealth,
+    )
+      ? buildingDefinitions.hearth.serviceSatisfaction
+      : 0;
+    player.population.satisfaction = Math.min(
+      100,
+      shelterSatisfaction + workSatisfaction + serviceSatisfaction,
+    );
+    for (const producer of staffed) staffedSmelters.add(producer.id);
   }
+  // Phase 3: construction-and-production.
   for (const building of Object.values(state.buildings)) {
     if (building.constructionTicks > 0) {
       building.constructionTicks -= 1;
@@ -653,27 +832,42 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
         });
       continue;
     }
-    const canWork = building.kind !== 'smelter' || staffedSmelters.has(building.id);
-    if (canWork && building.progress > 0) {
+    const recipe = recipeFor(building.kind);
+    const canWork =
+      building.health === building.maxHealth && (!recipe || staffedSmelters.has(building.id));
+    if (canWork && recipe && building.progress > 0) {
       building.progress -= 1;
       if (building.progress === 0) {
-        building.inventory.ingot += 1;
+        produceRecipe(building, recipe);
         events.push({ type: 'smelted', buildingId: building.id, playerId: building.ownerId });
       }
-    } else if (
-      canWork &&
-      building.kind === 'smelter' &&
-      building.inventory.ore > 0 &&
-      canStore(building.inventory, building.inventoryCapacity, 'ingot', 1)
-    ) {
-      building.inventory.ore -= 1;
-      building.progress = 3;
-    }
-    if (state.tick % 100 === 0 && building.health > 0) {
-      building.health -= 1;
-      events.push({ type: 'hazard', buildingId: building.id });
+    } else if (canWork && recipe && canStartRecipe(building, recipe)) {
+      consumeRecipe(building, recipe);
+      building.progress = recipe.ticks;
     }
   }
+  // Phase 4: environmental-events.
+  const acidRain = environmentalEvents['acid-rain'];
+  if (state.tick % acidRain.intervalTicks === 0) {
+    const targets = Object.values(state.buildings)
+      .filter((building) => building.constructionTicks === 0 && building.health > 0)
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const [nextRandomState, targetIndex] =
+      targets.length > 0
+        ? takeRandomIndex(state.randomState, targets.length)
+        : [state.randomState, 0];
+    state.randomState = nextRandomState;
+    const target = targets[targetIndex];
+    if (target) {
+      target.health = Math.max(0, target.health - acidRain.damage);
+      events.push({
+        type: 'hazard',
+        buildingId: target.id,
+        environmentalEventId: acidRain.id,
+      });
+    }
+  }
+  // Phase 5: logistics.
   for (const link of Object.values(state.logisticsLinks).sort((left, right) =>
     left.id.localeCompare(right.id),
   )) {
@@ -693,6 +887,7 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
     source.inventory[link.item] -= 1;
     target.inventory[link.item] += 1;
   }
+  // Phase 6: threat-spawning.
   const raider = threatDefinitions['raider-swarm'];
   if (state.tick % raider.spawnIntervalTicks === 0) {
     const targets = Object.values(state.buildings)
@@ -703,7 +898,12 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
           building.health > 0,
       )
       .sort((left, right) => left.id.localeCompare(right.id));
-    const target = targets[(state.tick / raider.spawnIntervalTicks) % Math.max(1, targets.length)];
+    const [nextRandomState, targetIndex] =
+      targets.length > 0
+        ? takeRandomIndex(state.randomState, targets.length)
+        : [state.randomState, 0];
+    state.randomState = nextRandomState;
+    const target = targets[targetIndex];
     if (target) {
       const id = `raider-${state.tick}`;
       const spawn = threatSpawnPosition(state, target);
@@ -718,6 +918,20 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
       };
       events.push({ type: 'threatSpawned', buildingId: target.id, threatId: id });
     }
+  }
+  // Phase 7: threat-navigation-and-combat.
+  // Threats may each visit many path tiles. Build these immutable per-tick
+  // indexes once instead of scanning every building for every path tile.
+  const occupiedBuildingTiles = new Set(
+    Object.values(state.buildings).map((building) => tileKey(building.x, building.y)),
+  );
+  const watchtowersByOwner = new Map<string, Building[]>();
+  for (const building of Object.values(state.buildings)) {
+    if (building.kind !== 'watchtower' || building.constructionTicks > 0 || building.health <= 0)
+      continue;
+    const towers = watchtowersByOwner.get(building.ownerId) ?? [];
+    towers.push(building);
+    watchtowersByOwner.set(building.ownerId, towers);
   }
   for (const threat of Object.values(state.threats).sort((left, right) =>
     left.id.localeCompare(right.id),
@@ -740,9 +954,7 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
       isPassable: (tile) =>
         (tile.x === target.x && tile.y === target.y) ||
         (terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
-          !Object.values(state.buildings).some(
-            (building) => building.x === tile.x && building.y === tile.y,
-          )),
+          !occupiedBuildingTiles.has(tileKey(tile.x, tile.y))),
     });
     const next = path.status === 'found' ? path.path[1] : undefined;
     if (next) {
@@ -750,13 +962,8 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
       threat.y = next.y;
     }
     const defense =
-      Object.values(state.buildings).filter(
-        (building) =>
-          building.ownerId === target.ownerId &&
-          building.kind === 'watchtower' &&
-          building.constructionTicks === 0 &&
-          building.health > 0 &&
-          manhattanDistance(building, threat) <= raider.watchtowerRange,
+      (watchtowersByOwner.get(target.ownerId) ?? []).filter(
+        (tower) => manhattanDistance(tower, threat) <= raider.watchtowerRange,
       ).length * buildingDefinitions.watchtower.defenseDamage;
     threat.health -= defense;
     if (threat.health <= 0) {
@@ -769,6 +976,8 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
       events.push({ type: 'buildingDamaged', buildingId: target.id, threatId: threat.id });
     }
   }
+  // Phase 8: emit-events-and-mark-changes. Events are returned; callers obtain
+  // an entity/chunk dirty set with `diffWorld` against their pre-tick snapshot.
   return events;
 };
 
@@ -855,9 +1064,25 @@ interface Version9Player extends Omit<PlayerState, 'population'> {
 }
 type Version9Building = Omit<Building, 'jobPriority'>;
 type LegacyThreat = Omit<Threat, 'x' | 'y'>;
-interface Version10World extends Omit<WorldState, 'schemaVersion' | 'threats'> {
+type LegacyWorldBase = Omit<WorldState, 'schemaVersion' | 'randomState'>;
+interface Version14World extends LegacyWorldBase {
+  schemaVersion: 14;
+}
+interface Version10World extends Omit<LegacyWorldBase, 'threats'> {
   schemaVersion: 10;
   threats: Record<string, LegacyThreat>;
+}
+type LegacyInventory = Omit<Inventory, 'tool'>;
+interface Version11World extends Omit<LegacyWorldBase, 'players' | 'buildings'> {
+  schemaVersion: 11;
+  players: Record<string, Omit<PlayerState, 'inventory'> & { inventory: LegacyInventory }>;
+  buildings: Record<string, Omit<Building, 'inventory'> & { inventory: LegacyInventory }>;
+}
+interface Version12World extends LegacyWorldBase {
+  schemaVersion: 12;
+}
+interface Version13World extends LegacyWorldBase {
+  schemaVersion: 13;
 }
 interface Version9World extends Omit<Version10World, 'schemaVersion' | 'players' | 'buildings'> {
   schemaVersion: 9;
@@ -897,7 +1122,7 @@ const withJobPriorities = <T extends { kind: Building['kind'] }>(buildings: Reco
   Object.fromEntries(
     Object.entries(buildings).map(([id, building]) => [
       id,
-      { ...building, jobPriority: building.kind === 'smelter' ? 1 : 0 },
+      { ...building, jobPriority: isProducer(building.kind) ? 1 : 0 },
     ]),
   );
 const withThreatPositions = (
@@ -910,43 +1135,106 @@ const withThreatPositions = (
       return [id, { ...threat, x: target?.x ?? 0, y: target?.y ?? 0 }];
     }),
   );
+const migrateInventoryToTools = (inventory: Partial<Inventory>): Inventory => ({
+  ore: inventory.ore ?? 0,
+  wood: inventory.wood ?? 0,
+  ingot: inventory.ingot ?? 0,
+  tool: inventory.tool ?? 0,
+});
+const migrateMinedTilesToOreNodes = (seed: number, minedTiles: Record<string, number>) => {
+  const migrated: Record<string, number> = {};
+  for (const [key, amount] of Object.entries(minedTiles)) {
+    const [xText, yText] = key.split(':');
+    const x = Number(xText);
+    const y = Number(yText);
+    if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) || !Number.isSafeInteger(amount))
+      continue;
+    const node = terrainAt(seed, x, y) === 'ore' ? { x, y } : nearestOreTile(seed, x, y, 16);
+    if (!node) continue;
+    const nodeKey = tileKey(node.x, node.y);
+    migrated[nodeKey] = Math.min(ORE_PER_NODE, (migrated[nodeKey] ?? 0) + Math.max(0, amount));
+  }
+  return migrated;
+};
+const migrateVersion14 = (state: Version14World): WorldState => ({
+  ...state,
+  schemaVersion: 15,
+  randomState: createRandomState(state.seed),
+});
+const migrateVersion13 = (state: Version13World): WorldState =>
+  migrateVersion14({
+    ...state,
+    schemaVersion: 14,
+  });
+const migrateVersion12 = (state: Version12World): WorldState =>
+  migrateVersion13({
+    ...state,
+    schemaVersion: 13,
+    minedTiles: migrateMinedTilesToOreNodes(state.seed, state.minedTiles),
+  });
+const migrateToCurrentSchema = (state: unknown): WorldState => {
+  const legacy = state as {
+    players: Record<string, { inventory: Partial<Inventory> }>;
+    buildings: Record<string, { inventory: Partial<Inventory> }>;
+  };
+  return migrateVersion12({
+    ...(state as object),
+    schemaVersion: 12,
+    players: Object.fromEntries(
+      Object.entries(legacy.players).map(([id, player]) => [
+        id,
+        { ...player, inventory: migrateInventoryToTools(player.inventory) },
+      ]),
+    ),
+    buildings: Object.fromEntries(
+      Object.entries(legacy.buildings).map(([id, building]) => [
+        id,
+        { ...building, inventory: migrateInventoryToTools(building.inventory) },
+      ]),
+    ),
+  } as Version12World);
+};
 
 /** Forward-only snapshot migration kept inside the platform-independent simulation. */
 export const deserializeWorld = (raw: unknown): WorldState => {
   const candidate = structuredClone(raw) as { schemaVersion?: number };
-  if (candidate.schemaVersion === 11) return candidate as WorldState;
+  if (candidate.schemaVersion === 15) return candidate as WorldState;
+  if (candidate.schemaVersion === 14) return migrateVersion14(candidate as Version14World);
+  if (candidate.schemaVersion === 13) return migrateVersion13(candidate as Version13World);
+  if (candidate.schemaVersion === 12) return migrateVersion12(candidate as Version12World);
+  if (candidate.schemaVersion === 11) return migrateToCurrentSchema(candidate as Version11World);
   if (candidate.schemaVersion === 10) {
     const legacy = candidate as Version10World;
-    return {
+    return migrateToCurrentSchema({
       ...legacy,
       schemaVersion: 11,
       threats: withThreatPositions(legacy.threats, legacy.buildings),
-    } as unknown as WorldState;
+    });
   }
   if (candidate.schemaVersion === 9) {
     const legacy = candidate as Version9World;
-    return {
+    return migrateToCurrentSchema({
       ...legacy,
       schemaVersion: 11,
       players: withLaborFields(legacy.players),
       buildings: withJobPriorities(legacy.buildings),
       threats: withThreatPositions(legacy.threats, legacy.buildings),
-    } as unknown as WorldState;
+    });
   }
   if (candidate.schemaVersion === 8) {
     const legacy = candidate as Version8World;
-    return {
+    return migrateToCurrentSchema({
       ...legacy,
       schemaVersion: 11,
       logisticsLinks: {},
       players: withLaborFields(legacy.players),
       buildings: withJobPriorities(legacy.buildings),
       threats: withThreatPositions(legacy.threats, legacy.buildings),
-    } as unknown as WorldState;
+    });
   }
   if (candidate.schemaVersion === 7) {
     const legacy = candidate as Version7World;
-    return {
+    return migrateToCurrentSchema({
       ...legacy,
       schemaVersion: 11,
       settlements: individualSettlementsFor(legacy.players),
@@ -954,11 +1242,11 @@ export const deserializeWorld = (raw: unknown): WorldState => {
       players: withLaborFields(legacy.players),
       buildings: withJobPriorities(legacy.buildings),
       threats: withThreatPositions(legacy.threats, legacy.buildings),
-    } as unknown as WorldState;
+    });
   }
   if (candidate.schemaVersion === 6) {
     const legacy = candidate as Version6World;
-    return {
+    return migrateToCurrentSchema({
       ...legacy,
       schemaVersion: 11,
       transfers: [],
@@ -967,11 +1255,11 @@ export const deserializeWorld = (raw: unknown): WorldState => {
       players: withLaborFields(legacy.players),
       buildings: withJobPriorities(legacy.buildings),
       threats: withThreatPositions(legacy.threats, legacy.buildings),
-    } as unknown as WorldState;
+    });
   }
   if (candidate.schemaVersion === 5) {
     const legacy = candidate as Version5World;
-    return {
+    return migrateToCurrentSchema({
       ...legacy,
       schemaVersion: 11,
       threats: {},
@@ -980,11 +1268,11 @@ export const deserializeWorld = (raw: unknown): WorldState => {
       logisticsLinks: {},
       players: withLaborFields(legacy.players),
       buildings: withJobPriorities(legacy.buildings),
-    } as unknown as WorldState;
+    });
   }
   if (candidate.schemaVersion === 4) {
     const legacy = candidate as Version4World;
-    return {
+    return migrateToCurrentSchema({
       ...legacy,
       schemaVersion: 11,
       threats: {},
@@ -1012,11 +1300,11 @@ export const deserializeWorld = (raw: unknown): WorldState => {
         ]),
       ),
       buildings: withJobPriorities(legacy.buildings),
-    } as unknown as WorldState;
+    });
   }
   if (candidate.schemaVersion === 3) {
     const legacy = candidate as Version3World;
-    return {
+    return migrateToCurrentSchema({
       ...legacy,
       schemaVersion: 11,
       threats: {},
@@ -1049,11 +1337,11 @@ export const deserializeWorld = (raw: unknown): WorldState => {
           },
         ]),
       ),
-    } as unknown as WorldState;
+    });
   }
   if (candidate.schemaVersion === 2) {
     const legacy = candidate as Version2World;
-    return {
+    return migrateToCurrentSchema({
       ...legacy,
       schemaVersion: 11,
       threats: {},
@@ -1088,7 +1376,7 @@ export const deserializeWorld = (raw: unknown): WorldState => {
           },
         ]),
       ),
-    } as unknown as WorldState;
+    });
   }
   throw new Error(`Unsupported world snapshot schema version: ${String(candidate.schemaVersion)}`);
 };
@@ -1099,24 +1387,52 @@ export const stateHash = (state: WorldState): string => stableHash(snapshot(stat
 /** Read-only invariant inspection for checkpoints, migration verification, and operations. */
 export const inspectWorld = (state: WorldState): string[] => {
   const errors: string[] = [];
+  const isNonNegativeInteger = (value: number) => Number.isSafeInteger(value) && value >= 0;
+  if (!Number.isSafeInteger(state.seed)) errors.push('world has an invalid seed');
+  if (!isNonNegativeInteger(state.tick)) errors.push('world has an invalid tick');
+  if (
+    !Number.isSafeInteger(state.randomState) ||
+    state.randomState < 1 ||
+    state.randomState >= 0x1_0000_0000
+  )
+    errors.push('world has an invalid random state');
+  const entityIds = new Map<string, string>();
+  const registerEntity = (id: string, kind: string) => {
+    const existing = entityIds.get(id);
+    if (existing) errors.push(`entity id ${id} is shared by ${existing} and ${kind}`);
+    else entityIds.set(id, kind);
+  };
   const occupied = new Set<string>();
   for (const [id, player] of Object.entries(state.players)) {
+    registerEntity(player.id, 'player');
     if (player.id !== id) errors.push(`player key ${id} does not match its id`);
     if (
-      player.population.total < 0 ||
+      !isNonNegativeInteger(player.population.total) ||
+      !isNonNegativeInteger(player.population.capacity) ||
+      !isNonNegativeInteger(player.population.satisfaction) ||
+      !isNonNegativeInteger(player.population.employed) ||
+      !isNonNegativeInteger(player.population.unemployed) ||
       player.population.capacity < player.population.total ||
-      player.population.employed < 0 ||
-      player.population.unemployed < 0 ||
       player.population.employed + player.population.unemployed !== player.population.total
     )
       errors.push(`player ${id} has invalid population`);
     if (
+      !Number.isSafeInteger(player.plot.x) ||
+      !Number.isSafeInteger(player.plot.y) ||
+      !Number.isSafeInteger(player.plot.size) ||
+      player.plot.size < 1 ||
+      !isNonNegativeInteger(player.lastSequence) ||
+      !isNonNegativeInteger(player.research.ticksRemaining)
+    )
+      errors.push(`player ${id} has invalid plot or simulation state`);
+    if (
       inventoryTotal(player.inventory) > INVENTORY_CAPACITY ||
-      Object.values(player.inventory).some((amount) => amount < 0)
+      hasInvalidInventory(player.inventory)
     )
       errors.push(`player ${id} has invalid inventory`);
   }
   for (const [id, building] of Object.entries(state.buildings)) {
+    registerEntity(building.id, 'building');
     if (building.id !== id) errors.push(`building key ${id} does not match its id`);
     if (!state.players[building.ownerId])
       errors.push(`building ${id} has unknown owner ${building.ownerId}`);
@@ -1126,9 +1442,13 @@ export const inspectWorld = (state: WorldState): string[] => {
     if (occupied.has(position)) errors.push(`multiple buildings occupy ${position}`);
     else occupied.add(position);
     if (
-      building.health < 0 ||
+      !isNonNegativeInteger(building.health) ||
+      !isNonNegativeInteger(building.maxHealth) ||
+      !isNonNegativeInteger(building.progress) ||
+      !isNonNegativeInteger(building.constructionTicks) ||
+      !isNonNegativeInteger(building.inventoryCapacity) ||
+      !isNonNegativeInteger(building.populationCapacity) ||
       building.health > building.maxHealth ||
-      building.constructionTicks < 0 ||
       !Number.isInteger(building.jobPriority) ||
       building.jobPriority < 0 ||
       building.jobPriority > 3
@@ -1136,15 +1456,22 @@ export const inspectWorld = (state: WorldState): string[] => {
       errors.push(`building ${id} has invalid health or construction state`);
     if (
       inventoryTotal(building.inventory) > building.inventoryCapacity ||
-      Object.values(building.inventory).some((amount) => amount < 0)
+      hasInvalidInventory(building.inventory)
     )
       errors.push(`building ${id} has invalid inventory`);
   }
   for (const [id, threat] of Object.entries(state.threats)) {
+    registerEntity(threat.id, 'threat');
     if (threat.id !== id) errors.push(`threat key ${id} does not match its id`);
     if (!state.buildings[threat.targetBuildingId])
       errors.push(`threat ${id} has unknown target ${threat.targetBuildingId}`);
-    if (threat.health < 1 || threat.damage < 1)
+    if (
+      !Number.isSafeInteger(threat.health) ||
+      !Number.isSafeInteger(threat.damage) ||
+      !isNonNegativeInteger(threat.spawnedTick) ||
+      threat.health < 1 ||
+      threat.damage < 1
+    )
       errors.push(`threat ${id} has invalid combat values`);
     if (!Number.isSafeInteger(threat.x) || !Number.isSafeInteger(threat.y))
       errors.push(`threat ${id} has invalid coordinates`);
@@ -1155,8 +1482,25 @@ export const inspectWorld = (state: WorldState): string[] => {
     transferIds.add(transfer.id);
     if (!state.players[transfer.fromPlayerId] || !state.players[transfer.toPlayerId])
       errors.push(`transfer ${transfer.id} has an unknown participant`);
-    if (!Number.isInteger(transfer.amount) || transfer.amount < 1)
+    if (!Number.isSafeInteger(transfer.amount) || transfer.amount < 1)
       errors.push(`transfer ${transfer.id} has an invalid amount`);
+    if (!isNonNegativeInteger(transfer.tick))
+      errors.push(`transfer ${transfer.id} has an invalid tick`);
+  }
+  const processedCommandIds = new Set<string>();
+  for (const id of state.processedCommands) {
+    if (processedCommandIds.has(id)) errors.push(`duplicate processed command ${id}`);
+    processedCommandIds.add(id);
+  }
+  for (const [key, amount] of Object.entries(state.minedTiles)) {
+    const [xText, yText] = key.split(':');
+    if (
+      !Number.isSafeInteger(Number(xText)) ||
+      !Number.isSafeInteger(Number(yText)) ||
+      !isNonNegativeInteger(amount) ||
+      amount > ORE_PER_NODE
+    )
+      errors.push(`mined tile ${key} has an invalid depletion value`);
   }
   for (const [id, settlement] of Object.entries(state.settlements)) {
     if (settlement.id !== id) errors.push(`settlement key ${id} does not match its id`);
@@ -1182,7 +1526,13 @@ export const inspectWorld = (state: WorldState): string[] => {
     if (!state.players[link.ownerId]) errors.push(`logistics link ${id} has an unknown owner`);
     const source = state.buildings[link.sourceBuildingId];
     const target = state.buildings[link.targetBuildingId];
-    if (!source || !target || source.kind !== 'storage' || target.kind !== 'smelter')
+    if (
+      !source ||
+      !target ||
+      (source.kind !== 'storage' && !isProducer(source.kind)) ||
+      !isProducer(target.kind) ||
+      !acceptsRecipeInput(target, link.item)
+    )
       errors.push(`logistics link ${id} has invalid endpoints`);
   }
   return errors;

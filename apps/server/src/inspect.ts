@@ -1,13 +1,14 @@
 import { readFile } from 'node:fs/promises';
-import { deserializeWorld, inspectWorld } from '@kings/simulation';
+import { inspectCheckpoint } from './checkpoint-inspection.js';
 
 const filePath = process.argv[2];
 if (!filePath)
-  throw new Error('Usage: pnpm --filter @kings/server inspect <checkpoint-state.json>');
+  throw new Error('Usage: npm --prefix apps/server run inspect -- <checkpoint-state.json>');
 const raw = JSON.parse(await readFile(filePath, 'utf8')) as { state?: unknown } | unknown;
-const world = deserializeWorld(typeof raw === 'object' && raw && 'state' in raw ? raw.state : raw);
-const errors = inspectWorld(world);
+const inspection = inspectCheckpoint(raw);
+const { errors, world, hash } = inspection;
 if (errors.length > 0) {
   console.error(errors.join('\n'));
   process.exitCode = 1;
-} else console.log(`World tick ${world.tick} is consistent.`);
+} else if (world && hash)
+  console.log(`World tick ${world.tick} is consistent (state hash ${hash}).`);

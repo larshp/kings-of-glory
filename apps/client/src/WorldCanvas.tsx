@@ -1,9 +1,14 @@
-import { Application, Container, Graphics } from 'pixi.js';
 import { useEffect, useRef } from 'react';
 import type { TerrainTile } from '@kings/protocol';
 import { type Building, type Threat } from '@kings/simulation';
 import type { CameraBindings } from './preferences.js';
-import { screenToWorld, TILE_HEIGHT, TILE_WIDTH, worldToScreen } from './projection.js';
+import {
+  screenToTile,
+  screenToWorld,
+  TILE_HEIGHT,
+  TILE_WIDTH,
+  worldToScreen,
+} from './projection.js';
 
 export interface WorldCanvasMetrics {
   readonly framesPerSecond: number;
@@ -13,348 +18,490 @@ export interface WorldCanvasMetrics {
   readonly activeChunks: number;
 }
 
+interface Viewport {
+  readonly panX: number;
+  readonly panY: number;
+  readonly scale: number;
+}
+
+export interface VisibleTileBounds {
+  readonly minX: number;
+  readonly maxX: number;
+  readonly minY: number;
+  readonly maxY: number;
+  readonly center: { x: number; y: number };
+}
+
+interface IsometricEntity {
+  readonly id: string;
+  readonly x: number;
+  readonly y: number;
+}
+
+export type PickedEntity =
+  | { readonly type: 'building'; readonly id: string }
+  | { readonly type: 'threat'; readonly id: string };
+
+/** Threats render above buildings, so they win a click on the same tile. */
+export const entityAtTile = (
+  tile: { x: number; y: number },
+  buildings: readonly Building[],
+  threats: readonly Threat[],
+): PickedEntity | undefined => {
+  const threat = threats.find((candidate) => candidate.x === tile.x && candidate.y === tile.y);
+  if (threat) return { type: 'threat', id: threat.id };
+  const building = buildings.find((candidate) => candidate.x === tile.x && candidate.y === tile.y);
+  return building ? { type: 'building', id: building.id } : undefined;
+};
+
+/** Filters first, then orders only the visible entities by stable isometric depth. */
+export const visibleByIsometricDepth = <Entity extends IsometricEntity>(
+  entities: readonly Entity[],
+  focus: { x: number; y: number },
+  radius = 9,
+): Entity[] =>
+  entities
+    .filter(
+      (entity) => Math.abs(entity.x - focus.x) <= radius && Math.abs(entity.y - focus.y) <= radius,
+    )
+    .sort(
+      (left, right) =>
+        left.x + left.y - (right.x + right.y) ||
+        left.y - right.y ||
+        left.id.localeCompare(right.id),
+    );
+
+/** Calculates the world tile rectangle needed to cover the current transformed viewport. */
+export const visibleTileBounds = (
+  width: number,
+  height: number,
+  focus: { x: number; y: number },
+  viewport: Viewport,
+): VisibleTileBounds => {
+  const screenToAbsoluteWorld = (screenX: number, screenY: number) => {
+    const local = screenToWorld({
+      x: (screenX - width / 2 - viewport.panX) / viewport.scale,
+      y: (screenY - 80 - viewport.panY) / viewport.scale,
+    });
+    return { x: focus.x + local.x, y: focus.y + local.y };
+  };
+  const corners = [
+    screenToAbsoluteWorld(0, 0),
+    screenToAbsoluteWorld(width, 0),
+    screenToAbsoluteWorld(0, height),
+    screenToAbsoluteWorld(width, height),
+  ];
+  const xValues = corners.map((corner) => corner.x);
+  const yValues = corners.map((corner) => corner.y);
+  return {
+    minX: Math.floor(Math.min(...xValues)) - 2,
+    maxX: Math.ceil(Math.max(...xValues)) + 2,
+    minY: Math.floor(Math.min(...yValues)) - 2,
+    maxY: Math.ceil(Math.max(...yValues)) + 2,
+    center: screenToAbsoluteWorld(width / 2, height / 2),
+  };
+};
+
+/** Stable, bounded chunk subscription derived from the current viewport tile rectangle. */
+export const visibleChunkCoordinates = (bounds: VisibleTileBounds) => {
+  const chunks: Array<{ x: number; y: number }> = [];
+  for (let x = Math.floor(bounds.minX / 16); x <= Math.floor(bounds.maxX / 16); x += 1)
+    for (let y = Math.floor(bounds.minY / 16); y <= Math.floor(bounds.maxY / 16); y += 1)
+      chunks.push({ x, y });
+  return chunks;
+};
+
+const terrainColor = (terrain: TerrainTile | undefined, x: number, y: number) =>
+  terrain === 'water'
+    ? '#2f6d93'
+    : terrain === 'ore'
+      ? '#6b6b79'
+      : terrain === 'wood'
+        ? '#7d5433'
+        : terrain === 'grass'
+          ? (x + y) % 2 === 0
+            ? '#3b6a48'
+            : '#315d3d'
+          : (x + y) % 2 === 0
+            ? '#29463c'
+            : '#233d34';
+
 export const WorldCanvas = ({
   buildings,
   threats,
   terrain,
+  territory,
   focus,
   cameraBindings,
   selectedTile,
+  placementPreview,
   onSelectTile,
+  onSelectEntity,
+  onHoverTile,
   onMetrics,
+  onVisibleChunks,
   onError,
 }: {
   buildings: readonly Building[];
   threats: readonly Threat[];
   terrain: Readonly<Record<string, TerrainTile>>;
+  territory: Readonly<Record<string, string>>;
   focus: { x: number; y: number };
   cameraBindings: CameraBindings;
   selectedTile: { x: number; y: number } | undefined;
+  placementPreview: { tile: { x: number; y: number }; valid: boolean } | undefined;
   onSelectTile?: (tile: { x: number; y: number }) => void;
+  onSelectEntity?: (entity: PickedEntity | undefined) => void;
+  onHoverTile?: (tile: { x: number; y: number } | undefined) => void;
   onMetrics?: (metrics: WorldCanvasMetrics) => void;
+  onVisibleChunks?: (chunks: readonly { x: number; y: number }[]) => void;
   onError?: (message: string) => void;
 }) => {
-  const host = useRef<HTMLDivElement>(null);
-  const appRef = useRef<Application | null>(null);
-  const terrainLayer = useRef<Container | null>(null);
-  const buildingLayer = useRef<Container | null>(null);
-  const threatLayer = useRef<Container | null>(null);
-  const selectionLayer = useRef<Container | null>(null);
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const viewport = useRef<Viewport>({ panX: 0, panY: 0, scale: 1 });
   const latestBuildings = useRef(buildings);
   const latestThreats = useRef(threats);
   const latestTerrain = useRef(terrain);
+  const latestTerritory = useRef(territory);
   const latestFocus = useRef(focus);
   const latestCameraBindings = useRef(cameraBindings);
-  const latestSelectTile = useRef(onSelectTile);
   const latestSelectedTile = useRef(selectedTile);
+  const latestPlacementPreview = useRef(placementPreview);
+  const latestSelectTile = useRef(onSelectTile);
+  const latestSelectEntity = useRef(onSelectEntity);
+  const latestHoverTile = useRef(onHoverTile);
   const latestMetrics = useRef(onMetrics);
+  const latestVisibleChunks = useRef(onVisibleChunks);
   const latestError = useRef(onError);
   latestBuildings.current = buildings;
   latestThreats.current = threats;
   latestTerrain.current = terrain;
+  latestTerritory.current = territory;
   latestFocus.current = focus;
   latestCameraBindings.current = cameraBindings;
-  latestSelectTile.current = onSelectTile;
   latestSelectedTile.current = selectedTile;
+  latestPlacementPreview.current = placementPreview;
+  latestSelectTile.current = onSelectTile;
+  latestSelectEntity.current = onSelectEntity;
+  latestHoverTile.current = onHoverTile;
   latestMetrics.current = onMetrics;
+  latestVisibleChunks.current = onVisibleChunks;
   latestError.current = onError;
-  const renderTerrain = () => {
-    const layer = terrainLayer.current;
-    const app = appRef.current;
-    if (!layer || !app) return;
-    layer.removeChildren();
-    for (let localX = -8; localX <= 8; localX += 1)
-      for (let localY = -8; localY <= 8; localY += 1) {
-        const x = latestFocus.current.x + localX;
-        const y = latestFocus.current.y + localY;
-        const position = worldToScreen({ x: localX, y: localY });
-        const terrain = latestTerrain.current[`${x}:${y}`];
-        const color =
-          terrain === 'water'
-            ? '#2f6d93'
-            : terrain === 'ore'
-              ? '#6b6b79'
-              : terrain === 'grass'
-                ? (x + y) % 2 === 0
-                  ? '#3b6a48'
-                  : '#315d3d'
-                : '#1d2a3e';
-        const tile = new Graphics()
-          .poly([
-            0,
-            TILE_HEIGHT / 2,
-            TILE_WIDTH / 2,
-            0,
-            TILE_WIDTH,
-            TILE_HEIGHT / 2,
-            TILE_WIDTH / 2,
-            TILE_HEIGHT,
-          ])
-          .fill({ color });
-        tile.position.set(position.x + app.renderer.width / 2 - TILE_WIDTH / 2, position.y + 80);
-        layer.addChild(tile);
+
+  const draw = () => {
+    const element = canvas.current;
+    if (!element) return;
+    const context = element.getContext('2d');
+    if (!context) {
+      latestError.current?.('Your browser could not create a 2D canvas for the world map.');
+      return;
+    }
+    const width = element.clientWidth;
+    const height = element.clientHeight;
+    if (!width || !height) return;
+    const density = Math.min(window.devicePixelRatio || 1, 2);
+    const pixelWidth = Math.round(width * density);
+    const pixelHeight = Math.round(height * density);
+    if (element.width !== pixelWidth || element.height !== pixelHeight) {
+      element.width = pixelWidth;
+      element.height = pixelHeight;
+    }
+    context.setTransform(density, 0, 0, density, 0, 0);
+    context.clearRect(0, 0, width, height);
+    const view = viewport.current;
+    const tileBounds = visibleTileBounds(width, height, latestFocus.current, view);
+    const visibleRadius = Math.max(
+      Math.abs(tileBounds.minX - tileBounds.center.x),
+      Math.abs(tileBounds.maxX - tileBounds.center.x),
+      Math.abs(tileBounds.minY - tileBounds.center.y),
+      Math.abs(tileBounds.maxY - tileBounds.center.y),
+    );
+    context.translate(width / 2 + view.panX, 80 + view.panY);
+    context.scale(view.scale, view.scale);
+
+    const diamond = (point: { x: number; y: number }, fill: string, stroke?: string) => {
+      context.beginPath();
+      context.moveTo(point.x, point.y + TILE_HEIGHT / 2);
+      context.lineTo(point.x + TILE_WIDTH / 2, point.y);
+      context.lineTo(point.x + TILE_WIDTH, point.y + TILE_HEIGHT / 2);
+      context.lineTo(point.x + TILE_WIDTH / 2, point.y + TILE_HEIGHT);
+      context.closePath();
+      context.fillStyle = fill;
+      context.fill();
+      if (stroke) {
+        context.strokeStyle = stroke;
+        context.lineWidth = 3;
+        context.stroke();
       }
-  };
-  const renderBuildings = () => {
-    const layer = buildingLayer.current;
-    const app = appRef.current;
-    if (!layer || !app) return;
-    layer.removeChildren();
-    for (const building of latestBuildings.current) {
+    };
+
+    for (let x = tileBounds.minX; x <= tileBounds.maxX; x += 1) {
+      for (let y = tileBounds.minY; y <= tileBounds.maxY; y += 1) {
+        diamond(
+          worldToScreen({ x: x - latestFocus.current.x, y: y - latestFocus.current.y }),
+          terrainColor(latestTerrain.current[`${x}:${y}`], x, y),
+        );
+        if (latestTerritory.current[`${Math.floor(x / 8)}:${Math.floor(y / 8)}`])
+          diamond(
+            worldToScreen({ x: x - latestFocus.current.x, y: y - latestFocus.current.y }),
+            'rgba(86, 136, 217, 0.16)',
+          );
+      }
+    }
+    for (const building of visibleByIsometricDepth(
+      latestBuildings.current,
+      tileBounds.center,
+      visibleRadius,
+    )) {
       const position = worldToScreen({
         x: building.x - latestFocus.current.x,
         y: building.y - latestFocus.current.y,
       });
-      const marker = new Graphics().rect(0, 0, 28, 22).fill({
-        color:
-          building.kind === 'settlement-center'
-            ? '#e6c45d'
-            : building.constructionTicks > 0
-              ? '#95633b'
-              : '#d8703a',
-      });
-      marker.position.set(position.x + app.renderer.width / 2 - 14, position.y + 80 - 22);
-      layer.addChild(marker);
+      context.fillStyle =
+        building.kind === 'settlement-center'
+          ? '#e6c45d'
+          : building.constructionTicks > 0
+            ? '#95633b'
+            : '#d8703a';
+      context.fillRect(position.x + TILE_WIDTH / 2 - 14, position.y + TILE_HEIGHT / 2 - 22, 28, 22);
+      context.strokeStyle = '#182337';
+      context.lineWidth = 2;
+      context.strokeRect(
+        position.x + TILE_WIDTH / 2 - 14,
+        position.y + TILE_HEIGHT / 2 - 22,
+        28,
+        22,
+      );
     }
-  };
-  const renderSelection = () => {
-    const layer = selectionLayer.current;
-    const app = appRef.current;
     const selected = latestSelectedTile.current;
-    if (!layer || !app) return;
-    layer.removeChildren();
-    if (!selected) return;
-    const position = worldToScreen({
-      x: selected.x - latestFocus.current.x,
-      y: selected.y - latestFocus.current.y,
-    });
-    const marker = new Graphics()
-      .poly([
-        0,
-        TILE_HEIGHT / 2,
-        TILE_WIDTH / 2,
-        0,
-        TILE_WIDTH,
-        TILE_HEIGHT / 2,
-        TILE_WIDTH / 2,
-        TILE_HEIGHT,
-      ])
-      .stroke({ color: '#f6d365', width: 3 });
-    marker.position.set(position.x + app.renderer.width / 2 - TILE_WIDTH / 2, position.y + 80);
-    layer.addChild(marker);
-  };
-  const renderThreats = () => {
-    const layer = threatLayer.current;
-    const app = appRef.current;
-    if (!layer || !app) return;
-    layer.removeChildren();
-    for (const threat of latestThreats.current) {
+    if (selected) {
+      diamond(
+        worldToScreen({
+          x: selected.x - latestFocus.current.x,
+          y: selected.y - latestFocus.current.y,
+        }),
+        'rgba(0, 0, 0, 0)',
+        '#f6d365',
+      );
+    }
+    const preview = latestPlacementPreview.current;
+    if (preview) {
+      diamond(
+        worldToScreen({
+          x: preview.tile.x - latestFocus.current.x,
+          y: preview.tile.y - latestFocus.current.y,
+        }),
+        preview.valid ? 'rgba(107, 190, 123, 0.35)' : 'rgba(215, 82, 82, 0.35)',
+        preview.valid ? '#9fe2b1' : '#ff9d8a',
+      );
+    }
+    for (const threat of visibleByIsometricDepth(
+      latestThreats.current,
+      tileBounds.center,
+      visibleRadius,
+    )) {
       const position = worldToScreen({
         x: threat.x - latestFocus.current.x,
         y: threat.y - latestFocus.current.y,
       });
-      const marker = new Graphics()
-        .circle(0, 0, 9)
-        .fill({ color: '#dc4e4e' })
-        .stroke({ color: '#fff1d6', width: 2 });
-      marker.position.set(position.x + app.renderer.width / 2, position.y + 80 + TILE_HEIGHT / 2);
-      layer.addChild(marker);
+      context.beginPath();
+      context.arc(position.x + TILE_WIDTH / 2, position.y + TILE_HEIGHT / 2, 9, 0, Math.PI * 2);
+      context.fillStyle = '#dc4e4e';
+      context.fill();
+      context.strokeStyle = '#fff1d6';
+      context.lineWidth = 2;
+      context.stroke();
     }
   };
+
   useEffect(() => {
-    const app = new Application();
-    let disposed = false;
-    let initialized = false;
-    let cleanupInput = () => {};
-    let cleanupMetrics = () => {};
-    void app
-      .init({ resizeTo: host.current ?? window, background: '#17243a', antialias: true })
-      .then(() => {
-        initialized = true;
-        if (!host.current || disposed) {
-          app.destroy();
-          return;
-        }
-        appRef.current = app;
-        host.current.replaceChildren(app.canvas);
-        const terrain = new Container();
-        terrainLayer.current = terrain;
-        app.stage.addChild(terrain);
-        const layer = new Container();
-        buildingLayer.current = layer;
-        app.stage.addChild(layer);
-        const selection = new Container();
-        selectionLayer.current = selection;
-        app.stage.addChild(selection);
-        const threatMarkers = new Container();
-        threatLayer.current = threatMarkers;
-        app.stage.addChild(threatMarkers);
-        renderTerrain();
-        renderBuildings();
-        renderSelection();
-        renderThreats();
-        let renderedFrames = 0;
-        let sampleStartedAt = performance.now();
-        const onTick = () => {
-          renderedFrames += 1;
-          const now = performance.now();
-          const elapsed = now - sampleStartedAt;
-          if (elapsed < 1_000) return;
-          const chunks = new Set(
-            Object.keys(latestTerrain.current).map((tile) => {
-              const [x, y] = tile.split(':').map(Number);
-              return `${Math.floor((x ?? 0) / 16)}:${Math.floor((y ?? 0) / 16)}`;
-            }),
-          );
-          latestMetrics.current?.({
-            framesPerSecond: Math.round((renderedFrames * 1_000) / elapsed),
-            renderedTiles: 17 * 17,
-            visibleBuildings: latestBuildings.current.length,
-            visibleThreats: latestThreats.current.length,
-            activeChunks: chunks.size,
-          });
-          renderedFrames = 0;
-          sampleStartedAt = now;
-        };
-        app.ticker.add(onTick);
-        cleanupMetrics = () => app.ticker.remove(onTick);
-        const canvas = app.canvas;
-        canvas.tabIndex = 0;
-        canvas.setAttribute(
-          'aria-label',
-          'Isometric world map. Use arrow keys to select tiles and your configured camera controls to pan.',
+    const element = canvas.current;
+    if (!element) return;
+    let animationFrame = 0;
+    let visibleChunkSignature = '';
+    let renderedFrames = 0;
+    let sampleStartedAt = performance.now();
+    const renderFrame = () => {
+      draw();
+      renderedFrames += 1;
+      const now = performance.now();
+      const visibleChunks = visibleChunkCoordinates(
+        visibleTileBounds(
+          element.clientWidth,
+          element.clientHeight,
+          latestFocus.current,
+          viewport.current,
+        ),
+      );
+      const nextVisibleChunkSignature = visibleChunks
+        .map((chunk) => `${chunk.x}:${chunk.y}`)
+        .join(',');
+      if (nextVisibleChunkSignature !== visibleChunkSignature) {
+        visibleChunkSignature = nextVisibleChunkSignature;
+        latestVisibleChunks.current?.(visibleChunks);
+      }
+      const elapsed = now - sampleStartedAt;
+      if (elapsed >= 1_000) {
+        const metricsBounds = visibleTileBounds(
+          element.clientWidth,
+          element.clientHeight,
+          latestFocus.current,
+          viewport.current,
         );
-        let dragging = false;
-        let lastX = 0;
-        let lastY = 0;
-        let draggedDistance = 0;
-        const onPointerDown = (event: PointerEvent) => {
-          dragging = true;
-          draggedDistance = 0;
-          lastX = event.clientX;
-          lastY = event.clientY;
-          canvas.setPointerCapture(event.pointerId);
-        };
-        const onPointerMove = (event: PointerEvent) => {
-          if (!dragging) return;
-          const dx = event.clientX - lastX;
-          const dy = event.clientY - lastY;
-          draggedDistance += Math.abs(dx) + Math.abs(dy);
-          app.stage.position.x += dx;
-          app.stage.position.y += dy;
-          lastX = event.clientX;
-          lastY = event.clientY;
-        };
-        const onPointerUp = (event: PointerEvent) => {
-          dragging = false;
-          if (draggedDistance < 8) {
-            const rectangle = canvas.getBoundingClientRect();
-            const localX =
-              (event.clientX - rectangle.left - app.stage.position.x) / app.stage.scale.x;
-            const localY =
-              (event.clientY - rectangle.top - app.stage.position.y) / app.stage.scale.y;
-            const world = screenToWorld({
-              x: localX - app.renderer.width / 2 + TILE_WIDTH / 2,
-              y: localY - 80,
-            });
-            latestSelectTile.current?.({
-              x: Math.round(world.x + latestFocus.current.x),
-              y: Math.round(world.y + latestFocus.current.y),
-            });
-          }
-          if (canvas.hasPointerCapture(event.pointerId))
-            canvas.releasePointerCapture(event.pointerId);
-        };
-        const onWheel = (event: WheelEvent) => {
-          event.preventDefault();
-          const rectangle = canvas.getBoundingClientRect();
-          const x = event.clientX - rectangle.left;
-          const y = event.clientY - rectangle.top;
-          const previous = app.stage.scale.x;
-          const next = Math.max(0.5, Math.min(2.5, previous * (event.deltaY < 0 ? 1.1 : 0.9)));
-          app.stage.position.x = x - ((x - app.stage.position.x) * next) / previous;
-          app.stage.position.y = y - ((y - app.stage.position.y) * next) / previous;
-          app.stage.scale.set(next);
-        };
-        const onKeyDown = (event: KeyboardEvent) => {
-          const selected = latestSelectedTile.current ?? { x: 0, y: 0 };
-          const step = event.shiftKey ? 4 : 1;
-          const direction =
-            event.key === 'ArrowUp'
-              ? { x: 0, y: -step }
-              : event.key === 'ArrowDown'
-                ? { x: 0, y: step }
-                : event.key === 'ArrowLeft'
-                  ? { x: -step, y: 0 }
-                  : event.key === 'ArrowRight'
-                    ? { x: step, y: 0 }
-                    : undefined;
-          if (direction) {
-            event.preventDefault();
-            latestSelectTile.current?.({
-              x: selected.x + direction.x,
-              y: selected.y + direction.y,
-            });
-            return;
-          }
-          const pan = 48;
-          const bindings = latestCameraBindings.current;
-          if (Object.values(bindings).includes(event.code)) {
-            event.preventDefault();
-            if (event.code === bindings.panUp) app.stage.position.y += pan;
-            if (event.code === bindings.panDown) app.stage.position.y -= pan;
-            if (event.code === bindings.panLeft) app.stage.position.x += pan;
-            if (event.code === bindings.panRight) app.stage.position.x -= pan;
-          }
-        };
-        canvas.style.touchAction = 'none';
-        canvas.addEventListener('pointerdown', onPointerDown);
-        canvas.addEventListener('pointermove', onPointerMove);
-        canvas.addEventListener('pointerup', onPointerUp);
-        canvas.addEventListener('pointercancel', onPointerUp);
-        canvas.addEventListener('wheel', onWheel, { passive: false });
-        canvas.addEventListener('keydown', onKeyDown);
-        cleanupInput = () => {
-          canvas.removeEventListener('pointerdown', onPointerDown);
-          canvas.removeEventListener('pointermove', onPointerMove);
-          canvas.removeEventListener('pointerup', onPointerUp);
-          canvas.removeEventListener('pointercancel', onPointerUp);
-          canvas.removeEventListener('wheel', onWheel);
-          canvas.removeEventListener('keydown', onKeyDown);
-        };
-      })
-      .catch((error: unknown) => {
-        if (disposed) return;
-        latestError.current?.(
-          error instanceof Error ? error.message : 'The map renderer could not start.',
+        const metricsRadius = Math.max(
+          Math.abs(metricsBounds.minX - metricsBounds.center.x),
+          Math.abs(metricsBounds.maxX - metricsBounds.center.x),
+          Math.abs(metricsBounds.minY - metricsBounds.center.y),
+          Math.abs(metricsBounds.maxY - metricsBounds.center.y),
         );
+        const chunks = new Set(
+          Object.keys(latestTerrain.current).map((tile) => {
+            const [x, y] = tile.split(':').map(Number);
+            return `${Math.floor((x ?? 0) / 16)}:${Math.floor((y ?? 0) / 16)}`;
+          }),
+        );
+        latestMetrics.current?.({
+          framesPerSecond: Math.round((renderedFrames * 1_000) / elapsed),
+          renderedTiles:
+            (metricsBounds.maxX - metricsBounds.minX + 1) *
+            (metricsBounds.maxY - metricsBounds.minY + 1),
+          visibleBuildings: visibleByIsometricDepth(
+            latestBuildings.current,
+            metricsBounds.center,
+            metricsRadius,
+          ).length,
+          visibleThreats: visibleByIsometricDepth(
+            latestThreats.current,
+            metricsBounds.center,
+            metricsRadius,
+          ).length,
+          activeChunks: chunks.size,
+        });
+        renderedFrames = 0;
+        sampleStartedAt = now;
+      }
+      animationFrame = requestAnimationFrame(renderFrame);
+    };
+    const resize = () => draw();
+    const resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(element);
+    let dragging = false;
+    let draggedDistance = 0;
+    let lastX = 0;
+    let lastY = 0;
+    const tileAtPointer = (event: PointerEvent) => {
+      const rectangle = element.getBoundingClientRect();
+      const view = viewport.current;
+      const world = screenToTile({
+        x: (event.clientX - rectangle.left - rectangle.width / 2 - view.panX) / view.scale,
+        y: (event.clientY - rectangle.top - 80 - view.panY) / view.scale,
       });
+      return {
+        x: world.x + latestFocus.current.x,
+        y: world.y + latestFocus.current.y,
+      };
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      dragging = true;
+      draggedDistance = 0;
+      lastX = event.clientX;
+      lastY = event.clientY;
+      element.setPointerCapture(event.pointerId);
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      if (!dragging) {
+        latestHoverTile.current?.(tileAtPointer(event));
+        return;
+      }
+      const dx = event.clientX - lastX;
+      const dy = event.clientY - lastY;
+      draggedDistance += Math.abs(dx) + Math.abs(dy);
+      viewport.current = {
+        ...viewport.current,
+        panX: viewport.current.panX + dx,
+        panY: viewport.current.panY + dy,
+      };
+      lastX = event.clientX;
+      lastY = event.clientY;
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      dragging = false;
+      if (draggedDistance < 8) {
+        const tile = tileAtPointer(event);
+        latestSelectTile.current?.(tile);
+        latestSelectEntity.current?.(
+          entityAtTile(tile, latestBuildings.current, latestThreats.current),
+        );
+        latestHoverTile.current?.(tile);
+      }
+      if (element.hasPointerCapture(event.pointerId))
+        element.releasePointerCapture(event.pointerId);
+    };
+    const onPointerLeave = () => latestHoverTile.current?.(undefined);
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const previous = viewport.current.scale;
+      const next = Math.max(0.5, Math.min(2.5, previous * (event.deltaY < 0 ? 1.1 : 0.9)));
+      viewport.current = { ...viewport.current, scale: next };
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      const selected = latestSelectedTile.current ?? { x: 0, y: 0 };
+      const step = event.shiftKey ? 4 : 1;
+      const direction =
+        event.key === 'ArrowUp'
+          ? { x: 0, y: -step }
+          : event.key === 'ArrowDown'
+            ? { x: 0, y: step }
+            : event.key === 'ArrowLeft'
+              ? { x: -step, y: 0 }
+              : event.key === 'ArrowRight'
+                ? { x: step, y: 0 }
+                : undefined;
+      if (direction) {
+        event.preventDefault();
+        latestSelectTile.current?.({ x: selected.x + direction.x, y: selected.y + direction.y });
+        return;
+      }
+      const pan = 48;
+      const bindings = latestCameraBindings.current;
+      if (!Object.values(bindings).includes(event.code)) return;
+      event.preventDefault();
+      viewport.current = {
+        ...viewport.current,
+        panX:
+          viewport.current.panX +
+          (event.code === bindings.panLeft ? pan : event.code === bindings.panRight ? -pan : 0),
+        panY:
+          viewport.current.panY +
+          (event.code === bindings.panUp ? pan : event.code === bindings.panDown ? -pan : 0),
+      };
+    };
+    element.tabIndex = 0;
+    element.setAttribute(
+      'aria-label',
+      'Isometric world map. Use arrow keys to select tiles and your configured camera controls to pan.',
+    );
+    element.style.touchAction = 'none';
+    element.addEventListener('pointerdown', onPointerDown);
+    element.addEventListener('pointermove', onPointerMove);
+    element.addEventListener('pointerup', onPointerUp);
+    element.addEventListener('pointercancel', onPointerUp);
+    element.addEventListener('pointerleave', onPointerLeave);
+    element.addEventListener('wheel', onWheel, { passive: false });
+    element.addEventListener('keydown', onKeyDown);
+    animationFrame = requestAnimationFrame(renderFrame);
     return () => {
-      disposed = true;
-      cleanupInput();
-      cleanupMetrics();
-      appRef.current = null;
-      terrainLayer.current = null;
-      buildingLayer.current = null;
-      threatLayer.current = null;
-      selectionLayer.current = null;
-      if (initialized) app.destroy();
+      cancelAnimationFrame(animationFrame);
+      resizeObserver.disconnect();
+      element.removeEventListener('pointerdown', onPointerDown);
+      element.removeEventListener('pointermove', onPointerMove);
+      element.removeEventListener('pointerup', onPointerUp);
+      element.removeEventListener('pointercancel', onPointerUp);
+      element.removeEventListener('pointerleave', onPointerLeave);
+      element.removeEventListener('wheel', onWheel);
+      element.removeEventListener('keydown', onKeyDown);
     };
   }, []);
-  useEffect(() => {
-    renderTerrain();
-    renderBuildings();
-    renderSelection();
-    renderThreats();
-  }, [terrain, focus.x, focus.y]);
-  useEffect(() => {
-    renderBuildings();
-  }, [buildings]);
-  useEffect(() => {
-    renderSelection();
-  }, [selectedTile]);
-  useEffect(() => {
-    renderThreats();
-  }, [threats]);
-  return <div className="world-canvas" ref={host} aria-label="Isometric world map" />;
+
+  return <canvas className="world-canvas" ref={canvas} />;
 };

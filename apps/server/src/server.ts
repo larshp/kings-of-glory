@@ -1,4 +1,5 @@
 import { createServer, type Server } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { validateContent } from '@kings/content';
 import { MAX_MESSAGE_BYTES, parseClientMessage, PROTOCOL_VERSION } from '@kings/protocol';
 import {
@@ -83,9 +84,13 @@ export const createGameServer = async (
         ),
       ).size;
       const memory = process.memoryUsage();
+      const outboundBufferedBytes = [...sockets.clients].reduce(
+        (total, socket) => total + socket.bufferedAmount,
+        0,
+      );
       response.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' });
       response.end(
-        `kings_world_tick ${host.world.tick}\nkings_connected_players ${host.connectedPlayerCount}\nkings_tick_duration_ms ${lastTickDurationMs}\nkings_tick_failures_total ${tickFailures}\nkings_entities ${Object.keys(host.world.buildings).length}\nkings_active_chunks ${activeChunks}\nkings_active_threats ${Object.keys(host.world.threats).length}\nkings_commands_accepted_total ${metrics.acceptedCommands}\nkings_commands_rejected_total ${metrics.rejectedCommands}\nkings_command_persistence_failures_total ${metrics.persistenceFailures}\nkings_command_duration_ms ${metrics.lastCommandDurationMs}\nkings_checkpoint_failures_total ${metrics.checkpointFailures}\nkings_checkpoint_duration_ms ${metrics.lastCheckpointDurationMs}\nkings_state_full_messages_total ${metrics.fullStateMessages}\nkings_state_full_bytes_total ${metrics.fullStateBytes}\nkings_state_delta_messages_total ${metrics.deltaStateMessages}\nkings_state_delta_bytes_total ${metrics.deltaStateBytes}\nkings_state_build_duration_ms ${metrics.lastStateBuildDurationMs}\nkings_process_resident_memory_bytes ${memory.rss}\nkings_process_heap_used_bytes ${memory.heapUsed}\n`,
+        `kings_world_tick ${host.world.tick}\nkings_connected_players ${host.connectedPlayerCount}\nkings_tick_duration_ms ${lastTickDurationMs}\nkings_tick_failures_total ${tickFailures}\nkings_entities ${Object.keys(host.world.buildings).length}\nkings_active_chunks ${activeChunks}\nkings_active_threats ${Object.keys(host.world.threats).length}\nkings_commands_pending ${pendingCommands.size}\nkings_outbound_buffered_bytes ${outboundBufferedBytes}\nkings_commands_accepted_total ${metrics.acceptedCommands}\nkings_commands_rejected_total ${metrics.rejectedCommands}\nkings_command_persistence_failures_total ${metrics.persistenceFailures}\nkings_command_duration_ms ${metrics.lastCommandDurationMs}\nkings_checkpoint_failures_total ${metrics.checkpointFailures}\nkings_checkpoint_duration_ms ${metrics.lastCheckpointDurationMs}\nkings_checkpoint_tick ${metrics.lastCheckpointTick}\nkings_recovery_duration_ms ${metrics.lastRecoveryDurationMs}\nkings_journal_lag_ticks ${Math.max(0, host.world.tick - metrics.lastCheckpointTick)}\nkings_state_full_messages_total ${metrics.fullStateMessages}\nkings_state_full_bytes_total ${metrics.fullStateBytes}\nkings_state_delta_messages_total ${metrics.deltaStateMessages}\nkings_state_delta_bytes_total ${metrics.deltaStateBytes}\nkings_state_build_duration_ms ${metrics.lastStateBuildDurationMs}\nkings_process_resident_memory_bytes ${memory.rss}\nkings_process_heap_used_bytes ${memory.heapUsed}\n`,
       );
       return;
     }
@@ -95,6 +100,7 @@ export const createGameServer = async (
   const sockets = new WebSocketServer({ server: httpServer, maxPayload: MAX_MESSAGE_BYTES });
 
   sockets.on('connection', (socket, request) => {
+    const connectionId = randomUUID();
     const origin = request.headers.origin;
     if (
       environment.allowedOrigins.length > 0 &&
@@ -113,6 +119,7 @@ export const createGameServer = async (
       },
     };
     let connected = false;
+    let connectedPlayerId: string | undefined;
     let windowStartedAt = Date.now();
     let messagesInWindow = 0;
     let lastActivityAt = Date.now();
@@ -172,14 +179,15 @@ export const createGameServer = async (
               message: 'Client upgrade required.',
             }),
           );
-          socket.close(1002);
+          socket.close(1002, 'Client upgrade required');
           return;
         }
         void host
           .connect(connection, message.playerId)
           .then(() => {
             connected = true;
-            log('player.connected', { playerId: message.playerId });
+            connectedPlayerId = message.playerId;
+            log('player.connected', { connectionId, playerId: message.playerId });
           })
           .catch((error: unknown) => {
             socket.send(
@@ -203,12 +211,16 @@ export const createGameServer = async (
         void pending
           .catch((error: unknown) => {
             log('world.command_failed', {
+              connectionId,
+              playerId: connectedPlayerId,
+              commandId: message.command.id,
               error: error instanceof Error ? error.message : String(error),
             });
             socket.close(1011, 'Command processing failed');
           })
           .finally(() => pendingCommands.delete(pending));
       }
+      if (message.type === 'interest') host.setInterest(connection, message.chunks);
       if (message.type === 'resync') host.resync(connection);
       if (message.type === 'ping')
         socket.send(JSON.stringify({ type: 'pong', nonce: message.nonce }));
@@ -216,7 +228,12 @@ export const createGameServer = async (
     socket.on('close', (code, reason) => {
       clearInterval(heartbeatTimer);
       host.disconnect(connection);
-      log('player.disconnected', { code, reason: reason.toString() });
+      log('player.disconnected', {
+        connectionId,
+        playerId: connectedPlayerId,
+        code,
+        reason: reason.toString(),
+      });
     });
   });
 
@@ -260,16 +277,24 @@ export const createGameServer = async (
       stopping = true;
       clearInterval(tickTimer);
       log('server.stopping');
-      for (const socket of sockets.clients) socket.close(1012, 'Server maintenance');
+      for (const socket of sockets.clients) {
+        socket.send(
+          JSON.stringify({ type: 'maintenance', message: 'Server maintenance in progress.' }),
+        );
+        socket.close(1012, 'Server maintenance');
+      }
       try {
         if (pendingTick) await pendingTick;
         await Promise.allSettled(pendingCommands);
         await host.checkpoint();
-        await host.close();
       } finally {
-        await new Promise<void>((resolve, reject) =>
-          httpServer.close((error) => (error ? reject(error) : resolve())),
-        );
+        try {
+          await host.close();
+        } finally {
+          await new Promise<void>((resolve, reject) =>
+            httpServer.close((error) => (error ? reject(error) : resolve())),
+          );
+        }
       }
     },
   };

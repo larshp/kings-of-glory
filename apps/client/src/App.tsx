@@ -5,10 +5,11 @@ import {
   useRef,
   useState,
 } from 'react';
+import { buildings as buildingDefinitions, recipes, technologies } from '@kings/content';
 import type { ClientWorldState, ServerMessage } from '@kings/protocol';
 import { type Building, type SettlementRole } from '@kings/simulation';
 import { WorldCanvas } from './WorldCanvas.js';
-import type { WorldCanvasMetrics } from './WorldCanvas.js';
+import type { PickedEntity, WorldCanvasMetrics } from './WorldCanvas.js';
 import {
   defaultPreferences,
   displayKey,
@@ -23,14 +24,17 @@ import './style.css';
 const storedPlayerId = sessionStorage.getItem('kings-dev-player-id');
 const playerId = storedPlayerId ?? `dev-${crypto.randomUUID().slice(0, 8)}`;
 if (!storedPlayerId) sessionStorage.setItem('kings-dev-player-id', playerId);
+const defaultServerUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname || 'localhost'}:3001`;
 
 const rejectionMessage = (code: string | undefined) => {
   const messages: Record<string, string> = {
+    'invalid-coordinate': 'That map coordinate is invalid.',
     'out-of-range': 'That tile is too far from your settlement.',
     'outside-plot': 'Build inside your claimed territory.',
     occupied: 'Another building already occupies that tile.',
     'insufficient-wood': 'Gather more wood before starting this construction.',
     'insufficient-ore': 'Gather or transfer more ore first.',
+    'insufficient-resources': 'Gather, craft, or transfer the required resources first.',
     'inventory-full': 'Move or use items to make inventory space.',
     'construction-incomplete': 'Wait for construction to finish before using this building.',
     'building-destroyed': 'Repair or demolish the destroyed building first.',
@@ -44,6 +48,7 @@ const rejectionMessage = (code: string | undefined) => {
     'already-settlement-member': 'That player is already a member of this settlement.',
     'not-settlement-member': 'That player is not a member of this settlement.',
     'cannot-leave-settlement-owner': 'Transfer ownership before leaving your own settlement.',
+    'cannot-remove-settlement-owner': 'Transfer ownership before removing the current owner.',
     'cannot-transfer-settlement-ownership-to-self':
       'Choose another settlement member as the owner.',
     unauthorized: 'Your connection cannot perform that action for this player.',
@@ -58,6 +63,17 @@ const setConnectionIndicator = (message: string, hidden = false) => {
   indicator.textContent = message;
   indicator.hidden = hidden;
 };
+const technologyCostLabel = (
+  cost: Readonly<Partial<Record<'ore' | 'wood' | 'ingot' | 'tool', number>>>,
+) =>
+  Object.entries(cost)
+    .map(([item, amount]) => `${amount} ${item}${amount === 1 ? '' : 's'}`)
+    .join(', ');
+const recipeForBuilding = (kind: Building['kind']) => {
+  const definition = buildingDefinitions[kind];
+  if (!('recipe' in definition)) return undefined;
+  return Object.values(recipes).find((recipe) => recipe.id === definition.recipe);
+};
 
 export const App = () => {
   const socket = useRef<WebSocket | undefined>(undefined);
@@ -68,10 +84,14 @@ export const App = () => {
   const [status, setStatus] = useState('Connecting');
   const [notice, setNotice] = useState('');
   const [selectedTile, setSelectedTile] = useState<{ x: number; y: number }>();
+  const [selectedEntity, setSelectedEntity] = useState<PickedEntity>();
+  const [hoveredTile, setHoveredTile] = useState<{ x: number; y: number }>();
   const [recipientId, setRecipientId] = useState('');
+  const [recipientItem, setRecipientItem] = useState<'ore' | 'wood' | 'ingot' | 'tool'>('ingot');
   const [inviteeId, setInviteeId] = useState('');
   const [logisticsSourceId, setLogisticsSourceId] = useState('');
   const [logisticsTargetId, setLogisticsTargetId] = useState('');
+  const [logisticsItem, setLogisticsItem] = useState<'ore' | 'wood' | 'ingot' | 'tool'>('ore');
   const [preferences, setPreferences] = useState(() =>
     loadPreferences(localStorage.getItem(PREFERENCE_STORAGE_KEY)),
   );
@@ -89,7 +109,7 @@ export const App = () => {
     let activeConnection: WebSocket | undefined;
     const connect = () => {
       setStatus(attempts === 0 ? 'Connecting' : 'Reconnecting');
-      const connection = new WebSocket(import.meta.env.VITE_SERVER_URL ?? 'ws://localhost:3001');
+      const connection = new WebSocket(import.meta.env.VITE_SERVER_URL ?? defaultServerUrl);
       activeConnection = connection;
       socket.current = connection;
       connection.onopen = () => {
@@ -117,6 +137,22 @@ export const App = () => {
         if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
         heartbeatTimer = undefined;
         if (stopped || !reconnectAllowed) return;
+        if (event.code === 1012) {
+          reconnectAllowed = false;
+          setStatus('Maintenance');
+          setConnectionIndicator('The game server is under maintenance. Please try again shortly.');
+          setNotice('The server is saving the world for maintenance. Your actions are paused.');
+          return;
+        }
+        if (event.code === 1002 && event.reason === 'Client upgrade required') {
+          reconnectAllowed = false;
+          setStatus('Upgrade required');
+          setConnectionIndicator(
+            'This game client is incompatible with the server. Refresh to update.',
+          );
+          setNotice('A newer game client is required. Refresh this page after it is deployed.');
+          return;
+        }
         setConnectionIndicator(
           `Server connection closed (${event.code}${event.reason ? `: ${event.reason}` : ''}). Retrying…`,
         );
@@ -128,8 +164,16 @@ export const App = () => {
       };
       connection.onmessage = ({ data }) => {
         if (stopped || socket.current !== connection) return;
+        let message: ServerMessage;
+        try {
+          message = JSON.parse(data) as ServerMessage;
+        } catch {
+          setConnectionIndicator('The server sent an unreadable update. Reconnecting…');
+          setNotice('The server sent an unreadable update. Reconnecting…');
+          connection.close(1002, 'Malformed server message');
+          return;
+        }
         messageCount.current.received += 1;
-        const message = JSON.parse(data) as ServerMessage;
         if (message.type === 'welcome') {
           setConnectionIndicator('Game world connected.', true);
           stateVersion.current = message.stateVersion;
@@ -159,12 +203,22 @@ export const App = () => {
         }
         if (message.type === 'commandResult' && !message.result.accepted)
           setNotice(rejectionMessage(message.result.code));
+        if (message.type === 'maintenance') {
+          reconnectAllowed = false;
+          setStatus('Maintenance');
+          setConnectionIndicator(message.message);
+          setNotice(message.message);
+        }
         if (message.type === 'error') {
           setNotice(message.message ?? 'Connection error');
           if (message.code === 'version-mismatch') {
             reconnectAllowed = false;
             setStatus('Upgrade required');
-            connection.close();
+            setConnectionIndicator(
+              'This game client is incompatible with the server. Refresh to update.',
+            );
+            setNotice('A newer game client is required. Refresh this page after it is deployed.');
+            connection.close(1002, 'Client upgrade required');
           }
         }
       };
@@ -192,6 +246,14 @@ export const App = () => {
   }, []);
 
   const player = state?.players[playerId];
+  const canAffordTechnology = (
+    cost: Readonly<Partial<Record<'ore' | 'wood' | 'ingot' | 'tool', number>>>,
+  ) => {
+    if (!player) return false;
+    return Object.entries(cost).every(
+      ([item, amount]) => player.inventory[item as keyof typeof player.inventory] >= (amount ?? 0),
+    );
+  };
   const rebindCamera = (action: CameraAction) => (event: ReactKeyboardEvent<HTMLInputElement>) => {
     event.preventDefault();
     const updated = withCameraBinding(preferences, action, event.code);
@@ -210,6 +272,11 @@ export const App = () => {
         command: { id: crypto.randomUUID(), playerId, sequence: ++sequence.current, ...command },
       }),
     );
+    messageCount.current.sent += 1;
+  };
+  const sendInterest = (chunks: readonly { x: number; y: number }[]) => {
+    if (socket.current?.readyState !== WebSocket.OPEN) return;
+    socket.current.send(JSON.stringify({ type: 'interest', chunks }));
     messageCount.current.sent += 1;
   };
   const plot = useMemo(() => player?.plot, [player]);
@@ -236,13 +303,15 @@ export const App = () => {
     : [];
   const logisticsSources = manageableBuildings.filter(
     (building) =>
-      building.kind === 'storage' &&
+      (building.kind === 'storage' ||
+        building.kind === 'smelter' ||
+        building.kind === 'workshop') &&
       building.constructionTicks === 0 &&
       (roleForBuilding(building) === 'owner' || roleForBuilding(building) === 'logistics'),
   );
   const logisticsTargets = manageableBuildings.filter(
     (building) =>
-      building.kind === 'smelter' &&
+      (building.kind === 'smelter' || building.kind === 'workshop') &&
       building.constructionTicks === 0 &&
       (roleForBuilding(building) === 'owner' || roleForBuilding(building) === 'logistics'),
   );
@@ -261,34 +330,94 @@ export const App = () => {
         )
     : undefined;
   const candidatePlacement = selectedTile ?? fallbackPlacement;
-  const candidateTerritory = candidatePlacement
-    ? `${Math.floor(candidatePlacement.x / 8)}:${Math.floor(candidatePlacement.y / 8)}`
-    : '';
-  const placement =
-    candidatePlacement &&
-    player?.territoryCells[candidateTerritory] &&
-    terrainAt(candidatePlacement.x, candidatePlacement.y) !== undefined &&
-    terrainAt(candidatePlacement.x, candidatePlacement.y) !== 'water' &&
-    !Object.values(state?.buildings ?? {}).some(
-      (building) => building.x === candidatePlacement.x && building.y === candidatePlacement.y,
-    )
-      ? candidatePlacement
+  const buildablePlacement = (candidate: { x: number; y: number } | undefined) => {
+    const territory = candidate
+      ? `${Math.floor(candidate.x / 8)}:${Math.floor(candidate.y / 8)}`
+      : '';
+    return candidate &&
+      player?.territoryCells[territory] &&
+      terrainAt(candidate.x, candidate.y) !== undefined &&
+      terrainAt(candidate.x, candidate.y) !== 'water' &&
+      !Object.values(state?.buildings ?? {}).some(
+        (building) => building.x === candidate.x && building.y === candidate.y,
+      )
+      ? candidate
       : undefined;
+  };
+  const placement = buildablePlacement(candidatePlacement);
+  const previewCandidate = hoveredTile ?? candidatePlacement;
+  const previewPlacement = buildablePlacement(previewCandidate);
+  const selectedTerritoryOwner = selectedTile
+    ? state?.territory[`${Math.floor(selectedTile.x / 8)}:${Math.floor(selectedTile.y / 8)}`]
+    : undefined;
   const transfer = (
     building: Building,
-    item: 'ore' | 'ingot',
+    item: 'ore' | 'wood' | 'ingot' | 'tool',
     direction: 'toBuilding' | 'toPlayer',
   ) => send({ type: 'transfer', buildingId: building.id, item, amount: 1, direction });
   const frontier = plot ? { x: plot.x + 16, y: plot.y } : { x: 0, y: 0 };
   const activeThreats = state
-    ? Object.values(state.threats).filter(
-        (threat) => state.buildings[threat.targetBuildingId]?.ownerId === playerId,
-      )
+    ? Object.values(state.threats).filter((threat) => {
+        const target = state.buildings[threat.targetBuildingId];
+        return target && roleForBuilding(target);
+      })
     : [];
   const transfers = state?.transfers ?? [];
   const personalSettlement = state?.settlements[`settlement-${playerId}`];
   const logisticsLinks = Object.values(state?.logisticsLinks ?? {});
+  const logisticsTarget = state?.buildings[logisticsTargetId];
+  const logisticsItems = logisticsTarget
+    ? (() => {
+        const definition = buildingDefinitions[logisticsTarget.kind];
+        if (!('recipe' in definition)) return [] as Array<'ore' | 'wood' | 'ingot' | 'tool'>;
+        const recipe = Object.values(recipes).find(
+          (candidate) => candidate.id === definition.recipe,
+        );
+        return Object.keys(recipe?.input ?? {}) as Array<'ore' | 'wood' | 'ingot' | 'tool'>;
+      })()
+    : [];
   const actionTile = selectedTile ?? (plot ? { x: plot.x, y: plot.y } : { x: 0, y: 0 });
+  const selectedResource = terrainAt(actionTile.x, actionTile.y);
+  const ownedBuildings = Object.values(state?.buildings ?? {}).filter(
+    (building) => building.ownerId === playerId,
+  );
+  const ownSmelter = ownedBuildings.find((building) => building.kind === 'smelter');
+  const ownWorkshop = ownedBuildings.find((building) => building.kind === 'workshop');
+  const hasCompletedHearth = ownedBuildings.some(
+    (building) => building.kind === 'hearth' && building.constructionTicks === 0,
+  );
+  const onboardingSteps = player
+    ? [
+        {
+          complete:
+            player.inventory.ore > 0 ||
+            Boolean(ownSmelter?.inventory.ore) ||
+            player.inventory.ingot > 0,
+          text: 'Gather ore and wood from nearby selected deposits.',
+        },
+        {
+          complete: Boolean(ownSmelter?.constructionTicks === 0),
+          text: 'Build and complete a smelter on a highlighted tile.',
+        },
+        {
+          complete: player.inventory.ingot > 0 || Boolean(ownSmelter?.inventory.ingot),
+          text: 'Supply the smelter with ore and produce an ingot.',
+        },
+        {
+          complete: player.research.unlocked.metallurgy,
+          text: 'Research metallurgy with one ingot.',
+        },
+        {
+          complete: Boolean(ownWorkshop?.constructionTicks === 0),
+          text: 'Build a workshop, then link or load its wood and ingot inputs.',
+        },
+        {
+          complete: player.inventory.tool > 0 || Boolean(ownWorkshop?.inventory.tool),
+          text: 'Forge tools for a Territorial Charter and prepare a watchtower.',
+        },
+      ]
+    : [];
+  const nextOnboardingStep = onboardingSteps.find((step) => !step.complete);
 
   return (
     <main
@@ -299,6 +428,7 @@ export const App = () => {
         buildings={Object.values(state?.buildings ?? {})}
         threats={Object.values(state?.threats ?? {})}
         terrain={state?.terrain ?? {}}
+        territory={state?.territory ?? {}}
         cameraBindings={preferences.camera}
         focus={
           plot
@@ -306,8 +436,16 @@ export const App = () => {
             : { x: 0, y: 0 }
         }
         selectedTile={selectedTile}
+        placementPreview={
+          previewCandidate
+            ? { tile: previewCandidate, valid: Boolean(previewPlacement) }
+            : undefined
+        }
         onSelectTile={setSelectedTile}
+        onSelectEntity={setSelectedEntity}
+        onHoverTile={setHoveredTile}
         onMetrics={setCanvasMetrics}
+        onVisibleChunks={sendInterest}
         onError={(message) => setRendererError(message)}
       />
       <aside className="hud">
@@ -315,9 +453,20 @@ export const App = () => {
         <p className="map-help">
           Map: drag to pan, scroll to zoom, arrows to select, {displayKey(preferences.camera.panUp)}
           /{displayKey(preferences.camera.panLeft)}/{displayKey(preferences.camera.panDown)}/
-          {displayKey(preferences.camera.panRight)} to pan.
+          {displayKey(preferences.camera.panRight)} to pan. Gray tiles are ore deposits, brown tiles
+          are timber groves, and blue tiles are public claimed sectors.
         </p>
         <p className="status">{status}</p>
+        {status === 'Maintenance' && (
+          <p className="alert" role="alert">
+            The server is completing maintenance. Refresh the page in a moment to reconnect.
+          </p>
+        )}
+        {status === 'Upgrade required' && (
+          <p className="alert" role="alert">
+            This client no longer matches the server. Refresh the page to load the update.
+          </p>
+        )}
         <section className="settings-panel" aria-labelledby="settings-title">
           <h2 id="settings-title">Accessibility and controls</h2>
           <label htmlFor="text-scale">Text size</label>
@@ -427,6 +576,11 @@ export const App = () => {
                 Housing is full. Build housing before your settlement can grow.
               </p>
             )}
+            {player.population.satisfaction < 50 && player.population.total > 2 && (
+              <p className="alert">
+                Low wellbeing will cause surplus settlers to leave at the next settlement review.
+              </p>
+            )}
             {player.population.unemployed > 0 && (
               <p className="alert">
                 {player.population.unemployed} settler
@@ -434,13 +588,47 @@ export const App = () => {
                 smelter.
               </p>
             )}
+            {!hasCompletedHearth && (
+              <p className="alert">Build a hearth to improve settlement wellbeing.</p>
+            )}
+            <section className="settlement-stats" aria-labelledby="settlement-stats-title">
+              <h2 id="settlement-stats-title">Settlement needs</h2>
+              <p>
+                Shelter:{' '}
+                {player.population.capacity >= player.population.total ? 'met' : 'shortage'} (
+                {player.population.total}/{player.population.capacity})
+              </p>
+              <p>
+                Work: {player.population.employed}/{player.population.total} settlers assigned
+              </p>
+              <p>Wellbeing: {hasCompletedHearth ? 'hearth active' : 'hearth needed'}</p>
+            </section>
             <p>
               Ore {player.inventory.ore} · Wood {player.inventory.wood} · Ingot{' '}
-              {player.inventory.ingot}
+              {player.inventory.ingot} · Tool {player.inventory.tool}
             </p>
             <p>
               Selected tile: {actionTile.x}, {actionTile.y}
+              {selectedResource === 'ore'
+                ? ' (ore deposit)'
+                : selectedResource === 'wood'
+                  ? ' (timber grove)'
+                  : ''}
             </p>
+            {selectedEntity && (
+              <p>
+                Selected {selectedEntity.type}:{' '}
+                {selectedEntity.type === 'building'
+                  ? (state.buildings[selectedEntity.id]?.kind ?? selectedEntity.id)
+                  : `raider ${selectedEntity.id}`}
+              </p>
+            )}
+            {selectedTile && (
+              <p>
+                Sector:{' '}
+                {selectedTerritoryOwner ? `claimed by ${selectedTerritoryOwner}` : 'unclaimed'}
+              </p>
+            )}
             <p className={selectedTile && !placement ? 'threat-active' : ''}>
               {selectedTile
                 ? placement
@@ -450,38 +638,67 @@ export const App = () => {
             </p>
             <section className="onboarding" aria-labelledby="getting-started-title">
               <h2 id="getting-started-title">Getting started</h2>
+              {nextOnboardingStep && (
+                <p className="onboarding-next">Next: {nextOnboardingStep.text}</p>
+              )}
               <ol>
-                <li>Select a nearby tile and gather ore.</li>
-                <li>Build a smelter on a highlighted buildable tile.</li>
-                <li>Load ore into it, then collect an ingot.</li>
-                <li>Research metallurgy, explore, and defend with a watchtower.</li>
+                {onboardingSteps.map((step) => (
+                  <li className={step.complete ? 'complete' : undefined} key={step.text}>
+                    {step.complete ? 'Done: ' : ''}
+                    {step.text}
+                  </li>
+                ))}
               </ol>
             </section>
-            <button onClick={() => send({ type: 'gather', ...actionTile })}>Gather ore</button>
+            <button
+              disabled={selectedResource !== 'ore' && selectedResource !== 'wood'}
+              onClick={() => send({ type: 'gather', ...actionTile })}
+            >
+              Gather{' '}
+              {selectedResource === 'ore'
+                ? 'ore'
+                : selectedResource === 'wood'
+                  ? 'wood'
+                  : 'resource'}
+            </button>
             <h2>Construction</h2>
             <button
               disabled={!placement}
               onClick={() => placement && send({ type: 'placeSmelter', ...placement })}
             >
-              Place smelter (3 wood)
+              Place smelter ({buildingDefinitions.smelter.cost.wood} wood)
+            </button>
+            <button
+              disabled={!placement || !player.research.unlocked.metallurgy}
+              onClick={() => placement && send({ type: 'placeWorkshop', ...placement })}
+            >
+              Place workshop ({buildingDefinitions.workshop.cost.wood} wood;{' '}
+              {technologies.metallurgy.displayName} required)
             </button>
             <button
               disabled={!placement}
               onClick={() => placement && send({ type: 'placeStorage', ...placement })}
             >
-              Place storage (2 wood)
+              Place storage ({buildingDefinitions.storage.cost.wood} wood)
             </button>
             <button
               disabled={!placement}
               onClick={() => placement && send({ type: 'placeHousing', ...placement })}
             >
-              Place housing (2 wood)
+              Place housing ({buildingDefinitions.housing.cost.wood} wood)
             </button>
             <button
               disabled={!placement}
+              onClick={() => placement && send({ type: 'placeHearth', ...placement })}
+            >
+              Place hearth ({buildingDefinitions.hearth.cost.wood} wood; wellbeing service)
+            </button>
+            <button
+              disabled={!placement || !player.research.unlocked.metallurgy}
               onClick={() => placement && send({ type: 'placeWatchtower', ...placement })}
             >
-              Place watchtower (2 wood)
+              Place watchtower ({buildingDefinitions.watchtower.cost.wood} wood;{' '}
+              {technologies.metallurgy.displayName} required)
             </button>
             <h2>Defense</h2>
             <p className={activeThreats.length > 0 ? 'threat-active' : ''}>
@@ -497,18 +714,31 @@ export const App = () => {
               onChange={(event) => setRecipientId(event.target.value)}
               placeholder="dev-…"
             />
+            <label htmlFor="recipient-item">Resource to send</label>
+            <select
+              id="recipient-item"
+              value={recipientItem}
+              onChange={(event) =>
+                setRecipientItem(event.target.value as 'ore' | 'wood' | 'ingot' | 'tool')
+              }
+            >
+              <option value="ore">Ore</option>
+              <option value="wood">Wood</option>
+              <option value="ingot">Ingot</option>
+              <option value="tool">Tool</option>
+            </select>
             <button
-              disabled={!recipientId.trim() || player.inventory.ingot < 1}
+              disabled={!recipientId.trim() || player.inventory[recipientItem] < 1}
               onClick={() =>
                 send({
                   type: 'transferToPlayer',
                   targetPlayerId: recipientId.trim(),
-                  item: 'ingot',
+                  item: recipientItem,
                   amount: 1,
                 })
               }
             >
-              Send 1 ingot
+              Send 1 {recipientItem}
             </button>
             <section className="settlement-panel" aria-labelledby="settlement-title">
               <h2 id="settlement-title">Settlement roles</h2>
@@ -520,7 +750,7 @@ export const App = () => {
                 id="invitee-id"
                 value={inviteeId}
                 onChange={(event) => setInviteeId(event.target.value)}
-                placeholder="dev-â€¦"
+                placeholder="dev-player"
               />
               <button
                 disabled={!personalSettlement || !inviteeId.trim()}
@@ -615,6 +845,17 @@ export const App = () => {
                                   >
                                     Transfer ownership
                                   </button>
+                                  <button
+                                    onClick={() =>
+                                      send({
+                                        type: 'removeSettlementMember',
+                                        settlementId: settlement.id,
+                                        targetPlayerId: memberId,
+                                      })
+                                    }
+                                  >
+                                    Remove member
+                                  </button>
                                 </span>
                               )}
                             </li>
@@ -645,46 +886,66 @@ export const App = () => {
             <section className="automation-panel" aria-labelledby="automation-title">
               <h2 id="automation-title">Automation</h2>
               <p>
-                Link a completed storage building to a completed smelter to move one ore each tick.
+                Link completed storage or production buildings to a producer. Each link moves one
+                required input per tick.
               </p>
-              <label htmlFor="logistics-source">Storage source</label>
+              <label htmlFor="logistics-source">Source</label>
               <select
                 id="logistics-source"
                 value={logisticsSourceId}
                 onChange={(event) => setLogisticsSourceId(event.target.value)}
               >
-                <option value="">Choose storage</option>
+                <option value="">Choose source</option>
                 {logisticsSources.map((building) => (
                   <option key={building.id} value={building.id}>
                     {building.id}
                   </option>
                 ))}
               </select>
-              <label htmlFor="logistics-target">Smelter target</label>
+              <label htmlFor="logistics-target">Producer target</label>
               <select
                 id="logistics-target"
                 value={logisticsTargetId}
                 onChange={(event) => setLogisticsTargetId(event.target.value)}
               >
-                <option value="">Choose smelter</option>
+                <option value="">Choose producer</option>
                 {logisticsTargets.map((building) => (
                   <option key={building.id} value={building.id}>
                     {building.id}
                   </option>
                 ))}
               </select>
+              <label htmlFor="logistics-item">Input item</label>
+              <select
+                id="logistics-item"
+                value={logisticsItems.includes(logisticsItem) ? logisticsItem : ''}
+                onChange={(event) =>
+                  setLogisticsItem(event.target.value as 'ore' | 'wood' | 'ingot' | 'tool')
+                }
+              >
+                <option value="">Choose input</option>
+                {logisticsItems.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
               <button
-                disabled={!logisticsSourceId || !logisticsTargetId}
+                disabled={
+                  !logisticsSourceId ||
+                  !logisticsTargetId ||
+                  !logisticsItems.includes(logisticsItem)
+                }
                 onClick={() =>
                   send({
                     type: 'createLogisticsLink',
                     sourceBuildingId: logisticsSourceId,
                     targetBuildingId: logisticsTargetId,
-                    item: 'ore',
+                    item: logisticsItem,
                   })
                 }
               >
-                Create ore link
+                Create input link
               </button>
               {logisticsLinks.map((link) => {
                 const source = state?.buildings[link.sourceBuildingId];
@@ -697,7 +958,7 @@ export const App = () => {
                     ['owner', 'logistics'].includes(roleForBuilding(target) ?? ''));
                 return (
                   <p className="logistics-link" key={link.id}>
-                    {link.sourceBuildingId} → {link.targetBuildingId}
+                    {link.sourceBuildingId} → {link.targetBuildingId} ({link.item})
                     <button
                       disabled={!canRemove}
                       onClick={() => send({ type: 'removeLogisticsLink', linkId: link.id })}
@@ -715,21 +976,26 @@ export const App = () => {
             </p>
             <button
               disabled={
-                Boolean(player.research.activeTechnology) || player.research.unlocked.metallurgy
+                Boolean(player.research.activeTechnology) ||
+                player.research.unlocked.metallurgy ||
+                !canAffordTechnology(technologies.metallurgy.cost)
               }
               onClick={() => send({ type: 'research', technologyId: 'metallurgy' })}
             >
-              Research metallurgy (1 ingot)
+              Research {technologies.metallurgy.displayName} (
+              {technologyCostLabel(technologies.metallurgy.cost)})
             </button>
             <button
               disabled={
                 Boolean(player.research.activeTechnology) ||
                 !player.research.unlocked.metallurgy ||
-                player.research.unlocked['territorial-charter']
+                player.research.unlocked['territorial-charter'] ||
+                !canAffordTechnology(technologies['territorial-charter'].cost)
               }
               onClick={() => send({ type: 'research', technologyId: 'territorial-charter' })}
             >
-              Research Territorial Charter (2 ingots)
+              Research {technologies['territorial-charter'].displayName} (
+              {technologyCostLabel(technologies['territorial-charter'].cost)})
             </button>
             <button onClick={() => send({ type: 'explore', ...frontier })}>Explore frontier</button>
             <button
@@ -743,6 +1009,13 @@ export const App = () => {
               const role = roleForBuilding(building);
               const canBuild = role === 'owner' || role === 'builder';
               const canMoveItems = role === 'owner' || role === 'logistics';
+              const recipe = recipeForBuilding(building.kind);
+              const missingInputs = recipe
+                ? Object.entries(recipe.input).filter(
+                    ([item, amount]) =>
+                      building.inventory[item as keyof typeof building.inventory] < amount,
+                  )
+                : [];
               return (
                 <section className="building" key={building.id}>
                   <strong>{building.kind}</strong>
@@ -750,9 +1023,15 @@ export const App = () => {
                   <span>
                     Health {building.health}/{building.maxHealth}
                   </span>
+                  {building.health < building.maxHealth && (
+                    <span className="alert">
+                      Damaged by a threat or acid rain. Repair to restore production and protect
+                      this building.
+                    </span>
+                  )}
                   <span>
                     Inventory: ore {building.inventory.ore} · wood {building.inventory.wood} · ingot{' '}
-                    {building.inventory.ingot}
+                    {building.inventory.ingot} · tool {building.inventory.tool}
                   </span>
                   {building.populationCapacity > 0 && (
                     <span>Housing capacity: {building.populationCapacity}</span>
@@ -761,8 +1040,26 @@ export const App = () => {
                     <span>Construction: {building.constructionTicks} ticks</span>
                   ) : (
                     <>
-                      <span>Production: {building.progress}/3</span>
-                      {building.kind === 'smelter' && (
+                      {recipe && (
+                        <>
+                          <span>
+                            Production: {building.progress}/{recipe.ticks} ticks
+                          </span>
+                          {building.health === building.maxHealth &&
+                            building.jobPriority > 0 &&
+                            building.progress === 0 &&
+                            missingInputs.length > 0 && (
+                              <span className="alert">
+                                Stalled: needs{' '}
+                                {missingInputs
+                                  .map(([item, amount]) => `${amount} ${item}`)
+                                  .join(' and ')}
+                                .
+                              </span>
+                            )}
+                        </>
+                      )}
+                      {(building.kind === 'smelter' || building.kind === 'workshop') && (
                         <label>
                           Job priority
                           <select
@@ -790,10 +1087,28 @@ export const App = () => {
                         Load 1 ore
                       </button>
                       <button
+                        disabled={!canMoveItems || player.inventory.wood < 1}
+                        onClick={() => transfer(building, 'wood', 'toBuilding')}
+                      >
+                        Load 1 wood
+                      </button>
+                      <button
+                        disabled={!canMoveItems || player.inventory.ingot < 1}
+                        onClick={() => transfer(building, 'ingot', 'toBuilding')}
+                      >
+                        Load 1 ingot
+                      </button>
+                      <button
                         disabled={!canMoveItems || building.inventory.ingot < 1}
                         onClick={() => transfer(building, 'ingot', 'toPlayer')}
                       >
                         Take 1 ingot
+                      </button>
+                      <button
+                        disabled={!canMoveItems || building.inventory.tool < 1}
+                        onClick={() => transfer(building, 'tool', 'toPlayer')}
+                      >
+                        Take 1 tool
                       </button>
                       {building.kind === 'smelter' && (
                         <button
@@ -804,7 +1119,7 @@ export const App = () => {
                         </button>
                       )}
                       <button
-                        disabled={!canBuild}
+                        disabled={!canBuild || building.health >= building.maxHealth}
                         onClick={() => send({ type: 'repair', buildingId: building.id })}
                       >
                         Repair

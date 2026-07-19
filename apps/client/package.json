@@ -11,9 +11,9 @@
     "lint": "node ../../node_modules/eslint/bin/eslint.js src"
   },
   "dependencies": {
+    "@kings/content": "workspace:*",
     "@kings/protocol": "workspace:*",
     "@kings/simulation": "workspace:*",
-    "pixi.js": "^8.10.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

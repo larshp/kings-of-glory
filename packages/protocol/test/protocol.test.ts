@@ -8,6 +8,36 @@ describe('client message validation', () => {
       command: { id: 'gather-1', playerId: 'player-a', sequence: 1, type: 'gather', x: 2, y: 3 },
     };
     expect(parseClientMessage(JSON.stringify(message))).toMatchObject({ type: 'command' });
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'workshop-1',
+            playerId: 'player-a',
+            sequence: 2,
+            type: 'placeWorkshop',
+            x: 3,
+            y: 4,
+          },
+        }),
+      ),
+    ).toMatchObject({ type: 'command' });
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'hearth-1',
+            playerId: 'player-a',
+            sequence: 3,
+            type: 'placeHearth',
+            x: 3,
+            y: 4,
+          },
+        }),
+      ),
+    ).toMatchObject({ type: 'command' });
   });
   it('accepts settlement commands only with safe identifiers and known roles', () => {
     expect(
@@ -56,6 +86,21 @@ describe('client message validation', () => {
         }),
       ),
     ).toMatchObject({ type: 'command' });
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'remove-member-1',
+            playerId: 'player-a',
+            sequence: 4,
+            type: 'removeSettlementMember',
+            settlementId: 'settlement-player-a',
+            targetPlayerId: 'player-b',
+          },
+        }),
+      ),
+    ).toMatchObject({ type: 'command' });
   });
   it('accepts only the defined logistics-link shape', () => {
     expect(
@@ -89,7 +134,7 @@ describe('client message validation', () => {
           },
         }),
       ),
-    ).toBeUndefined();
+    ).toMatchObject({ type: 'command' });
   });
   it('rejects malformed, incomplete, and unsafe commands', () => {
     expect(
@@ -131,5 +176,22 @@ describe('client message validation', () => {
     });
     expect(parseClientMessage(JSON.stringify({ type: 'resync', version: -1 }))).toBeUndefined();
     expect(parseClientMessage(JSON.stringify({ type: 'resync', version: 1.5 }))).toBeUndefined();
+  });
+
+  it('accepts bounded integer chunk-interest updates only', () => {
+    expect(
+      parseClientMessage(JSON.stringify({ type: 'interest', chunks: [{ x: -1, y: 2 }] })),
+    ).toMatchObject({ type: 'interest', chunks: [{ x: -1, y: 2 }] });
+    expect(
+      parseClientMessage(JSON.stringify({ type: 'interest', chunks: [{ x: 0.5, y: 2 }] })),
+    ).toBeUndefined();
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'interest',
+          chunks: Array.from({ length: 65 }, () => ({ x: 0, y: 0 })),
+        }),
+      ),
+    ).toBeUndefined();
   });
 });

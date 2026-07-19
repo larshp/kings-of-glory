@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
-import type { Command, WorldState } from '@kings/simulation';
-import { snapshot, stateHash } from '@kings/simulation';
+import type { Building, Command, Threat, WorldState } from '@kings/simulation';
+import { chunkKeyFor, snapshot, stateHash } from '@kings/simulation';
 
 export const WORLD_ID = 'global';
 const CHECKPOINT_RETENTION = 3;
@@ -14,13 +14,22 @@ export interface CompletedCheckpoint {
   readonly tick: number;
   readonly state: WorldState;
   readonly stateHash: string;
+  /** Dirty chunks written alongside this checkpoint, when available. */
+  readonly dirtyChunks?: readonly string[];
+}
+export interface PersistedChunkSnapshot {
+  readonly chunk: { readonly x: number; readonly y: number };
+  readonly tick: number;
+  readonly buildings: Readonly<Record<string, Building>>;
+  readonly threats: Readonly<Record<string, Threat>>;
+  readonly minedTiles: Readonly<Record<string, number>>;
 }
 export interface WorldPersistence {
   migrate(): Promise<void>;
   loadLatestCheckpoint(): Promise<CompletedCheckpoint | undefined>;
   loadJournalAfter(tick: number): Promise<readonly JournalEntry[]>;
   appendAcceptedCommand(entry: JournalEntry): Promise<void>;
-  saveCheckpoint(state: WorldState): Promise<CompletedCheckpoint>;
+  saveCheckpoint(state: WorldState, dirtyChunks?: readonly string[]): Promise<CompletedCheckpoint>;
   close(): Promise<void>;
 }
 
@@ -40,12 +49,16 @@ export class MemoryWorldPersistence implements WorldPersistence {
   async appendAcceptedCommand(entry: JournalEntry): Promise<void> {
     this.#journal.push(structuredClone(entry));
   }
-  async saveCheckpoint(state: WorldState): Promise<CompletedCheckpoint> {
+  async saveCheckpoint(
+    state: WorldState,
+    dirtyChunks: readonly string[] = [],
+  ): Promise<CompletedCheckpoint> {
     const checkpoint: CompletedCheckpoint = {
       checkpointId: randomUUID(),
       tick: state.tick,
       state: snapshot(state),
       stateHash: stateHash(state),
+      dirtyChunks: [...new Set(dirtyChunks)].sort((left, right) => left.localeCompare(right)),
     };
     this.#checkpoints.push(checkpoint);
     this.#checkpoints = this.#checkpoints.slice(-CHECKPOINT_RETENTION);
@@ -56,11 +69,55 @@ export class MemoryWorldPersistence implements WorldPersistence {
   async close(): Promise<void> {}
 }
 
-const migrationSql = [
+const chunkCoordinates = (chunk: string) => {
+  const [xText, yText, extra] = chunk.split(':');
+  const x = Number(xText);
+  const y = Number(yText);
+  if (extra !== undefined || !Number.isSafeInteger(x) || !Number.isSafeInteger(y))
+    throw new Error(`Invalid dirty chunk key: ${chunk}`);
+  return { x, y };
+};
+
+const recordsInChunk = <T extends { x: number; y: number }>(
+  records: Readonly<Record<string, T>>,
+  chunk: string,
+) =>
+  Object.fromEntries(
+    Object.entries(records)
+      .filter(([, entity]) => chunkKeyFor(entity.x, entity.y) === chunk)
+      .sort(([left], [right]) => left.localeCompare(right)),
+  ) as Record<string, T>;
+
+/**
+ * A chunk-local durable projection. Full checkpoint state remains the recovery
+ * source; these records make each completed checkpoint auditable and ready for
+ * incremental restoration without duplicating unrelated chunk data.
+ */
+export const snapshotDirtyChunk = (state: WorldState, chunk: string): PersistedChunkSnapshot => {
+  const coordinates = chunkCoordinates(chunk);
+  const minedTiles = Object.fromEntries(
+    Object.entries(state.minedTiles)
+      .filter(([tile]) => {
+        const [xText, yText] = tile.split(':');
+        return chunkKeyFor(Number(xText), Number(yText)) === chunk;
+      })
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+  return {
+    chunk: coordinates,
+    tick: state.tick,
+    buildings: recordsInChunk(state.buildings, chunk),
+    threats: recordsInChunk(state.threats, chunk),
+    minedTiles,
+  };
+};
+
+export const INITIAL_MIGRATION_SQL = [
   `CREATE TABLE IF NOT EXISTS schema_migrations (version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());`,
   `CREATE TABLE IF NOT EXISTS worlds (id text PRIMARY KEY, seed bigint NOT NULL, created_at timestamptz NOT NULL DEFAULT now());`,
   `CREATE TABLE IF NOT EXISTS accounts (id uuid PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now());`,
   `CREATE TABLE IF NOT EXISTS players (id text PRIMARY KEY, account_id uuid NULL REFERENCES accounts(id), world_id text NOT NULL REFERENCES worlds(id), state jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());`,
+  `CREATE TABLE IF NOT EXISTS sessions (id uuid PRIMARY KEY, account_id uuid NOT NULL REFERENCES accounts(id), player_id text NULL REFERENCES players(id), expires_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now());`,
   `CREATE TABLE IF NOT EXISTS settlements (id text PRIMARY KEY, world_id text NOT NULL REFERENCES worlds(id), owner_player_id text NOT NULL REFERENCES players(id), state jsonb NOT NULL);`,
   `CREATE TABLE IF NOT EXISTS world_checkpoints (world_id text NOT NULL REFERENCES worlds(id), id uuid PRIMARY KEY, tick bigint NOT NULL, schema_version integer NOT NULL, state jsonb NOT NULL, state_hash text NOT NULL, completed boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz NULL);`,
   `CREATE INDEX IF NOT EXISTS world_checkpoints_completed_idx ON world_checkpoints(world_id, completed, tick DESC);`,
@@ -76,7 +133,7 @@ export class PostgresWorldPersistence implements WorldPersistence {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      for (const sql of migrationSql) await client.query(sql);
+      for (const sql of INITIAL_MIGRATION_SQL) await client.query(sql);
       await client.query(
         'INSERT INTO schema_migrations(version) VALUES (1) ON CONFLICT DO NOTHING',
       );
@@ -124,12 +181,16 @@ export class PostgresWorldPersistence implements WorldPersistence {
       [entry.command.id, WORLD_ID, entry.targetTick, entry.command],
     );
   }
-  async saveCheckpoint(state: WorldState): Promise<CompletedCheckpoint> {
+  async saveCheckpoint(
+    state: WorldState,
+    dirtyChunks: readonly string[] = [],
+  ): Promise<CompletedCheckpoint> {
     const checkpoint: CompletedCheckpoint = {
       checkpointId: randomUUID(),
       tick: state.tick,
       state: snapshot(state),
       stateHash: stateHash(state),
+      dirtyChunks: [...new Set(dirtyChunks)].sort((left, right) => left.localeCompare(right)),
     };
     const client = await this.pool.connect();
     try {
@@ -146,6 +207,13 @@ export class PostgresWorldPersistence implements WorldPersistence {
           checkpoint.stateHash,
         ],
       );
+      for (const chunk of checkpoint.dirtyChunks ?? []) {
+        const chunkSnapshot = snapshotDirtyChunk(checkpoint.state, chunk);
+        await client.query(
+          'INSERT INTO chunk_snapshots(checkpoint_id, chunk_x, chunk_y, state) VALUES ($1, $2, $3, $4)',
+          [checkpoint.checkpointId, chunkSnapshot.chunk.x, chunkSnapshot.chunk.y, chunkSnapshot],
+        );
+      }
       await client.query(
         'UPDATE world_checkpoints SET completed = true, completed_at = now() WHERE id = $1',
         [checkpoint.checkpointId],

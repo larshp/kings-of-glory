@@ -10,7 +10,21 @@ main {
   height: 100vh;
   overflow: hidden;
 }
+.client-error-screen {
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  box-sizing: border-box;
+}
+.client-error-screen section {
+  width: min(32rem, 100%);
+  padding: 1rem;
+  border: 1px solid #698b75;
+  border-radius: 0.5rem;
+  background: rgb(12 20 32 / 88%);
+}
 .world-canvas {
+  display: block;
   height: 100%;
   width: 100%;
   background:
@@ -30,11 +44,6 @@ main {
     ),
     #20384a;
   background-size: 4rem 2rem;
-}
-.world-canvas canvas {
-  display: block;
-  position: relative;
-  z-index: 0;
 }
 .hud {
   position: fixed;
@@ -130,6 +139,15 @@ select {
   margin: 0.2rem 0;
   font-size: 0.85rem;
 }
+.onboarding-next {
+  margin: 0.25rem 0;
+  color: #fff1c2;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+.onboarding .complete {
+  color: #9fe2b1;
+}
 .notice {
   min-height: 1.4rem;
   color: #f5d56a;
@@ -149,6 +167,7 @@ select {
 }
 .settlement-panel,
 .settlement,
+.settlement-stats,
 .automation-panel,
 .settings-panel {
   display: grid;
@@ -217,6 +236,7 @@ select {
   transition-duration: 0.01ms !important;
 }
 .settlement-panel > p,
+.settlement-stats > p,
 .settlement span {
   margin: 0;
   font-size: 0.85rem;

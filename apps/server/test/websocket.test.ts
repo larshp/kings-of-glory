@@ -1,5 +1,5 @@
 import { type ServerEnvironment, MemoryWorldPersistence } from '@kings/server-runtime';
-import { terrainAt } from '@kings/simulation';
+import { nearestOreTile } from '@kings/simulation';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { createGameServer, type GameServer } from '../src/server.js';
@@ -51,6 +51,33 @@ const receiveFullState = (socket: WebSocket) =>
     },
   );
 
+const receiveDeltaState = (socket: WebSocket, minimumTick: number) =>
+  new Promise<{ type: 'state'; version: number; delta: { tick?: number } }>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      socket.off('message', onMessage);
+      reject(new Error('Timed out waiting for a state delta.'));
+    }, 1_000);
+    const onMessage = (raw: WebSocket.RawData) => {
+      const message = JSON.parse(raw.toString()) as {
+        type?: string;
+        version?: number;
+        delta?: { tick?: number };
+      };
+      if (
+        message.type !== 'state' ||
+        !message.delta ||
+        message.version === undefined ||
+        typeof message.delta.tick !== 'number' ||
+        message.delta.tick < minimumTick
+      )
+        return;
+      clearTimeout(timer);
+      socket.off('message', onMessage);
+      resolve({ type: 'state', version: message.version, delta: message.delta });
+    };
+    socket.on('message', onMessage);
+  });
+
 const connectedSocket = async (port: number) => {
   const socket = new WebSocket(`ws://127.0.0.1:${port}`);
   await new Promise<void>((resolve, reject) => {
@@ -84,7 +111,10 @@ describe('WebSocket game boundary', () => {
       'welcome',
     );
     socket.send(JSON.stringify({ type: 'hello', version: 1, playerId: 'socket-player' }));
-    await expect(welcome).resolves.toMatchObject({ playerId: 'socket-player', stateVersion: 0 });
+    await expect(welcome).resolves.toMatchObject({
+      playerId: 'socket-player',
+      stateVersion: expect.any(Number),
+    });
 
     const fullState = receiveFullState(socket);
     socket.send(JSON.stringify({ type: 'resync', version: 99 }));
@@ -117,15 +147,19 @@ describe('WebSocket game boundary', () => {
       result: { accepted: false, code: 'unauthorized' },
     });
 
-    const x = 12;
-    const y = terrainAt(environment.worldSeed, x, 0) === 'water' ? 1 : 0;
+    const player = game.host.world.players['socket-player']!;
+    const oreTile = nearestOreTile(
+      environment.worldSeed,
+      player.plot.x + Math.floor(player.plot.size / 2),
+      player.plot.y + Math.floor(player.plot.size / 2),
+      8,
+    )!;
     const command = {
       id: 'socket-gather-1',
       playerId: 'socket-player',
       sequence: 1,
       type: 'gather' as const,
-      x,
-      y,
+      ...oreTile,
     };
     const accepted = receive<{
       type: 'commandResult';
@@ -153,7 +187,19 @@ describe('WebSocket game boundary', () => {
     ).resolves.toContain('kings_checkpoint_duration_ms');
     await expect(
       fetch(`http://127.0.0.1:${port}/metrics`).then((response) => response.text()),
+    ).resolves.toContain('kings_recovery_duration_ms');
+    await expect(
+      fetch(`http://127.0.0.1:${port}/metrics`).then((response) => response.text()),
     ).resolves.toContain('kings_state_delta_messages_total');
+    await expect(
+      fetch(`http://127.0.0.1:${port}/metrics`).then((response) => response.text()),
+    ).resolves.toContain('kings_journal_lag_ticks');
+    await expect(
+      fetch(`http://127.0.0.1:${port}/metrics`).then((response) => response.text()),
+    ).resolves.toContain('kings_outbound_buffered_bytes');
+    await expect(
+      fetch(`http://127.0.0.1:${port}/metrics`).then((response) => response.text()),
+    ).resolves.toContain('kings_checkpoint_tick 0');
     socket.terminate();
   });
 
@@ -162,12 +208,128 @@ describe('WebSocket game boundary', () => {
     const port = await game.listen(0);
     const socket = await connectedSocket(port);
     const error = receive<{ type: 'error'; code: string }>(socket, 'error');
+    const closed = new Promise<{ code: number; reason: string }>((resolve) =>
+      socket.once('close', (code, reason) => resolve({ code, reason: reason.toString() })),
+    );
     socket.send(JSON.stringify({ type: 'hello', version: 999, playerId: 'outdated-player' }));
     await expect(error).resolves.toEqual({
       type: 'error',
       code: 'version-mismatch',
       message: 'Client upgrade required.',
     });
-    socket.terminate();
+    await expect(closed).resolves.toEqual({ code: 1002, reason: 'Client upgrade required' });
+  });
+
+  it('notifies connected clients about planned maintenance during shutdown', async () => {
+    game = await createGameServer(environment, new MemoryWorldPersistence());
+    const port = await game.listen(0);
+    const socket = await connectedSocket(port);
+    const welcome = receive<{ type: 'welcome' }>(socket, 'welcome');
+    socket.send(JSON.stringify({ type: 'hello', version: 1, playerId: 'maintenance-player' }));
+    await welcome;
+    const maintenance = receive<{ type: 'maintenance'; message: string }>(socket, 'maintenance');
+    const closed = new Promise<{ code: number; reason: string }>((resolve) =>
+      socket.once('close', (code, reason) => resolve({ code, reason: reason.toString() })),
+    );
+    await game.shutdown();
+    game = undefined;
+    await expect(maintenance).resolves.toEqual({
+      type: 'maintenance',
+      message: 'Server maintenance in progress.',
+    });
+    await expect(closed).resolves.toEqual({ code: 1012, reason: 'Server maintenance' });
+  });
+
+  it('restores the same authoritative player state after a WebSocket reconnect', async () => {
+    game = await createGameServer(environment, new MemoryWorldPersistence());
+    const port = await game.listen(0);
+    const firstSocket = await connectedSocket(port);
+    const firstWelcome = receive<{ type: 'welcome'; playerId: string }>(firstSocket, 'welcome');
+    firstSocket.send(JSON.stringify({ type: 'hello', version: 1, playerId: 'reconnect-player' }));
+    await expect(firstWelcome).resolves.toMatchObject({ playerId: 'reconnect-player' });
+    const player = game.host.world.players['reconnect-player']!;
+    const oreTile = nearestOreTile(
+      environment.worldSeed,
+      player.plot.x + Math.floor(player.plot.size / 2),
+      player.plot.y + Math.floor(player.plot.size / 2),
+      8,
+    )!;
+    const gathered = receive<{
+      type: 'commandResult';
+      result: { accepted: boolean; commandId: string };
+    }>(firstSocket, 'commandResult');
+    firstSocket.send(
+      JSON.stringify({
+        type: 'command',
+        command: {
+          id: 'reconnect-gather-1',
+          playerId: 'reconnect-player',
+          sequence: 1,
+          type: 'gather',
+          ...oreTile,
+        },
+      }),
+    );
+    await expect(gathered).resolves.toMatchObject({
+      result: { accepted: true, commandId: 'reconnect-gather-1' },
+    });
+    const firstClosed = new Promise<void>((resolve) => firstSocket.once('close', resolve));
+    firstSocket.close(1000, 'reconnecting');
+    await firstClosed;
+
+    const reconnectedSocket = await connectedSocket(port);
+    const reconnectedWelcome = receive<{
+      type: 'welcome';
+      playerId: string;
+      state: { players: Record<string, { inventory: { ore: number } }> };
+    }>(reconnectedSocket, 'welcome');
+    reconnectedSocket.send(
+      JSON.stringify({ type: 'hello', version: 1, playerId: 'reconnect-player' }),
+    );
+    await expect(reconnectedWelcome).resolves.toMatchObject({
+      playerId: 'reconnect-player',
+      state: { players: { 'reconnect-player': { inventory: { ore: 1 } } } },
+    });
+    reconnectedSocket.terminate();
+  });
+
+  it('closes persistence even when the final checkpoint fails', async () => {
+    const persistence = new MemoryWorldPersistence();
+    let closed = false;
+    persistence.saveCheckpoint = async () => {
+      throw new Error('checkpoint unavailable');
+    };
+    persistence.close = async () => {
+      closed = true;
+    };
+    game = await createGameServer(environment, persistence);
+    await game.listen(0);
+    await expect(game.shutdown()).rejects.toThrow('checkpoint unavailable');
+    game = undefined;
+    expect(closed).toBe(true);
+  });
+
+  it('fans out one shared world tick to twenty connected clients', async () => {
+    game = await createGameServer(environment, new MemoryWorldPersistence());
+    const port = await game.listen(0);
+    const sockets: WebSocket[] = [];
+    for (let index = 0; index < 20; index += 1) {
+      const socket = await connectedSocket(port);
+      const welcome = receive<{ type: 'welcome'; playerId: string }>(socket, 'welcome');
+      const playerId = `observer-${index}`;
+      socket.send(JSON.stringify({ type: 'hello', version: 1, playerId }));
+      await expect(welcome).resolves.toMatchObject({ playerId });
+      sockets.push(socket);
+    }
+    const nextTick = game.host.world.tick + 1;
+    const deltas = sockets.map((socket) => receiveDeltaState(socket, nextTick));
+    await game.host.tick();
+    const received = await Promise.all(deltas);
+    expect(received).toHaveLength(20);
+    expect(received.every((message) => message.delta.tick >= nextTick)).toBe(true);
+    await expect(
+      fetch(`http://127.0.0.1:${port}/metrics`).then((response) => response.text()),
+    ).resolves.toContain('kings_connected_players 20');
+    for (const socket of sockets) socket.terminate();
   });
 });

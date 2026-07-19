@@ -1,10 +1,30 @@
 export type PlayerId = string & { readonly __brand: 'PlayerId' };
 export type BuildingId = string & { readonly __brand: 'BuildingId' };
+export type WorldId = string & { readonly __brand: 'WorldId' };
 export type Tick = number & { readonly __brand: 'Tick' };
+export type ChunkCoordinate = readonly [number, number] & { readonly __brand: 'ChunkCoordinate' };
+export type TileCoordinate = readonly [number, number] & { readonly __brand: 'TileCoordinate' };
 export type SettlementRole = 'owner' | 'builder' | 'logistics' | 'member';
 
 export const playerId = (value: string): PlayerId => value as PlayerId;
 export const buildingId = (value: string): BuildingId => value as BuildingId;
+export const worldId = (value: string): WorldId => value as WorldId;
+export const tick = (value: number): Tick => value as Tick;
+
+const coordinate = <T extends ChunkCoordinate | TileCoordinate>(
+  x: number,
+  y: number,
+  label: string,
+): T => {
+  if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y))
+    throw new Error(`${label} coordinates must be safe integers.`);
+  return [x, y] as unknown as T;
+};
+
+export const chunkCoordinate = (x: number, y: number): ChunkCoordinate =>
+  coordinate<ChunkCoordinate>(x, y, 'Chunk');
+export const tileCoordinate = (x: number, y: number): TileCoordinate =>
+  coordinate<TileCoordinate>(x, y, 'Tile');
 
 export type Command =
   | {
@@ -27,6 +47,14 @@ export type Command =
       readonly id: string;
       readonly playerId: PlayerId;
       readonly sequence: number;
+      readonly type: 'placeWorkshop';
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
       readonly type: 'placeStorage';
       readonly x: number;
       readonly y: number;
@@ -36,6 +64,14 @@ export type Command =
       readonly playerId: PlayerId;
       readonly sequence: number;
       readonly type: 'placeHousing';
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'placeHearth';
       readonly x: number;
       readonly y: number;
     }
@@ -83,7 +119,7 @@ export type Command =
       readonly sequence: number;
       readonly type: 'transfer';
       readonly buildingId: BuildingId;
-      readonly item: 'ore' | 'wood' | 'ingot';
+      readonly item: 'ore' | 'wood' | 'ingot' | 'tool';
       readonly amount: number;
       readonly direction: 'toBuilding' | 'toPlayer';
     }
@@ -93,7 +129,7 @@ export type Command =
       readonly sequence: number;
       readonly type: 'transferToPlayer';
       readonly targetPlayerId: PlayerId;
-      readonly item: 'ore' | 'wood' | 'ingot';
+      readonly item: 'ore' | 'wood' | 'ingot' | 'tool';
       readonly amount: number;
     }
   | {
@@ -139,10 +175,18 @@ export type Command =
       readonly id: string;
       readonly playerId: PlayerId;
       readonly sequence: number;
+      readonly type: 'removeSettlementMember';
+      readonly settlementId: string;
+      readonly targetPlayerId: PlayerId;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
       readonly type: 'createLogisticsLink';
       readonly sourceBuildingId: BuildingId;
       readonly targetBuildingId: BuildingId;
-      readonly item: 'ore';
+      readonly item: 'ore' | 'wood' | 'ingot' | 'tool';
     }
   | {
       readonly id: string;
@@ -184,6 +228,7 @@ export type Command =
 export type RejectionCode =
   | 'unknown-player'
   | 'unauthorized'
+  | 'invalid-coordinate'
   | 'duplicate-command'
   | 'out-of-order-command'
   | 'out-of-range'
@@ -191,6 +236,7 @@ export type RejectionCode =
   | 'occupied'
   | 'insufficient-wood'
   | 'insufficient-ore'
+  | 'insufficient-resources'
   | 'unknown-building'
   | 'not-owner'
   | 'building-destroyed'
@@ -216,6 +262,7 @@ export type RejectionCode =
   | 'not-settlement-member'
   | 'already-settlement-member'
   | 'cannot-leave-settlement-owner'
+  | 'cannot-remove-settlement-owner'
   | 'cannot-transfer-settlement-ownership-to-self'
   | 'invalid-logistics-link'
   | 'logistics-link-exists'

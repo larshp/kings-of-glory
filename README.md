@@ -83,7 +83,7 @@ packages/
 
 ## Local development
 
-Prerequisites: Node.js 22.16.0 (see `.nvmrc`) and Corepack. The repository pins pnpm 10.14.0. GitHub Actions runs the same locked install, format, lint, build, and test gate on pull requests and `main`.
+Prerequisites: Node.js 22.16.0 (see `.nvmrc`) and pnpm 10.14.0. Corepack is one way to supply pnpm, but is not required. GitHub Actions runs the same locked install, format, lint, build, and test gate on pull requests and `main`. The npm scripts select `pnpm.cmd` automatically on Windows, so `npm run dev` works even when PowerShell blocks `pnpm.ps1`.
 
 ```powershell
 corepack enable
@@ -93,12 +93,20 @@ pnpm test
 pnpm lint
 ```
 
+After dependencies are installed, you can also start both applications with:
+
+```powershell
+npm run dev
+```
+
 Start the authoritative world host in one terminal and the browser client in another:
 
 ```powershell
 pnpm --filter @kings/server dev
 pnpm --filter @kings/client dev
 ```
+
+Or start both with `npm run dev`; the npm wrapper uses the Windows command shim when needed.
 
 The server listens on `http://localhost:3001/health` and WebSocket clients connect on port 3001. Vite serves the client URL it prints (normally `http://localhost:5173`). The client uses a stable per-tab development identity; production authentication is intentionally deferred.
 

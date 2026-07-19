@@ -6,11 +6,11 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "dev": "pnpm --parallel --filter @kings/client --filter @kings/server dev",
-    "build": "pnpm -r build",
-    "test": "pnpm -r test",
-    "typecheck": "pnpm build",
-    "lint": "pnpm -r lint",
+    "dev": "node scripts/run-pnpm.mjs --parallel --filter @kings/client --filter @kings/server dev",
+    "build": "node scripts/run-pnpm.mjs -r build",
+    "test": "node scripts/run-pnpm.mjs -r test",
+    "typecheck": "node scripts/run-pnpm.mjs build",
+    "lint": "node scripts/run-pnpm.mjs -r lint",
     "format:check": "prettier --check ."
   },
   "devDependencies": {

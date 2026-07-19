@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node ../../node_modules/tsx/dist/cli.mjs watch src/index.ts",
+    "dev": "tsx watch src/index.ts",
     "inspect": "node dist/inspect.js",
     "load": "node dist/load.js",
     "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",

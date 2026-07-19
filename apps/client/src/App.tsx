@@ -52,6 +52,13 @@ const rejectionMessage = (code: string | undefined) => {
   return messages[code ?? ''] ?? `Action rejected: ${code ?? 'unknown reason'}.`;
 };
 
+const setConnectionIndicator = (message: string, hidden = false) => {
+  const indicator = document.getElementById('connection-indicator');
+  if (!indicator) return;
+  indicator.textContent = message;
+  indicator.hidden = hidden;
+};
+
 export const App = () => {
   const socket = useRef<WebSocket | undefined>(undefined);
   const sequence = useRef(0);
@@ -69,6 +76,7 @@ export const App = () => {
     loadPreferences(localStorage.getItem(PREFERENCE_STORAGE_KEY)),
   );
   const [canvasMetrics, setCanvasMetrics] = useState<WorldCanvasMetrics>();
+  const [rendererError, setRendererError] = useState('');
   const messageCount = useRef({ received: 0, sent: 0 });
   const [messageRate, setMessageRate] = useState({ received: 0, sent: 0 });
 
@@ -78,11 +86,18 @@ export const App = () => {
     let heartbeatTimer: number | undefined;
     let attempts = 0;
     let reconnectAllowed = true;
+    let activeConnection: WebSocket | undefined;
     const connect = () => {
       setStatus(attempts === 0 ? 'Connecting' : 'Reconnecting');
       const connection = new WebSocket(import.meta.env.VITE_SERVER_URL ?? 'ws://localhost:3001');
+      activeConnection = connection;
       socket.current = connection;
       connection.onopen = () => {
+        if (stopped || socket.current !== connection) {
+          connection.close();
+          return;
+        }
+        setConnectionIndicator('Connected to the server. Loading your world…');
         attempts = 0;
         connection.send(JSON.stringify({ type: 'hello', version: 1, playerId }));
         messageCount.current.sent += 1;
@@ -94,17 +109,29 @@ export const App = () => {
           }
         }, 15_000);
       };
-      connection.onclose = () => {
+      connection.onerror = () => {
+        setConnectionIndicator('Network error. Retrying the game server connection…');
+        setNotice('The connection encountered a network error. Retrying…');
+      };
+      connection.onclose = (event) => {
         if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
         heartbeatTimer = undefined;
         if (stopped || !reconnectAllowed) return;
+        setConnectionIndicator(
+          `Server connection closed (${event.code}${event.reason ? `: ${event.reason}` : ''}). Retrying…`,
+        );
+        setNotice(
+          `Connection closed (${event.code}${event.reason ? `: ${event.reason}` : ''}). Retrying…`,
+        );
         attempts += 1;
         retryTimer = window.setTimeout(connect, Math.min(5_000, 250 * 2 ** Math.min(attempts, 5)));
       };
       connection.onmessage = ({ data }) => {
+        if (stopped || socket.current !== connection) return;
         messageCount.current.received += 1;
         const message = JSON.parse(data) as ServerMessage;
         if (message.type === 'welcome') {
+          setConnectionIndicator('Game world connected.', true);
           stateVersion.current = message.stateVersion;
           resyncRequested.current = false;
           setState(message.state);
@@ -147,7 +174,8 @@ export const App = () => {
       stopped = true;
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
-      socket.current?.close();
+      if (socket.current === activeConnection) socket.current = undefined;
+      activeConnection?.close();
     };
   }, []);
 
@@ -280,6 +308,7 @@ export const App = () => {
         selectedTile={selectedTile}
         onSelectTile={setSelectedTile}
         onMetrics={setCanvasMetrics}
+        onError={(message) => setRendererError(message)}
       />
       <aside className="hud">
         <h1>Kings of Glory</h1>
@@ -363,6 +392,24 @@ export const App = () => {
             {messageRate.sent} sent/s
           </p>
         </details>
+        {!state && (
+          <section className="startup-card" aria-labelledby="startup-title">
+            <h2 id="startup-title">Entering the global world</h2>
+            <p>
+              {status === 'Connected'
+                ? 'Preparing your settlement and nearby map…'
+                : 'Connecting to the local game server…'}
+            </p>
+            <p>
+              Start both services with <code>npm run dev</code>, then refresh this page.
+            </p>
+          </section>
+        )}
+        {rendererError && (
+          <p className="alert" role="alert">
+            Map renderer unavailable: {rendererError}
+          </p>
+        )}
         {player ? (
           <>
             <p>

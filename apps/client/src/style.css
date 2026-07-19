@@ -13,12 +13,32 @@ main {
 .world-canvas {
   height: 100%;
   width: 100%;
+  background:
+    linear-gradient(
+      30deg,
+      rgb(33 68 58 / 90%) 12%,
+      transparent 12.5%,
+      transparent 87%,
+      rgb(33 68 58 / 90%) 87.5%
+    ),
+    linear-gradient(
+      150deg,
+      rgb(39 79 66 / 90%) 12%,
+      transparent 12.5%,
+      transparent 87%,
+      rgb(39 79 66 / 90%) 87.5%
+    ),
+    #20384a;
+  background-size: 4rem 2rem;
 }
 .world-canvas canvas {
   display: block;
+  position: relative;
+  z-index: 0;
 }
 .hud {
   position: fixed;
+  z-index: 2147483647;
   top: 1rem;
   left: 1rem;
   width: 17rem;
@@ -173,6 +193,20 @@ select {
 }
 .performance-panel p {
   margin: 0.2rem 0;
+}
+.startup-card {
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+  border: 1px solid #698b75;
+  border-radius: 0.25rem;
+  background: rgb(25 52 70 / 75%);
+}
+.startup-card h2,
+.startup-card p {
+  margin: 0.25rem 0;
+}
+.startup-card code {
+  color: #fff1c2;
 }
 .reduced-motion *,
 .reduced-motion *::before,

@@ -22,6 +22,7 @@ export const WorldCanvas = ({
   selectedTile,
   onSelectTile,
   onMetrics,
+  onError,
 }: {
   buildings: readonly Building[];
   threats: readonly Threat[];
@@ -31,9 +32,11 @@ export const WorldCanvas = ({
   selectedTile: { x: number; y: number } | undefined;
   onSelectTile?: (tile: { x: number; y: number }) => void;
   onMetrics?: (metrics: WorldCanvasMetrics) => void;
+  onError?: (message: string) => void;
 }) => {
   const host = useRef<HTMLDivElement>(null);
   const appRef = useRef<Application | null>(null);
+  const terrainLayer = useRef<Container | null>(null);
   const buildingLayer = useRef<Container | null>(null);
   const threatLayer = useRef<Container | null>(null);
   const selectionLayer = useRef<Container | null>(null);
@@ -45,6 +48,7 @@ export const WorldCanvas = ({
   const latestSelectTile = useRef(onSelectTile);
   const latestSelectedTile = useRef(selectedTile);
   const latestMetrics = useRef(onMetrics);
+  const latestError = useRef(onError);
   latestBuildings.current = buildings;
   latestThreats.current = threats;
   latestTerrain.current = terrain;
@@ -53,6 +57,44 @@ export const WorldCanvas = ({
   latestSelectTile.current = onSelectTile;
   latestSelectedTile.current = selectedTile;
   latestMetrics.current = onMetrics;
+  latestError.current = onError;
+  const renderTerrain = () => {
+    const layer = terrainLayer.current;
+    const app = appRef.current;
+    if (!layer || !app) return;
+    layer.removeChildren();
+    for (let localX = -8; localX <= 8; localX += 1)
+      for (let localY = -8; localY <= 8; localY += 1) {
+        const x = latestFocus.current.x + localX;
+        const y = latestFocus.current.y + localY;
+        const position = worldToScreen({ x: localX, y: localY });
+        const terrain = latestTerrain.current[`${x}:${y}`];
+        const color =
+          terrain === 'water'
+            ? '#2f6d93'
+            : terrain === 'ore'
+              ? '#6b6b79'
+              : terrain === 'grass'
+                ? (x + y) % 2 === 0
+                  ? '#3b6a48'
+                  : '#315d3d'
+                : '#1d2a3e';
+        const tile = new Graphics()
+          .poly([
+            0,
+            TILE_HEIGHT / 2,
+            TILE_WIDTH / 2,
+            0,
+            TILE_WIDTH,
+            TILE_HEIGHT / 2,
+            TILE_WIDTH / 2,
+            TILE_HEIGHT,
+          ])
+          .fill({ color });
+        tile.position.set(position.x + app.renderer.width / 2 - TILE_WIDTH / 2, position.y + 80);
+        layer.addChild(tile);
+      }
+  };
   const renderBuildings = () => {
     const layer = buildingLayer.current;
     const app = appRef.current;
@@ -122,48 +164,22 @@ export const WorldCanvas = ({
   useEffect(() => {
     const app = new Application();
     let disposed = false;
+    let initialized = false;
     let cleanupInput = () => {};
     let cleanupMetrics = () => {};
     void app
       .init({ resizeTo: host.current ?? window, background: '#17243a', antialias: true })
       .then(() => {
-        if (!host.current || disposed) return;
+        initialized = true;
+        if (!host.current || disposed) {
+          app.destroy();
+          return;
+        }
         appRef.current = app;
         host.current.replaceChildren(app.canvas);
-        for (let localX = -8; localX <= 8; localX += 1)
-          for (let localY = -8; localY <= 8; localY += 1) {
-            const x = latestFocus.current.x + localX;
-            const y = latestFocus.current.y + localY;
-            const position = worldToScreen({ x: localX, y: localY });
-            const terrain = latestTerrain.current[`${x}:${y}`];
-            const color =
-              terrain === 'water'
-                ? '#2f6d93'
-                : terrain === 'ore'
-                  ? '#6b6b79'
-                  : terrain === 'grass'
-                    ? (x + y) % 2 === 0
-                      ? '#3b6a48'
-                      : '#315d3d'
-                    : '#1d2a3e';
-            const tile = new Graphics()
-              .poly([
-                0,
-                TILE_HEIGHT / 2,
-                TILE_WIDTH / 2,
-                0,
-                TILE_WIDTH,
-                TILE_HEIGHT / 2,
-                TILE_WIDTH / 2,
-                TILE_HEIGHT,
-              ])
-              .fill({ color });
-            tile.position.set(
-              position.x + app.renderer.width / 2 - TILE_WIDTH / 2,
-              position.y + 80,
-            );
-            app.stage.addChild(tile);
-          }
+        const terrain = new Container();
+        terrainLayer.current = terrain;
+        app.stage.addChild(terrain);
         const layer = new Container();
         buildingLayer.current = layer;
         app.stage.addChild(layer);
@@ -173,6 +189,7 @@ export const WorldCanvas = ({
         const threatMarkers = new Container();
         threatLayer.current = threatMarkers;
         app.stage.addChild(threatMarkers);
+        renderTerrain();
         renderBuildings();
         renderSelection();
         renderThreats();
@@ -305,17 +322,30 @@ export const WorldCanvas = ({
           canvas.removeEventListener('wheel', onWheel);
           canvas.removeEventListener('keydown', onKeyDown);
         };
+      })
+      .catch((error: unknown) => {
+        if (disposed) return;
+        latestError.current?.(
+          error instanceof Error ? error.message : 'The map renderer could not start.',
+        );
       });
     return () => {
       disposed = true;
       cleanupInput();
       cleanupMetrics();
       appRef.current = null;
+      terrainLayer.current = null;
       buildingLayer.current = null;
       threatLayer.current = null;
       selectionLayer.current = null;
-      app.destroy();
+      if (initialized) app.destroy();
     };
+  }, []);
+  useEffect(() => {
+    renderTerrain();
+    renderBuildings();
+    renderSelection();
+    renderThreats();
   }, [terrain, focus.x, focus.y]);
   useEffect(() => {
     renderBuildings();

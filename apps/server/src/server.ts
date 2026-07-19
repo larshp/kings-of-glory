@@ -50,6 +50,13 @@ export const createGameServer = async (
     response.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
     if (environment.production)
       response.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    if (request.url === '/' && !environment.production) {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(
+        '<!doctype html><title>Kings of Glory server</title><main style="font-family:system-ui;max-width:42rem;margin:4rem auto"><h1>Kings of Glory server is running</h1><p>The browser client is served by Vite at <a href="http://localhost:5173/">http://localhost:5173/</a>.</p><p>Start both development services with <code>npm run dev</code>.</p></main>',
+      );
+      return;
+    }
     if (request.url === '/health') {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ status: 'ok', processHealthy: true }));
@@ -206,10 +213,10 @@ export const createGameServer = async (
       if (message.type === 'ping')
         socket.send(JSON.stringify({ type: 'pong', nonce: message.nonce }));
     });
-    socket.on('close', () => {
+    socket.on('close', (code, reason) => {
       clearInterval(heartbeatTimer);
       host.disconnect(connection);
-      log('player.disconnected');
+      log('player.disconnected', { code, reason: reason.toString() });
     });
   });
 

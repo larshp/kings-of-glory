@@ -22,16 +22,16 @@ The order is intentional: build and validate a thin end-to-end multiplayer slice
 
 Each milestone must produce a playable or verifiable result. New systems should first be implemented with the smallest useful content set, tested, and only then expanded.
 
-| Milestone | Playable result |
-| --- | --- |
-| Foundation | Client and server build, test, and run from one workspace |
-| Connected world | Multiple browsers enter the same world and receive synchronized state |
-| Vertical slice | Players gather resources, construct a building, produce an item, and survive a basic threat |
-| Automation | Production chains and logistics operate continuously |
-| Settlement | Population, jobs, needs, and construction form a working settlement loop |
-| Civilization | Exploration, territory, research, and progression unlock new capabilities |
-| PvE world | Cooperative threats, enemies, defenses, and world events create pressure |
-| Production readiness | The global world survives restarts, load, failures, and upgrades safely |
+| Milestone            | Playable result                                                                             |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| Foundation           | Client and server build, test, and run from one workspace                                   |
+| Connected world      | Multiple browsers enter the same world and receive synchronized state                       |
+| Vertical slice       | Players gather resources, construct a building, produce an item, and survive a basic threat |
+| Automation           | Production chains and logistics operate continuously                                        |
+| Settlement           | Population, jobs, needs, and construction form a working settlement loop                    |
+| Civilization         | Exploration, territory, research, and progression unlock new capabilities                   |
+| PvE world            | Cooperative threats, enemies, defenses, and world events create pressure                    |
+| Production readiness | The global world survives restarts, load, failures, and upgrades safely                     |
 
 ## Phase 0: Resolve product and technical decisions
 

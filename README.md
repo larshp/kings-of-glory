@@ -83,7 +83,7 @@ packages/
 
 ## Local development
 
-Prerequisites: Node.js 22 or newer and Corepack. The repository pins pnpm 10.14.0.
+Prerequisites: Node.js 22.16.0 (see `.nvmrc`) and Corepack. The repository pins pnpm 10.14.0. GitHub Actions runs the same locked install, format, lint, build, and test gate on pull requests and `main`.
 
 ```powershell
 corepack enable
@@ -110,8 +110,14 @@ $env:DATABASE_URL = 'postgres://kings:kings@localhost:5432/kings_of_glory'
 pnpm --filter @kings/server dev
 ```
 
-`PERSISTENCE=memory` remains the default for local UI work. PostgreSQL mode journals accepted commands before applying them, saves a completed checkpoint every 300 ticks, and writes one final checkpoint during graceful shutdown. See [001_initial.sql](packages/server-runtime/migrations/001_initial.sql) for the initial schema.
+`PERSISTENCE=memory` remains the default for local UI work. PostgreSQL mode journals accepted commands before applying them, saves a completed checkpoint every 300 ticks, retains the newest three completed checkpoints with replayable journal history, and writes one final checkpoint during graceful shutdown. See [001_initial.sql](packages/server-runtime/migrations/001_initial.sql) for the initial schema.
+
+The server exposes `/health`, `/ready`, and a Prometheus-compatible `/metrics` endpoint. `/health` reports whether the process is live; `/ready` returns `503` during maintenance so traffic can drain before the final checkpoint. Metrics include full-state and delta message/byte totals plus state-build time, so snapshot regressions are observable. In production set `NODE_ENV=production` and a comma-separated `ALLOWED_ORIGINS` list; WebSocket connections from other origins are rejected. Each connection is rate-limited to 30 messages per second, heartbeats every 15 seconds, and is disconnected when its buffered outbound data exceeds 1 MB or it remains silent for 45 seconds.
+
+To inspect a serialized checkpoint state without changing it, build the workspace and run `pnpm --filter @kings/server inspect path/to/checkpoint.json`. The inspector reports invalid owners, overlapping buildings, invalid inventories, malformed populations, and dangling threat targets.
+
+Run the deterministic bot baseline with `pnpm --filter @kings/server load [players] [ticks]`. It reports duration, tick throughput, command count, entity count, and final state hash; record these values when evaluating performance changes.
 
 ## Current vertical slice
 
-This first increment provides a strict TypeScript workspace, a platform-independent deterministic simulation, a versioned JSON WebSocket handshake, a single authoritative world host, durable checkpoint/journal foundations, and a React/PixiJS isometric placeholder map. A connected player can gather ore and place a smelter; tests verify deterministic replay, duplicate-command rejection, and checkpoint recovery.
+This increment provides a strict TypeScript workspace, a platform-independent deterministic simulation, a versioned JSON WebSocket handshake, a single authoritative world host, durable checkpoint/journal foundations, and a React/PixiJS isometric map. Players can gather ore, construct smelters, storage, and housing, move items through building inventories, link storage to smelters for deterministic ore delivery, and grow an aggregated workforce. Tests cover deterministic replay, command rejection, resource conservation, content validation, protocol shape validation, and checkpoint recovery.

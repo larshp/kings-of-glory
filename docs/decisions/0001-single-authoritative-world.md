@@ -11,4 +11,3 @@ Run exactly one world host. Browsers submit typed commands and receive snapshots
 ## Consequences
 
 The server must validate commands and support reconnect/resynchronization. The simulation remains platform-independent and deterministic, which makes replay and future persistence possible.
-

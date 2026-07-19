@@ -4,6 +4,10 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "dependencies": {
+    "@kings/content": "workspace:*",
+    "@kings/pathfinding": "workspace:*"
+  },
   "scripts": {
     "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
     "test": "node ../../node_modules/vitest/vitest.mjs run",

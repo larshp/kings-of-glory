@@ -1,20 +1,189 @@
 export type PlayerId = string & { readonly __brand: 'PlayerId' };
 export type BuildingId = string & { readonly __brand: 'BuildingId' };
 export type Tick = number & { readonly __brand: 'Tick' };
+export type SettlementRole = 'owner' | 'builder' | 'logistics' | 'member';
 
 export const playerId = (value: string): PlayerId => value as PlayerId;
 export const buildingId = (value: string): BuildingId => value as BuildingId;
 
 export type Command =
-  | { readonly id: string; readonly playerId: PlayerId; readonly sequence: number; readonly type: 'gather'; readonly x: number; readonly y: number }
-  | { readonly id: string; readonly playerId: PlayerId; readonly sequence: number; readonly type: 'placeSmelter'; readonly x: number; readonly y: number }
-  | { readonly id: string; readonly playerId: PlayerId; readonly sequence: number; readonly type: 'smelt'; readonly buildingId: BuildingId }
-  | { readonly id: string; readonly playerId: PlayerId; readonly sequence: number; readonly type: 'repair'; readonly buildingId: BuildingId }
-  | { readonly id: string; readonly playerId: PlayerId; readonly sequence: number; readonly type: 'cancelConstruction'; readonly buildingId: BuildingId }
-  | { readonly id: string; readonly playerId: PlayerId; readonly sequence: number; readonly type: 'demolish'; readonly buildingId: BuildingId };
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'gather';
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'placeSmelter';
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'placeStorage';
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'placeHousing';
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'placeWatchtower';
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'explore';
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'claimTerritory';
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'research';
+      readonly technologyId: 'metallurgy' | 'territorial-charter';
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'smelt';
+      readonly buildingId: BuildingId;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'transfer';
+      readonly buildingId: BuildingId;
+      readonly item: 'ore' | 'wood' | 'ingot';
+      readonly amount: number;
+      readonly direction: 'toBuilding' | 'toPlayer';
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'transferToPlayer';
+      readonly targetPlayerId: PlayerId;
+      readonly item: 'ore' | 'wood' | 'ingot';
+      readonly amount: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'inviteToSettlement';
+      readonly settlementId: string;
+      readonly targetPlayerId: PlayerId;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'acceptSettlementInvite';
+      readonly settlementId: string;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'setSettlementRole';
+      readonly settlementId: string;
+      readonly targetPlayerId: PlayerId;
+      readonly role: Exclude<SettlementRole, 'owner'>;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'transferSettlementOwnership';
+      readonly settlementId: string;
+      readonly targetPlayerId: PlayerId;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'leaveSettlement';
+      readonly settlementId: string;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'createLogisticsLink';
+      readonly sourceBuildingId: BuildingId;
+      readonly targetBuildingId: BuildingId;
+      readonly item: 'ore';
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'removeLogisticsLink';
+      readonly linkId: string;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'setJobPriority';
+      readonly buildingId: BuildingId;
+      readonly priority: 0 | 1 | 2 | 3;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'repair';
+      readonly buildingId: BuildingId;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'cancelConstruction';
+      readonly buildingId: BuildingId;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'demolish';
+      readonly buildingId: BuildingId;
+    };
 
 export type RejectionCode =
   | 'unknown-player'
+  | 'unauthorized'
   | 'duplicate-command'
   | 'out-of-order-command'
   | 'out-of-range'
@@ -32,7 +201,25 @@ export type RejectionCode =
   | 'construction-incomplete'
   | 'busy'
   | 'wrong-building'
-  | 'cannot-demolish';
+  | 'cannot-demolish'
+  | 'invalid-amount'
+  | 'not-explored'
+  | 'not-adjacent'
+  | 'territory-claimed'
+  | 'technology-locked'
+  | 'research-in-progress'
+  | 'already-researched'
+  | 'unknown-recipient'
+  | 'unknown-settlement'
+  | 'settlement-permission-denied'
+  | 'settlement-invite-missing'
+  | 'not-settlement-member'
+  | 'already-settlement-member'
+  | 'cannot-leave-settlement-owner'
+  | 'cannot-transfer-settlement-ownership-to-self'
+  | 'invalid-logistics-link'
+  | 'logistics-link-exists'
+  | 'unknown-logistics-link';
 
 export type CommandResult =
   | { readonly accepted: true; readonly commandId: string }

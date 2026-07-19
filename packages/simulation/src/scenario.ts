@@ -8,6 +8,9 @@ import {
   nearestOreTile,
   stateHash,
   terrainAt,
+  type Building,
+  type LogisticsLink,
+  type TickPhase,
   type WorldState,
 } from './world.js';
 
@@ -16,6 +19,12 @@ export interface ScenarioResult {
   hash: string;
   commandCount: number;
   invariantErrors: readonly string[];
+}
+
+export interface PhaseProfile {
+  ticks: number;
+  phaseDurationsMs: Readonly<Record<TickPhase, number>>;
+  result: ScenarioResult;
 }
 
 /** Deterministic bot workload used by CI tests and the server load runner. */
@@ -56,6 +65,10 @@ export const runBotScenario = (
     // Covers the whole ore -> ingot -> tool chain after constructing the basic settlement.
     playerState.inventory.wood = 14 + (targetBuildingsPerPlayer - 5) * 2;
     playerState.inventory.ingot = 1;
+    // This is a density fixture rather than a starter-settlement scenario: give
+    // it enough abstract construction labor to exercise production and combat
+    // instead of spending the entire run serializing 50 build projects.
+    playerState.population.total = targetBuildingsPerPlayer;
     const buildTiles = Array.from({ length: playerState.plot.size }, (_, x) =>
       Array.from({ length: playerState.plot.size }, (_, y) => ({
         x: playerState.plot.x + x,
@@ -89,7 +102,8 @@ export const runBotScenario = (
     oreTiles.set(player, oreTile);
   }
   for (let tick = 0; tick < ticks; tick += 1) {
-    if (tick === 10)
+    if (tick === 20) for (const player of Object.values(state.players)) player.population.total = 2;
+    if (tick === 20)
       for (const player of Object.keys(state.players)) {
         const smelter = Object.values(state.buildings).find(
           (building) => building.ownerId === player && building.kind === 'smelter',
@@ -114,7 +128,7 @@ export const runBotScenario = (
         const workshopTile = towerTiles.get(`${player}:workshop`);
         if (workshopTile) requireIssue(player, { type: 'placeWorkshop', ...workshopTile });
       }
-    if (tick === 20)
+    if (tick === 40)
       for (const player of Object.keys(state.players)) {
         const smelter = Object.values(state.buildings).find(
           (building) => building.ownerId === player && building.kind === 'smelter',
@@ -174,4 +188,117 @@ export const runBotScenario = (
     advanceTick(state);
   }
   return { state, hash: stateHash(state), commandCount, invariantErrors: inspectWorld(state) };
+};
+
+/**
+ * A dense, headless logistics workload. It intentionally uses direct fixture
+ * construction so one scenario can exercise thousands of completed entities
+ * without being constrained by a player's starter plot.
+ */
+const createInfrastructureStressState = (pairCount: number): WorldState => {
+  if (!Number.isSafeInteger(pairCount) || pairCount < 1_000)
+    throw new Error(
+      'Infrastructure stress scenarios require at least 1,000 source/producer pairs.',
+    );
+  const state = createWorld(20260720);
+  const ownerId = playerId('stress-owner');
+  joinPlayer(state, ownerId);
+  const center = state.buildings['center-stress-owner']!;
+  for (let index = 0; index < pairCount; index += 1) {
+    const sourceId = `stress-storage-${index}`;
+    const targetId = `stress-smelter-${index}`;
+    const source: Building = {
+      ...center,
+      id: sourceId as never,
+      kind: 'storage',
+      x: index * 2,
+      y: 0,
+      inventory: { ore: 1, wood: 0, ingot: 0, tool: 0 },
+      inventoryCapacity: 200,
+      populationCapacity: 0,
+      jobPriority: 0,
+      recipeId: null,
+      productionState: 'idle',
+    };
+    const target: Building = {
+      ...source,
+      id: targetId as never,
+      kind: 'smelter',
+      x: index * 2 + 1,
+      maxHealth: 10,
+      health: 10,
+      inventory: { ore: 0, wood: 0, ingot: 0, tool: 0 },
+      inventoryCapacity: 20,
+      jobPriority: 0,
+      recipeId: 'smelt-ore',
+    };
+    const link: LogisticsLink = {
+      id: `stress-link-${index}`,
+      ownerId,
+      sourceBuildingId: source.id,
+      targetBuildingId: target.id,
+      item: 'ore',
+      priority: index % 4 === 0 ? 3 : 1,
+      throughputPerTick: 1,
+      status: 'idle',
+    };
+    state.buildings[sourceId] = source;
+    state.buildings[targetId] = target;
+    state.logisticsLinks[link.id] = link;
+  }
+  return state;
+};
+
+const requireStressTicks = (ticks: number) => {
+  if (!Number.isSafeInteger(ticks) || ticks < 1)
+    throw new Error('Infrastructure stress scenarios require at least one tick.');
+};
+
+export const runInfrastructureStressScenario = (pairCount = 1_000, ticks = 4): ScenarioResult => {
+  requireStressTicks(ticks);
+  const state = createInfrastructureStressState(pairCount);
+  for (let tick = 0; tick < ticks; tick += 1) advanceTick(state);
+  return {
+    state,
+    hash: stateHash(state),
+    commandCount: 0,
+    invariantErrors: inspectWorld(state),
+  };
+};
+
+/** Runs the dense scenario with opt-in timings for every authoritative tick phase. */
+export const profileInfrastructureStressScenario = (
+  now: () => number,
+  pairCount = 1_000,
+  ticks = 4,
+): PhaseProfile => {
+  requireStressTicks(ticks);
+  const state = createInfrastructureStressState(pairCount);
+  const phaseDurationsMs: Record<TickPhase, number> = {
+    'advance-clock': 0,
+    'research-and-population': 0,
+    'construction-and-production': 0,
+    'environmental-events': 0,
+    logistics: 0,
+    'threat-spawning': 0,
+    'threat-navigation-and-combat': 0,
+    'emit-events-and-mark-changes': 0,
+  };
+  for (let tick = 0; tick < ticks; tick += 1)
+    advanceTick(state, {
+      now,
+      record: (phase, durationMs) => {
+        phaseDurationsMs[phase] += durationMs;
+      },
+    });
+  return {
+    ticks,
+    phaseDurationsMs,
+    result: {
+      state,
+      hash: stateHash(state),
+      commandCount: 0,
+      invariantErrors: inspectWorld(state),
+    },
+  };
 };

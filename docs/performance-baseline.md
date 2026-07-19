@@ -43,6 +43,38 @@ Compare future measured runs against this command, state hash, entity count, thr
 shape. Heap and RSS values vary with the Node.js runtime and machine; investigate sustained growth or
 material regressions before raising the target entity count or adding per-tick work.
 
+## Per-phase infrastructure profile
+
+The dense 1,000-pair logistics fixture profiles each authoritative phase without putting a clock in
+the deterministic simulation. Run it after building:
+
+```powershell
+npm.cmd --prefix apps/server run profile -- 1000 100
+```
+
+On 2026-07-19, this produced 2,001 buildings and 1,000 links with final hash `b0b61d16`.
+Construction and production was the largest phase at 3.560 ms per tick, followed by logistics at
+1.994 ms. The production recipe lookup has therefore been indexed by recipe ID, replacing a
+per-building linear recipe scan in that measured hot phase.
+
+```json
+{
+  "perTickMs": {
+    "advance-clock": 0.000948,
+    "research-and-population": 1.126743,
+    "construction-and-production": 3.559986,
+    "environmental-events": 0.036476,
+    "logistics": 1.99377,
+    "threat-spawning": 0.000878,
+    "threat-navigation-and-combat": 1.59519,
+    "emit-events-and-mark-changes": 0.000339
+  }
+}
+```
+
+Treat this as a comparative local baseline: absolute timings vary by machine and Node.js version,
+while the per-phase shape identifies where subsequent optimization work should start.
+
 ## Repeated soak check
 
 Run repeated deterministic scenarios to catch state-hash drift, invariant failures, latency spikes, and

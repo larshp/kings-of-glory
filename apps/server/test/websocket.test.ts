@@ -1,4 +1,5 @@
 import { type ServerEnvironment, MemoryWorldPersistence } from '@kings/server-runtime';
+import { PROTOCOL_VERSION } from '@kings/protocol';
 import { nearestOreTile } from '@kings/simulation';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
@@ -30,53 +31,58 @@ const receive = <T extends { type: string }>(socket: WebSocket, type: T['type'])
   });
 
 const receiveFullState = (socket: WebSocket) =>
-  new Promise<{ type: 'state'; version: number; state: { players: Record<string, unknown> } }>(
-    (resolve, reject) => {
-      const timer = setTimeout(() => {
-        socket.off('message', onMessage);
-        reject(new Error('Timed out waiting for a full state.'));
-      }, 1_000);
-      const onMessage = (raw: WebSocket.RawData) => {
-        const message = JSON.parse(raw.toString()) as {
-          type?: string;
-          version?: number;
-          state?: { players: Record<string, unknown> };
-        };
-        if (message.type !== 'state' || !message.state || message.version === undefined) return;
-        clearTimeout(timer);
-        socket.off('message', onMessage);
-        resolve({ type: 'state', version: message.version, state: message.state });
-      };
-      socket.on('message', onMessage);
-    },
-  );
-
-const receiveDeltaState = (socket: WebSocket, minimumTick: number) =>
-  new Promise<{ type: 'state'; version: number; delta: { tick?: number } }>((resolve, reject) => {
+  new Promise<{
+    type: 'worldBootstrap';
+    stateVersion: number;
+    state: { players: Record<string, unknown> };
+  }>((resolve, reject) => {
     const timer = setTimeout(() => {
       socket.off('message', onMessage);
-      reject(new Error('Timed out waiting for a state delta.'));
+      reject(new Error('Timed out waiting for a full state.'));
     }, 1_000);
     const onMessage = (raw: WebSocket.RawData) => {
       const message = JSON.parse(raw.toString()) as {
         type?: string;
         version?: number;
-        delta?: { tick?: number };
+        state?: { players: Record<string, unknown> };
       };
-      if (
-        message.type !== 'state' ||
-        !message.delta ||
-        message.version === undefined ||
-        typeof message.delta.tick !== 'number' ||
-        message.delta.tick < minimumTick
-      )
+      if (message.type !== 'worldBootstrap' || !message.state || message.stateVersion === undefined)
         return;
       clearTimeout(timer);
       socket.off('message', onMessage);
-      resolve({ type: 'state', version: message.version, delta: message.delta });
+      resolve({ type: 'worldBootstrap', stateVersion: message.stateVersion, state: message.state });
     };
     socket.on('message', onMessage);
   });
+
+const receiveDeltaState = (socket: WebSocket, minimumTick: number) =>
+  new Promise<{ type: 'stateDelta'; version: number; delta: { tick?: number } }>(
+    (resolve, reject) => {
+      const timer = setTimeout(() => {
+        socket.off('message', onMessage);
+        reject(new Error('Timed out waiting for a state delta.'));
+      }, 1_000);
+      const onMessage = (raw: WebSocket.RawData) => {
+        const message = JSON.parse(raw.toString()) as {
+          type?: string;
+          version?: number;
+          delta?: { tick?: number };
+        };
+        if (
+          message.type !== 'stateDelta' ||
+          !message.delta ||
+          message.version === undefined ||
+          typeof message.delta.tick !== 'number' ||
+          message.delta.tick < minimumTick
+        )
+          return;
+        clearTimeout(timer);
+        socket.off('message', onMessage);
+        resolve({ type: 'stateDelta', version: message.version, delta: message.delta });
+      };
+      socket.on('message', onMessage);
+    },
+  );
 
 const connectedSocket = async (port: number) => {
   const socket = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -106,12 +112,23 @@ describe('WebSocket game boundary', () => {
       fetch(`http://127.0.0.1:${port}/ready`).then((response) => response.status),
     ).resolves.toBe(200);
 
-    const welcome = receive<{ type: 'welcome'; playerId: string; stateVersion: number }>(
+    const welcome = receive<{ type: 'welcome'; playerId: string; version: number }>(
       socket,
       'welcome',
     );
-    socket.send(JSON.stringify({ type: 'hello', version: 1, playerId: 'socket-player' }));
+    const bootstrap = receive<{
+      type: 'worldBootstrap';
+      playerId: string;
+      stateVersion: number;
+    }>(socket, 'worldBootstrap');
+    socket.send(
+      JSON.stringify({ type: 'hello', version: PROTOCOL_VERSION, playerId: 'socket-player' }),
+    );
     await expect(welcome).resolves.toMatchObject({
+      playerId: 'socket-player',
+      version: PROTOCOL_VERSION,
+    });
+    await expect(bootstrap).resolves.toMatchObject({
       playerId: 'socket-player',
       stateVersion: expect.any(Number),
     });
@@ -127,9 +144,9 @@ describe('WebSocket game boundary', () => {
     await expect(pong).resolves.toEqual({ type: 'pong', nonce: 'keepalive-1' });
 
     const unauthorized = receive<{
-      type: 'commandResult';
+      type: 'commandRejected';
       result: { accepted: boolean; code?: string };
-    }>(socket, 'commandResult');
+    }>(socket, 'commandRejected');
     socket.send(
       JSON.stringify({
         type: 'command',
@@ -162,9 +179,9 @@ describe('WebSocket game boundary', () => {
       ...oreTile,
     };
     const accepted = receive<{
-      type: 'commandResult';
+      type: 'commandAcknowledged';
       result: { accepted: boolean; commandId: string };
-    }>(socket, 'commandResult');
+    }>(socket, 'commandAcknowledged');
     socket.send(JSON.stringify({ type: 'command', command }));
     await expect(accepted).resolves.toMatchObject({
       result: { accepted: true, commandId: command.id },
@@ -172,9 +189,9 @@ describe('WebSocket game boundary', () => {
     expect(game.host.world.players['socket-player']?.inventory.ore).toBe(1);
 
     const duplicate = receive<{
-      type: 'commandResult';
+      type: 'commandRejected';
       result: { accepted: boolean; code?: string };
-    }>(socket, 'commandResult');
+    }>(socket, 'commandRejected');
     socket.send(JSON.stringify({ type: 'command', command }));
     await expect(duplicate).resolves.toMatchObject({
       result: { accepted: false, code: 'duplicate-command' },
@@ -225,7 +242,9 @@ describe('WebSocket game boundary', () => {
     const port = await game.listen(0);
     const socket = await connectedSocket(port);
     const welcome = receive<{ type: 'welcome' }>(socket, 'welcome');
-    socket.send(JSON.stringify({ type: 'hello', version: 1, playerId: 'maintenance-player' }));
+    socket.send(
+      JSON.stringify({ type: 'hello', version: PROTOCOL_VERSION, playerId: 'maintenance-player' }),
+    );
     await welcome;
     const maintenance = receive<{ type: 'maintenance'; message: string }>(socket, 'maintenance');
     const closed = new Promise<{ code: number; reason: string }>((resolve) =>
@@ -245,7 +264,9 @@ describe('WebSocket game boundary', () => {
     const port = await game.listen(0);
     const firstSocket = await connectedSocket(port);
     const firstWelcome = receive<{ type: 'welcome'; playerId: string }>(firstSocket, 'welcome');
-    firstSocket.send(JSON.stringify({ type: 'hello', version: 1, playerId: 'reconnect-player' }));
+    firstSocket.send(
+      JSON.stringify({ type: 'hello', version: PROTOCOL_VERSION, playerId: 'reconnect-player' }),
+    );
     await expect(firstWelcome).resolves.toMatchObject({ playerId: 'reconnect-player' });
     const player = game.host.world.players['reconnect-player']!;
     const oreTile = nearestOreTile(
@@ -255,9 +276,9 @@ describe('WebSocket game boundary', () => {
       8,
     )!;
     const gathered = receive<{
-      type: 'commandResult';
+      type: 'commandAcknowledged';
       result: { accepted: boolean; commandId: string };
-    }>(firstSocket, 'commandResult');
+    }>(firstSocket, 'commandAcknowledged');
     firstSocket.send(
       JSON.stringify({
         type: 'command',
@@ -279,12 +300,12 @@ describe('WebSocket game boundary', () => {
 
     const reconnectedSocket = await connectedSocket(port);
     const reconnectedWelcome = receive<{
-      type: 'welcome';
+      type: 'worldBootstrap';
       playerId: string;
       state: { players: Record<string, { inventory: { ore: number } }> };
-    }>(reconnectedSocket, 'welcome');
+    }>(reconnectedSocket, 'worldBootstrap');
     reconnectedSocket.send(
-      JSON.stringify({ type: 'hello', version: 1, playerId: 'reconnect-player' }),
+      JSON.stringify({ type: 'hello', version: PROTOCOL_VERSION, playerId: 'reconnect-player' }),
     );
     await expect(reconnectedWelcome).resolves.toMatchObject({
       playerId: 'reconnect-player',
@@ -317,7 +338,7 @@ describe('WebSocket game boundary', () => {
       const socket = await connectedSocket(port);
       const welcome = receive<{ type: 'welcome'; playerId: string }>(socket, 'welcome');
       const playerId = `observer-${index}`;
-      socket.send(JSON.stringify({ type: 'hello', version: 1, playerId }));
+      socket.send(JSON.stringify({ type: 'hello', version: PROTOCOL_VERSION, playerId }));
       await expect(welcome).resolves.toMatchObject({ playerId });
       sockets.push(socket);
     }

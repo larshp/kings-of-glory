@@ -1,12 +1,26 @@
 import { describe, expect, it } from 'vitest';
 import {
   entityAtTile,
+  logisticsStatusColor,
+  productionRateLabel,
   visibleByIsometricDepth,
   visibleChunkCoordinates,
+  visibleRenderChunks,
   visibleTileBounds,
 } from './WorldCanvas.js';
 
 describe('visibleByIsometricDepth', () => {
+  it('uses distinct logistics overlay colors for flow and actionable blockage', () => {
+    expect(logisticsStatusColor('transferred')).toBe('#68d7f5');
+    expect(logisticsStatusColor('target-full')).toBe('#f4b860');
+    expect(logisticsStatusColor('target-reconfigured')).toBe('#de7780');
+  });
+
+  it('labels the configured producer rate from shared recipe content', () => {
+    expect(productionRateLabel({ recipeId: 'smelt-ore' })).toBe('1 ingot/3t');
+    expect(productionRateLabel({ recipeId: null })).toBe('no recipe');
+  });
+
   it('culls off-map entities before applying a stable isometric depth order', () => {
     const entities = [
       { id: 'far-away', x: 20, y: 20 },
@@ -38,6 +52,19 @@ describe('visibleByIsometricDepth', () => {
       { x: 0, y: 0 },
       { x: 1, y: -1 },
       { x: 1, y: 0 },
+    ]);
+  });
+
+  it('keeps tile draw work within the intersecting visible chunk containers', () => {
+    expect(
+      visibleRenderChunks({ minX: -1, maxX: 17, minY: 14, maxY: 17, center: { x: 0, y: 0 } }),
+    ).toEqual([
+      { x: -1, y: 0, minX: -1, maxX: -1, minY: 14, maxY: 15 },
+      { x: -1, y: 1, minX: -1, maxX: -1, minY: 16, maxY: 17 },
+      { x: 0, y: 0, minX: 0, maxX: 15, minY: 14, maxY: 15 },
+      { x: 0, y: 1, minX: 0, maxX: 15, minY: 16, maxY: 17 },
+      { x: 1, y: 0, minX: 16, maxX: 17, minY: 14, maxY: 15 },
+      { x: 1, y: 1, minX: 16, maxX: 17, minY: 16, maxY: 17 },
     ]);
   });
 

@@ -119,6 +119,53 @@ select {
 .status {
   color: #9fe2b1;
 }
+.asset-loading {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+  border: 1px solid #698b75;
+  border-radius: 0.25rem;
+  background: rgb(25 52 70 / 75%);
+  color: #c8d8e7;
+  font-size: 0.85rem;
+}
+.asset-loading.error {
+  border-color: #d76a5f;
+  color: #fff1c2;
+}
+.asset-loading button {
+  margin-bottom: 0;
+}
+.renderer-debug {
+  margin: 0.5rem 0;
+  border-top: 1px solid #526576;
+  color: #c8d8e7;
+  font-size: 0.85rem;
+}
+.renderer-debug summary {
+  cursor: pointer;
+  padding: 0.5rem 0 0.25rem;
+  color: #f4f0df;
+}
+.renderer-debug p {
+  margin: 0.2rem 0;
+}
+.operations-overlay {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0;
+  border-top: 1px solid #526576;
+  color: #c8d8e7;
+  font-size: 0.85rem;
+}
+.operations-overlay h2 {
+  margin: 0 0 0.3rem;
+  color: #f4f0df;
+  font-size: 0.95rem;
+}
+.operations-overlay p {
+  margin: 0.3rem 0 0;
+}
 .map-help {
   color: #c8d8e7;
   font-size: 0.8rem;

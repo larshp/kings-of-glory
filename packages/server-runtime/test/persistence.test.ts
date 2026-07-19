@@ -254,7 +254,7 @@ describe('durable world recovery', () => {
       type: string;
       state?: { buildings: Record<string, unknown>; terrain: Record<string, unknown> };
     };
-    expect(message.type).toBe('state');
+    expect(message.type).toBe('chunkSnapshot');
     expect(message.state?.buildings.hidden).toBeDefined();
     expect(message.state?.terrain['32:0']).toBeDefined();
 
@@ -427,12 +427,18 @@ describe('durable world recovery', () => {
     await host.connect(client, 'player-a');
     const welcome = JSON.parse(client.messages[0]!) as {
       type: string;
+      version: number;
+    };
+    const bootstrap = JSON.parse(client.messages[1]!) as {
+      type: string;
       stateVersion: number;
       state: { players: Record<string, unknown> };
     };
     expect(welcome.type).toBe('welcome');
-    expect(welcome.stateVersion).toBe(0);
-    expect(Object.keys(welcome.state.players)).toEqual(['player-a']);
+    expect(welcome.version).toBe(2);
+    expect(bootstrap.type).toBe('worldBootstrap');
+    expect(bootstrap.stateVersion).toBe(0);
+    expect(Object.keys(bootstrap.state.players)).toEqual(['player-a']);
 
     await host.tick();
     const delta = JSON.parse(client.messages.at(-1)!) as {
@@ -441,21 +447,67 @@ describe('durable world recovery', () => {
       baseVersion: number;
       delta: { tick?: number; terrain?: unknown };
     };
-    expect(delta).toMatchObject({ type: 'state', version: 2, baseVersion: 1, delta: { tick: 1 } });
+    expect(delta).toMatchObject({
+      type: 'stateDelta',
+      version: 2,
+      baseVersion: 1,
+      delta: { tick: 1 },
+    });
     expect(delta.delta.terrain).toBeUndefined();
 
     host.resync(client);
     const resync = JSON.parse(client.messages.at(-1)!) as {
       type: string;
-      version: number;
+      stateVersion: number;
       state?: { tick: number; players: Record<string, unknown> };
     };
-    expect(resync.type).toBe('state');
-    expect(resync.version).toBe(2);
+    expect(resync.type).toBe('worldBootstrap');
+    expect(resync.stateVersion).toBe(2);
     expect(resync.state).toMatchObject({ tick: 1, players: { 'player-a': expect.anything() } });
     expect(host.metrics.fullStateMessages).toBe(2);
     expect(host.metrics.deltaStateMessages).toBe(2);
     expect(host.metrics.fullStateBytes).toBeGreaterThan(host.metrics.deltaStateBytes);
+  });
+
+  it('replaces an entity snapshot when an observed building crosses into a new chunk', async () => {
+    const host = new GlobalWorldHost();
+    const alice = connection();
+    const bob = connection();
+    await host.connect(alice, 'player-a');
+    await host.connect(bob, 'player-b');
+    const building = host.world.buildings['center-player-a']!;
+    const initialPosition = { x: building.x, y: building.y };
+    const initialChunk = { x: Math.floor(building.x / 16), y: Math.floor(building.y / 16) };
+    const nextChunk = { x: initialChunk.x + 1, y: initialChunk.y };
+    host.world.players['player-b']!.exploredChunks[`${initialChunk.x}:${initialChunk.y}`] = true;
+    host.world.players['player-b']!.exploredChunks[`${nextChunk.x}:${nextChunk.y}`] = true;
+
+    host.setInterest(bob, [initialChunk]);
+    const initialSnapshot = JSON.parse(bob.messages.at(-1)!) as {
+      type: string;
+      state: { buildings: Record<string, { x: number; y: number }> };
+    };
+    expect(initialSnapshot).toMatchObject({
+      type: 'chunkSnapshot',
+      state: { buildings: { [building.id]: { x: building.x, y: building.y } } },
+    });
+
+    building.x = nextChunk.x * 16;
+    host.setInterest(bob, [nextChunk]);
+    const movedSnapshot = JSON.parse(bob.messages.at(-1)!) as {
+      type: string;
+      chunks: Array<{ x: number; y: number }>;
+      state: { buildings: Record<string, { x: number; y: number }> };
+    };
+    expect(movedSnapshot.chunks).toEqual([nextChunk]);
+    expect(movedSnapshot.state.buildings[building.id]).toEqual(
+      expect.objectContaining({ x: nextChunk.x * 16, y: building.y }),
+    );
+    expect(
+      Object.values(movedSnapshot.state.buildings).filter(
+        (candidate) => candidate.x === initialPosition.x && candidate.y === initialPosition.y,
+      ),
+    ).toHaveLength(0);
   });
 });
 

@@ -1,8 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { validateContent, validateRecipeGraph, validateTechnologyGraph } from '../src/index.js';
+import {
+  logisticsLinks,
+  producers,
+  resources,
+  storage,
+  validateContent,
+  validateRecipeGraph,
+  validateTechnologyGraph,
+} from '../src/index.js';
 
 describe('content definitions', () => {
   it('has valid item and recipe references', () => expect(validateContent()).toEqual([]));
+  it('declares resource, producer, storage, and logistics schemas for the active production chain', () => {
+    expect(resources.ore).toMatchObject({ item: 'ore', yield: 10, renewable: false });
+    expect(producers.smelter).toMatchObject({
+      buildingId: 'smelter',
+      recipeIds: ['smelt-ore'],
+      defaultRecipeId: 'smelt-ore',
+    });
+    expect(producers.workshop.recipeIds).toContain('forge-tool-without-wood');
+    expect(storage.storage).toMatchObject({ buildingId: 'storage', capacity: 200 });
+    expect(logisticsLinks.internalInventory.throughputPerTick).toBe(1);
+  });
   it('rejects cyclic technology prerequisites', () =>
     expect(
       validateTechnologyGraph({

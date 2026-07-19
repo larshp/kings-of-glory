@@ -135,6 +135,100 @@ describe('client message validation', () => {
         }),
       ),
     ).toMatchObject({ type: 'command' });
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'priority-1',
+            playerId: 'player-a',
+            sequence: 3,
+            type: 'setLogisticsPriority',
+            linkId: 'link-storage-smelter-ore',
+            priority: 3,
+          },
+        }),
+      ),
+    ).toMatchObject({ type: 'command' });
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'priority-invalid',
+            playerId: 'player-a',
+            sequence: 4,
+            type: 'setLogisticsPriority',
+            linkId: 'link-storage-smelter-ore',
+            priority: 4,
+          },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+  it('accepts only a safe producer recipe configuration command', () => {
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'recipe-1',
+            playerId: 'player-a',
+            sequence: 1,
+            type: 'setRecipe',
+            buildingId: 'workshop-1',
+            recipeId: 'forge-tool-without-wood',
+          },
+        }),
+      ),
+    ).toMatchObject({ type: 'command' });
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'recipe-2',
+            playerId: 'player-a',
+            sequence: 2,
+            type: 'setRecipe',
+            buildingId: 'workshop-1',
+            recipeId: '../../smelt-ore',
+          },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+  it('accepts only safe source and target identifiers for configuration copying', () => {
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'copy-1',
+            playerId: 'player-a',
+            sequence: 1,
+            type: 'copyBuildingConfiguration',
+            sourceBuildingId: 'workshop-a',
+            targetBuildingId: 'workshop-b',
+          },
+        }),
+      ),
+    ).toMatchObject({ type: 'command' });
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'copy-2',
+            playerId: 'player-a',
+            sequence: 2,
+            type: 'copyBuildingConfiguration',
+            sourceBuildingId: 'workshop-a',
+            targetBuildingId: '../../checkpoint',
+          },
+        }),
+      ),
+    ).toBeUndefined();
   });
   it('rejects malformed, incomplete, and unsafe commands', () => {
     expect(

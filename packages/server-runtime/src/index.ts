@@ -126,15 +126,12 @@ export class GlobalWorldHost {
     if (joined.length > 0) await this.saveCheckpoint(candidate);
     this.#world = candidate;
     this.#connections.set(connection, { playerId });
-    const state = this.clientStateFor(connection, playerId);
-    this.#clientStates.set(connection, { version: this.#version, state });
-    this.sendState(connection, {
+    this.send(connection, {
       type: 'welcome',
       version: PROTOCOL_VERSION,
       playerId,
-      stateVersion: this.#version,
-      state,
     });
+    this.sendBootstrap(connection, playerId);
     this.broadcastState();
   }
 
@@ -146,7 +143,7 @@ export class GlobalWorldHost {
   resync(connection: Connection): void {
     const playerId = this.#connections.get(connection)?.playerId;
     if (!playerId) return;
-    this.sendFullState(connection, playerId);
+    this.sendBootstrap(connection, playerId);
   }
 
   /** Replaces the viewport chunks a client is observing and immediately snapshots new chunks. */
@@ -154,9 +151,12 @@ export class GlobalWorldHost {
     const connectionState = this.#connections.get(connection);
     if (!connectionState) return;
     const visibleChunks = new Set(chunks.map((chunk) => chunkKeyFor(chunk.x * 16, chunk.y * 16)));
-    const added = [...visibleChunks].some((chunk) => !connectionState.visibleChunks?.has(chunk));
+    const addedChunks = chunks.filter(
+      (chunk) => !connectionState.visibleChunks?.has(chunkKeyFor(chunk.x * 16, chunk.y * 16)),
+    );
     connectionState.visibleChunks = visibleChunks;
-    if (added) this.sendFullState(connection, connectionState.playerId);
+    if (addedChunks.length > 0)
+      this.sendChunkSnapshot(connection, connectionState.playerId, addedChunks);
   }
 
   async command(
@@ -169,7 +169,7 @@ export class GlobalWorldHost {
       if (!playerId || playerId !== command.playerId) {
         this.#rejectedCommands += 1;
         this.send(connection, {
-          type: 'commandResult',
+          type: 'commandRejected',
           result: { accepted: false, commandId: command.id, code: 'unauthorized' },
         });
         return;
@@ -183,7 +183,7 @@ export class GlobalWorldHost {
           this.#persistenceFailures += 1;
           this.#rejectedCommands += 1;
           this.send(connection, {
-            type: 'commandResult',
+            type: 'commandRejected',
             result: { accepted: false, commandId: command.id, code: 'persistence-failed' },
           });
           return;
@@ -193,7 +193,12 @@ export class GlobalWorldHost {
       } else {
         this.#rejectedCommands += 1;
       }
-      this.send(connection, { type: 'commandResult', result: outcome.result });
+      this.send(
+        connection,
+        outcome.result.accepted
+          ? { type: 'commandAcknowledged', result: outcome.result }
+          : { type: 'commandRejected', result: outcome.result },
+      );
       if (outcome.result.accepted) this.broadcastState();
     } finally {
       this.#lastCommandDurationMs = performance.now() - startedAt;
@@ -231,22 +236,40 @@ export class GlobalWorldHost {
     const previous = this.#clientStates.get(connection);
     if (!previous || previous.version !== this.#version - 1) {
       this.#clientStates.set(connection, { version: this.#version, state });
-      this.sendState(connection, { type: 'state', version: this.#version, state });
+      this.sendBootstrap(connection, playerId, state);
       return;
     }
     this.#clientStates.set(connection, { version: this.#version, state });
     this.sendState(connection, {
-      type: 'state',
+      type: 'stateDelta',
       version: this.#version,
       baseVersion: previous.version,
       delta: deltaFrom(previous.state, state),
     });
   }
 
-  private sendFullState(connection: Connection, playerId: string): void {
+  private sendBootstrap(
+    connection: Connection,
+    playerId: string,
+    state = this.clientStateFor(connection, playerId),
+  ): void {
+    this.#clientStates.set(connection, { version: this.#version, state });
+    this.sendState(connection, {
+      type: 'worldBootstrap',
+      playerId,
+      stateVersion: this.#version,
+      state,
+    });
+  }
+
+  private sendChunkSnapshot(
+    connection: Connection,
+    playerId: string,
+    chunks: readonly { x: number; y: number }[],
+  ): void {
     const state = this.clientStateFor(connection, playerId);
     this.#clientStates.set(connection, { version: this.#version, state });
-    this.sendState(connection, { type: 'state', version: this.#version, state });
+    this.sendState(connection, { type: 'chunkSnapshot', version: this.#version, chunks, state });
   }
 
   private clientStateFor(connection: Connection, playerId: string): ClientWorldState {
@@ -339,11 +362,11 @@ export class GlobalWorldHost {
 
   private sendState(
     connection: Connection,
-    message: Extract<ServerMessage, { type: 'welcome' | 'state' }>,
+    message: Extract<ServerMessage, { type: 'worldBootstrap' | 'chunkSnapshot' | 'stateDelta' }>,
   ): void {
     const encoded = JSON.stringify(message);
     const bytes = Buffer.byteLength(encoded, 'utf8');
-    if (message.type === 'welcome' || message.state) {
+    if (message.type === 'worldBootstrap' || message.type === 'chunkSnapshot') {
       this.#fullStateMessages += 1;
       this.#fullStateBytes += bytes;
     } else {

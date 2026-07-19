@@ -19,7 +19,8 @@ export interface ClientWorldState extends Omit<WorldState, 'seed' | 'randomState
  */
 export type ClientWorldDelta = Partial<ClientWorldState>;
 
-export const PROTOCOL_VERSION = 1;
+/** Bump whenever a client can no longer safely interpret server state messages. */
+export const PROTOCOL_VERSION = 2;
 export const MAX_MESSAGE_BYTES = 64 * 1024;
 
 export type ClientMessage =
@@ -30,21 +31,35 @@ export type ClientMessage =
   | { type: 'ping'; nonce: string };
 
 export type ServerMessage =
+  /** Handshake and development authentication acknowledgement. */
   | {
       type: 'welcome';
       version: number;
       playerId: string;
+    }
+  /** Complete, filtered state used after authentication and full resynchronization. */
+  | {
+      type: 'worldBootstrap';
+      playerId: string;
       stateVersion: number;
       state: ClientWorldState;
     }
+  /** Full filtered state sent when a viewport subscribes to newly relevant chunks. */
   | {
-      type: 'state';
+      type: 'chunkSnapshot';
       version: number;
-      state?: ClientWorldState;
-      baseVersion?: number;
-      delta?: ClientWorldDelta;
+      state: ClientWorldState;
+      chunks: readonly ChunkInterest[];
     }
-  | { type: 'commandResult'; result: CommandResult }
+  /** Versioned replacement domains following a known prior state version. */
+  | {
+      type: 'stateDelta';
+      version: number;
+      baseVersion?: number;
+      delta: ClientWorldDelta;
+    }
+  | { type: 'commandAcknowledged'; result: Extract<CommandResult, { accepted: true }> }
+  | { type: 'commandRejected'; result: Extract<CommandResult, { accepted: false }> }
   | { type: 'pong'; nonce: string }
   | { type: 'maintenance'; message: string }
   | {
@@ -117,6 +132,14 @@ const isCommand = (value: unknown): value is Command => {
       isItem(value.item)
     );
   if (value.type === 'removeLogisticsLink') return isIdentifier(value.linkId);
+  if (value.type === 'setLogisticsPriority')
+    return (
+      isIdentifier(value.linkId) &&
+      typeof value.priority === 'number' &&
+      Number.isInteger(value.priority) &&
+      value.priority >= 0 &&
+      value.priority <= 3
+    );
   if (value.type === 'setJobPriority')
     return (
       isIdentifier(value.buildingId) &&
@@ -125,6 +148,10 @@ const isCommand = (value: unknown): value is Command => {
       value.priority >= 0 &&
       value.priority <= 3
     );
+  if (value.type === 'setRecipe')
+    return isIdentifier(value.buildingId) && isIdentifier(value.recipeId);
+  if (value.type === 'copyBuildingConfiguration')
+    return isIdentifier(value.sourceBuildingId) && isIdentifier(value.targetBuildingId);
   if (
     value.type === 'smelt' ||
     value.type === 'repair' ||

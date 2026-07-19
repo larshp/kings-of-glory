@@ -111,6 +111,8 @@ Or start both with `npm run dev`; the npm wrapper uses the Windows command shim 
 
 The server listens on `http://127.0.0.1:3001/health` and WebSocket clients connect on port 3001. Vite serves the client at `http://127.0.0.1:5173`. By default the client connects to the same hostname as the page, so local `127.0.0.1` and LAN development addresses work; set `VITE_SERVER_URL` to override it. The client uses a stable per-tab development identity; production authentication is intentionally deferred.
 
+The current JSON WebSocket protocol is version 2. A client sends `hello`, then receives a `welcome` handshake acknowledgement and a filtered `worldBootstrap`. Newly relevant viewport chunks receive a replacement `chunkSnapshot`; ordinary changes use ordered `stateDelta` messages. Commands receive either `commandAcknowledged` or `commandRejected`, while `ping`/`pong`, `resync`, `maintenance`, and `error` cover connection health and recovery.
+
 To exercise the durable-world adapter, run PostgreSQL 16 or newer and start the server with a connection string. Startup applies the forward-only initial schema and restores the newest completed checkpoint before accepting clients.
 
 ```powershell
@@ -129,6 +131,7 @@ The server exposes `/health`, `/ready`, and a Prometheus-compatible `/metrics` e
 To inspect a serialized checkpoint state without changing it, build the workspace and run `npm --prefix apps/server run inspect -- path/to/checkpoint.json`. The inspector reports invalid owners, overlapping buildings, invalid inventories, malformed populations, dangling threat targets, incomplete checkpoints, and mismatched checkpoint hashes.
 
 Run the deterministic bot baseline with `npm --prefix apps/server run load -- [players] [ticks] [buildings-per-player]`. It reports duration, tick throughput, command count, entity count, final state hash, and end-of-run memory with deltas; record these values when evaluating performance changes.
+For a dense logistics fixture, run `npm --prefix apps/server run profile -- [pairs>=1000] [ticks]`; it reports total and per-tick time for each authoritative simulation phase.
 See [the current first-slice baseline](docs/performance-baseline.md) for a reproducible 20-player run.
 
 ## Current vertical slice

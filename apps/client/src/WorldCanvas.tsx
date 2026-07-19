@@ -1,7 +1,9 @@
 import { useEffect, useRef } from 'react';
+import { recipes } from '@kings/content';
 import type { TerrainTile } from '@kings/protocol';
-import { type Building, type Threat } from '@kings/simulation';
+import { type Building, type LogisticsLink, type Threat } from '@kings/simulation';
 import type { CameraBindings } from './preferences.js';
+import { drawSprite, type RenderAssets, type SpriteId } from './render-assets.js';
 import {
   screenToTile,
   screenToWorld,
@@ -17,6 +19,33 @@ export interface WorldCanvasMetrics {
   readonly visibleThreats: number;
   readonly activeChunks: number;
 }
+
+export interface WorldCanvasDebugState {
+  readonly enabled: boolean;
+  readonly showCoordinates: boolean;
+  readonly showChunks: boolean;
+  readonly showEntityIds: boolean;
+}
+
+export type OperationsOverlay = 'none' | 'resources' | 'logistics' | 'production' | 'bottlenecks';
+
+export const logisticsStatusColor = (status: LogisticsLink['status']) =>
+  status === 'transferred'
+    ? '#68d7f5'
+    : status === 'target-full' || status === 'source-empty'
+      ? '#f4b860'
+      : status === 'target-reconfigured' || status === 'constructing'
+        ? '#de7780'
+        : '#8796a6';
+
+export const productionRateLabel = (building: Pick<Building, 'recipeId'>) => {
+  const recipe = Object.values(recipes).find((candidate) => candidate.id === building.recipeId);
+  if (!recipe) return 'no recipe';
+  const output = Object.entries(recipe.output)
+    .map(([item, amount]) => `${amount} ${item}`)
+    .join(' + ');
+  return `${output}/${recipe.ticks}t`;
+};
 
 interface Viewport {
   readonly panX: number;
@@ -111,6 +140,20 @@ export const visibleChunkCoordinates = (bounds: VisibleTileBounds) => {
   return chunks;
 };
 
+/**
+ * The immediate-mode canvas keeps a compact container for each visible chunk.
+ * It avoids allocating one render object per tile; a pool is deliberately not
+ * used because the renderer has no per-tile objects to recycle.
+ */
+export const visibleRenderChunks = (bounds: VisibleTileBounds) =>
+  visibleChunkCoordinates(bounds).map((chunk) => ({
+    ...chunk,
+    minX: Math.max(bounds.minX, chunk.x * 16),
+    maxX: Math.min(bounds.maxX, chunk.x * 16 + 15),
+    minY: Math.max(bounds.minY, chunk.y * 16),
+    maxY: Math.min(bounds.maxY, chunk.y * 16 + 15),
+  }));
+
 const terrainColor = (terrain: TerrainTile | undefined, x: number, y: number) =>
   terrain === 'water'
     ? '#2f6d93'
@@ -131,6 +174,8 @@ export const WorldCanvas = ({
   threats,
   terrain,
   territory,
+  logisticsLinks,
+  operationsOverlay,
   focus,
   cameraBindings,
   selectedTile,
@@ -141,11 +186,15 @@ export const WorldCanvas = ({
   onMetrics,
   onVisibleChunks,
   onError,
+  assets,
+  debug,
 }: {
   buildings: readonly Building[];
   threats: readonly Threat[];
   terrain: Readonly<Record<string, TerrainTile>>;
   territory: Readonly<Record<string, string>>;
+  logisticsLinks: readonly LogisticsLink[];
+  operationsOverlay: OperationsOverlay;
   focus: { x: number; y: number };
   cameraBindings: CameraBindings;
   selectedTile: { x: number; y: number } | undefined;
@@ -156,6 +205,8 @@ export const WorldCanvas = ({
   onMetrics?: (metrics: WorldCanvasMetrics) => void;
   onVisibleChunks?: (chunks: readonly { x: number; y: number }[]) => void;
   onError?: (message: string) => void;
+  assets: RenderAssets | undefined;
+  debug: WorldCanvasDebugState | undefined;
 }) => {
   const canvas = useRef<HTMLCanvasElement>(null);
   const viewport = useRef<Viewport>({ panX: 0, panY: 0, scale: 1 });
@@ -163,6 +214,8 @@ export const WorldCanvas = ({
   const latestThreats = useRef(threats);
   const latestTerrain = useRef(terrain);
   const latestTerritory = useRef(territory);
+  const latestLogisticsLinks = useRef(logisticsLinks);
+  const latestOperationsOverlay = useRef(operationsOverlay);
   const latestFocus = useRef(focus);
   const latestCameraBindings = useRef(cameraBindings);
   const latestSelectedTile = useRef(selectedTile);
@@ -173,10 +226,14 @@ export const WorldCanvas = ({
   const latestMetrics = useRef(onMetrics);
   const latestVisibleChunks = useRef(onVisibleChunks);
   const latestError = useRef(onError);
+  const latestAssets = useRef(assets);
+  const latestDebug = useRef(debug);
   latestBuildings.current = buildings;
   latestThreats.current = threats;
   latestTerrain.current = terrain;
   latestTerritory.current = territory;
+  latestLogisticsLinks.current = logisticsLinks;
+  latestOperationsOverlay.current = operationsOverlay;
   latestFocus.current = focus;
   latestCameraBindings.current = cameraBindings;
   latestSelectedTile.current = selectedTile;
@@ -187,6 +244,8 @@ export const WorldCanvas = ({
   latestMetrics.current = onMetrics;
   latestVisibleChunks.current = onVisibleChunks;
   latestError.current = onError;
+  latestAssets.current = assets;
+  latestDebug.current = debug;
 
   const draw = () => {
     const element = canvas.current;
@@ -235,54 +294,136 @@ export const WorldCanvas = ({
       }
     };
 
-    for (let x = tileBounds.minX; x <= tileBounds.maxX; x += 1) {
-      for (let y = tileBounds.minY; y <= tileBounds.maxY; y += 1) {
-        diamond(
-          worldToScreen({ x: x - latestFocus.current.x, y: y - latestFocus.current.y }),
-          terrainColor(latestTerrain.current[`${x}:${y}`], x, y),
-        );
-        if (latestTerritory.current[`${Math.floor(x / 8)}:${Math.floor(y / 8)}`])
+    for (const chunk of visibleRenderChunks(tileBounds)) {
+      for (let x = chunk.minX; x <= chunk.maxX; x += 1) {
+        for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
           diamond(
             worldToScreen({ x: x - latestFocus.current.x, y: y - latestFocus.current.y }),
-            'rgba(86, 136, 217, 0.16)',
+            terrainColor(latestTerrain.current[`${x}:${y}`], x, y),
           );
+          if (latestTerritory.current[`${Math.floor(x / 8)}:${Math.floor(y / 8)}`])
+            diamond(
+              worldToScreen({ x: x - latestFocus.current.x, y: y - latestFocus.current.y }),
+              'rgba(86, 136, 217, 0.16)',
+            );
+        }
       }
     }
+    if (latestOperationsOverlay.current === 'resources') {
+      context.font = '10px system-ui';
+      for (const chunk of visibleRenderChunks(tileBounds))
+        for (let x = chunk.minX; x <= chunk.maxX; x += 1)
+          for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
+            const resource = latestTerrain.current[`${x}:${y}`];
+            if (resource !== 'ore' && resource !== 'wood') continue;
+            const point = worldToScreen({
+              x: x - latestFocus.current.x,
+              y: y - latestFocus.current.y,
+            });
+            diamond(
+              point,
+              resource === 'ore' ? 'rgba(159, 188, 255, 0.32)' : 'rgba(139, 216, 134, 0.28)',
+            );
+            context.fillStyle = '#f4f0df';
+            context.fillText(resource === 'ore' ? 'Ore' : 'Wood', point.x + 23, point.y + 21);
+          }
+    }
+    const drawEntitySprite = (sprite: SpriteId, x: number, y: number) => {
+      const position = worldToScreen({
+        x: x - latestFocus.current.x,
+        y: y - latestFocus.current.y,
+      });
+      const assets = latestAssets.current;
+      if (assets)
+        drawSprite(
+          context,
+          assets,
+          sprite,
+          position.x + TILE_WIDTH / 2,
+          position.y + TILE_HEIGHT / 2,
+        );
+    };
     for (const building of visibleByIsometricDepth(
       latestBuildings.current,
       tileBounds.center,
       visibleRadius,
     )) {
-      const position = worldToScreen({
-        x: building.x - latestFocus.current.x,
-        y: building.y - latestFocus.current.y,
-      });
-      context.fillStyle =
-        building.kind === 'settlement-center'
-          ? '#e6c45d'
-          : building.constructionTicks > 0
-            ? '#95633b'
-            : '#d8703a';
-      context.fillRect(position.x + TILE_WIDTH / 2 - 14, position.y + TILE_HEIGHT / 2 - 22, 28, 22);
-      context.strokeStyle = '#182337';
-      context.lineWidth = 2;
-      context.strokeRect(
-        position.x + TILE_WIDTH / 2 - 14,
-        position.y + TILE_HEIGHT / 2 - 22,
-        28,
-        22,
+      drawEntitySprite(
+        building.constructionTicks > 0 ? 'construction' : building.kind,
+        building.x,
+        building.y,
       );
+      if (latestDebug.current?.enabled && latestDebug.current.showEntityIds) {
+        const position = worldToScreen({
+          x: building.x - latestFocus.current.x,
+          y: building.y - latestFocus.current.y,
+        });
+        context.fillStyle = '#f4f0df';
+        context.font = '10px system-ui';
+        context.fillText(building.id, position.x + TILE_WIDTH / 2, position.y - 8);
+      }
     }
+    const operationsOverlay = latestOperationsOverlay.current;
+    if (operationsOverlay === 'logistics') {
+      const buildingsById = new Map(
+        latestBuildings.current.map((building) => [building.id, building]),
+      );
+      for (const link of [...latestLogisticsLinks.current].sort((left, right) =>
+        left.id.localeCompare(right.id),
+      )) {
+        const source = buildingsById.get(link.sourceBuildingId);
+        const target = buildingsById.get(link.targetBuildingId);
+        if (!source || !target) continue;
+        const sourcePoint = worldToScreen({
+          x: source.x - latestFocus.current.x,
+          y: source.y - latestFocus.current.y,
+        });
+        const targetPoint = worldToScreen({
+          x: target.x - latestFocus.current.x,
+          y: target.y - latestFocus.current.y,
+        });
+        context.beginPath();
+        context.moveTo(sourcePoint.x + TILE_WIDTH / 2, sourcePoint.y + TILE_HEIGHT / 2);
+        context.lineTo(targetPoint.x + TILE_WIDTH / 2, targetPoint.y + TILE_HEIGHT / 2);
+        context.strokeStyle = logisticsStatusColor(link.status);
+        context.lineWidth = 3;
+        context.setLineDash(link.status === 'transferred' ? [] : [5, 3]);
+        context.stroke();
+        context.setLineDash([]);
+        context.fillStyle = '#f4f0df';
+        context.font = '10px system-ui';
+        context.fillText(
+          `${link.item} ${link.throughputPerTick}/t`,
+          (sourcePoint.x + targetPoint.x) / 2 + TILE_WIDTH / 2,
+          (sourcePoint.y + targetPoint.y) / 2 + TILE_HEIGHT / 2,
+        );
+      }
+    }
+    if (operationsOverlay === 'production' || operationsOverlay === 'bottlenecks')
+      for (const building of visibleByIsometricDepth(
+        latestBuildings.current,
+        tileBounds.center,
+        visibleRadius,
+      )) {
+        const bottleneck = ['blocked-input', 'blocked-output', 'unassigned', 'damaged'].includes(
+          building.productionState,
+        );
+        if (operationsOverlay === 'bottlenecks' && !bottleneck) continue;
+        const point = worldToScreen({
+          x: building.x - latestFocus.current.x,
+          y: building.y - latestFocus.current.y,
+        });
+        context.font = '11px system-ui';
+        context.fillStyle = bottleneck ? '#ffd07a' : '#d7f2ff';
+        const label =
+          operationsOverlay === 'production'
+            ? `${building.productionState.replaceAll('-', ' ')} ${productionRateLabel(building)}`
+            : building.productionState.replaceAll('-', ' ');
+        context.fillText(label, point.x + TILE_WIDTH / 2, point.y - 7);
+      }
     const selected = latestSelectedTile.current;
     if (selected) {
-      diamond(
-        worldToScreen({
-          x: selected.x - latestFocus.current.x,
-          y: selected.y - latestFocus.current.y,
-        }),
-        'rgba(0, 0, 0, 0)',
-        '#f6d365',
-      );
+      drawEntitySprite('selection', selected.x, selected.y);
     }
     const preview = latestPlacementPreview.current;
     if (preview) {
@@ -300,17 +441,34 @@ export const WorldCanvas = ({
       tileBounds.center,
       visibleRadius,
     )) {
-      const position = worldToScreen({
-        x: threat.x - latestFocus.current.x,
-        y: threat.y - latestFocus.current.y,
-      });
-      context.beginPath();
-      context.arc(position.x + TILE_WIDTH / 2, position.y + TILE_HEIGHT / 2, 9, 0, Math.PI * 2);
-      context.fillStyle = '#dc4e4e';
-      context.fill();
-      context.strokeStyle = '#fff1d6';
-      context.lineWidth = 2;
-      context.stroke();
+      drawEntitySprite('raider', threat.x, threat.y);
+    }
+    const debugState = latestDebug.current;
+    if (debugState?.enabled) {
+      context.font = '10px ui-monospace, monospace';
+      if (debugState.showCoordinates)
+        for (const chunk of visibleRenderChunks(tileBounds))
+          for (let x = chunk.minX; x <= chunk.maxX; x += 1)
+            for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
+              const point = worldToScreen({
+                x: x - latestFocus.current.x,
+                y: y - latestFocus.current.y,
+              });
+              context.fillStyle = 'rgba(244, 240, 223, 0.72)';
+              context.fillText(`${x},${y}`, point.x + 27, point.y + 35);
+            }
+      if (debugState.showChunks)
+        for (const chunk of visibleRenderChunks(tileBounds)) {
+          const point = worldToScreen({
+            x: chunk.x * 16 - latestFocus.current.x,
+            y: chunk.y * 16 - latestFocus.current.y,
+          });
+          context.strokeStyle = '#80d4ff';
+          context.lineWidth = 2;
+          context.strokeRect(point.x + 32, point.y + 32, 1, 1);
+          context.fillStyle = '#80d4ff';
+          context.fillText(`chunk ${chunk.x}:${chunk.y}`, point.x + 34, point.y + 28);
+        }
     }
   };
 

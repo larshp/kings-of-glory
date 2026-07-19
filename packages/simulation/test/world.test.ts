@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { findPath } from '@kings/pathfinding';
 import {
   applyCommand,
   advanceTick,
@@ -16,6 +17,8 @@ import {
   neighboringChunks,
   nextRandom,
   runBotScenario,
+  runInfrastructureStressScenario,
+  profileInfrastructureStressScenario,
   stateHash,
   terrainAt,
   TICK_PIPELINE,
@@ -157,6 +160,34 @@ describe('world simulation', () => {
     expect(run()).toBe(run());
   });
 
+  it('keeps production results and replay hashes independent of building registry insertion order', () => {
+    const first = createWorld(99);
+    joinPlayer(first, 'player-a');
+    applyCommand(first, {
+      id: 'storage',
+      playerId: 'player-a' as never,
+      sequence: 1,
+      type: 'placeStorage',
+      x: 12,
+      y: 0,
+    });
+    applyCommand(first, {
+      id: 'housing',
+      playerId: 'player-a' as never,
+      sequence: 2,
+      type: 'placeHousing',
+      x: 13,
+      y: 0,
+    });
+    const reordered = structuredClone(first);
+    reordered.buildings = Object.fromEntries(Object.entries(reordered.buildings).reverse());
+    expect(stateHash(reordered)).toBe(stateHash(first));
+    for (let index = 0; index < 5; index += 1) {
+      expect(advanceTick(reordered)).toEqual(advanceTick(first));
+      expect(stateHash(reordered)).toBe(stateHash(first));
+    }
+  });
+
   it('advances simulation only in fixed whole steps and bounds catch-up work', () => {
     const world = createWorld();
     const runner = new FixedStepRunner(100, 2);
@@ -239,6 +270,7 @@ describe('world simulation', () => {
       }).result.accepted,
     ).toBe(true);
     const smelter = Object.values(world.buildings).find((building) => building.kind === 'smelter')!;
+    expect(smelter.productionState).toBe('constructing');
     expect(
       applyCommand(world, {
         id: 'smelt-early',
@@ -249,6 +281,8 @@ describe('world simulation', () => {
       }).result,
     ).toMatchObject({ code: 'construction-incomplete' });
     for (let index = 0; index < 10; index += 1) advanceTick(world);
+    advanceTick(world);
+    expect(smelter.productionState).toBe('blocked-input');
     applyCommand(world, {
       id: 'gather',
       playerId: 'player-a' as never,
@@ -277,8 +311,34 @@ describe('world simulation', () => {
         buildingId: smelter.id,
       }).result.accepted,
     ).toBe(true);
+    expect(smelter.productionState).toBe('working');
     for (let index = 0; index < 3; index += 1) advanceTick(world);
     expect(world.buildings[smelter.id]?.inventory.ingot).toBe(1);
+  });
+
+  it('reserves construction costs, then needs an assigned worker to deliver them', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    expect(
+      applyCommand(world, {
+        id: 'build-delivered-smelter',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'placeSmelter',
+        x: 12,
+        y: 0,
+      }).result.accepted,
+    ).toBe(true);
+    const smelter = Object.values(world.buildings).find((building) => building.kind === 'smelter')!;
+    expect(world.players['player-a']?.inventory.wood).toBe(2);
+    expect(smelter.constructionMaterials).toEqual({ ore: 0, wood: 3, ingot: 0, tool: 0 });
+    world.players['player-a']!.population.total = 0;
+    advanceTick(world);
+    expect(smelter).toMatchObject({ constructionTicks: 10, constructionMaterials: { wood: 3 } });
+    world.players['player-a']!.population.total = 1;
+    advanceTick(world);
+    expect(smelter).toMatchObject({ constructionTicks: 9, constructionMaterials: { wood: 2 } });
+    expect(world.players['player-a']?.population).toMatchObject({ employed: 1, unemployed: 0 });
   });
 
   it('generates deterministic terrain', () => {
@@ -427,7 +487,7 @@ describe('world simulation', () => {
     for (const player of Object.values(legacy.players)) delete player.inventory.tool;
     for (const building of Object.values(legacy.buildings)) delete building.inventory.tool;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(15);
+    expect(migrated.schemaVersion).toBe(19);
     expect(migrated.players['player-a']?.inventory.tool).toBe(0);
     expect(migrated.buildings['center-player-a']?.inventory.tool).toBe(0);
   });
@@ -437,9 +497,120 @@ describe('world simulation', () => {
     legacy.schemaVersion = 14;
     delete legacy.randomState;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(15);
+    expect(migrated.schemaVersion).toBe(19);
     expect(migrated.randomState).toBeGreaterThan(0);
     expect(inspectWorld(migrated)).toEqual([]);
+  });
+
+  it('upgrades version 15 logistics links with normal transfer priority', () => {
+    const world = createWorld(27);
+    joinPlayer(world, 'player-a');
+    const legacy = structuredClone(world) as unknown as {
+      schemaVersion: 15;
+      logisticsLinks: Record<
+        string,
+        {
+          id: string;
+          ownerId: string;
+          sourceBuildingId: string;
+          targetBuildingId: string;
+          item: 'ore';
+        }
+      >;
+    };
+    legacy.schemaVersion = 15;
+    legacy.logisticsLinks = {
+      legacy: {
+        id: 'legacy',
+        ownerId: 'player-a',
+        sourceBuildingId: 'center-player-a',
+        targetBuildingId: 'center-player-a',
+        item: 'ore',
+      },
+    };
+    expect(deserializeWorld(legacy).logisticsLinks.legacy?.priority).toBe(1);
+  });
+
+  it('upgrades version 16 producer snapshots with their configured default recipes', () => {
+    const world = createWorld(27);
+    joinPlayer(world, 'player-a');
+    world.buildings['legacy-workshop'] = {
+      ...world.buildings['center-player-a']!,
+      id: 'legacy-workshop' as never,
+      kind: 'workshop',
+      x: world.buildings['center-player-a']!.x + 1,
+      recipeId: 'forge-tool',
+    };
+    const legacy = structuredClone(world) as unknown as {
+      schemaVersion: 16;
+      buildings: Record<string, { recipeId?: string }>;
+    };
+    legacy.schemaVersion = 16;
+    for (const building of Object.values(legacy.buildings)) delete building.recipeId;
+    const migrated = deserializeWorld(legacy);
+    expect(migrated.schemaVersion).toBe(19);
+    expect(migrated.buildings['center-player-a']?.recipeId).toBeNull();
+    expect(
+      Object.values(migrated.buildings).find((building) => building.kind === 'workshop')?.recipeId,
+    ).toBe('forge-tool');
+  });
+
+  it('upgrades version 17 snapshots with machine and logistics flow states', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const legacy = structuredClone(world) as unknown as {
+      schemaVersion: 17;
+      buildings: Record<string, { productionState?: string }>;
+      logisticsLinks: Record<
+        string,
+        {
+          id: string;
+          ownerId: string;
+          sourceBuildingId: string;
+          targetBuildingId: string;
+          item: 'ore';
+          priority: 1;
+          throughputPerTick?: number;
+          status?: string;
+        }
+      >;
+    };
+    legacy.schemaVersion = 17;
+    for (const building of Object.values(legacy.buildings)) delete building.productionState;
+    legacy.logisticsLinks.legacy = {
+      id: 'legacy',
+      ownerId: 'player-a',
+      sourceBuildingId: 'center-player-a',
+      targetBuildingId: 'center-player-a',
+      item: 'ore',
+      priority: 1,
+    };
+    const migrated = deserializeWorld(legacy);
+    expect(migrated.schemaVersion).toBe(19);
+    expect(migrated.buildings['center-player-a']?.productionState).toBe('idle');
+    expect(migrated.logisticsLinks.legacy).toMatchObject({
+      throughputPerTick: 1,
+      status: 'idle',
+    });
+  });
+
+  it('upgrades version 18 snapshots with empty construction delivery state', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const legacy = structuredClone(world) as {
+      schemaVersion: number;
+      buildings: Record<string, { constructionMaterials?: unknown }>;
+    };
+    legacy.schemaVersion = 18;
+    for (const building of Object.values(legacy.buildings)) delete building.constructionMaterials;
+    const migrated = deserializeWorld(legacy);
+    expect(migrated.schemaVersion).toBe(19);
+    expect(migrated.buildings['center-player-a']?.constructionMaterials).toEqual({
+      ore: 0,
+      wood: 0,
+      ingot: 0,
+      tool: 0,
+    });
   });
 
   it('migrates version 12 mined-tile depletion onto deterministic ore deposits', () => {
@@ -453,7 +624,7 @@ describe('world simulation', () => {
     legacy.minedTiles = { '12:0': 3 };
     const node = nearestOreTile(legacy.seed, 12, 0, 16)!;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(15);
+    expect(migrated.schemaVersion).toBe(19);
     expect(migrated.minedTiles[`${node.x}:${node.y}`]).toBe(3);
   });
 
@@ -730,6 +901,109 @@ describe('world simulation', () => {
     const movedDistance = Math.abs(raider.x - target.x) + Math.abs(raider.y - target.y);
     expect({ x: raider.x, y: raider.y }).not.toEqual(initialPosition);
     expect(movedDistance).toBeLessThanOrEqual(initialDistance);
+  });
+
+  it('invalidates a threat route when a newly placed building blocks its next tile', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const target = world.buildings['center-player-a']!;
+    const occupied = new Set(
+      Object.values(world.buildings).map((building) => `${building.x}:${building.y}`),
+    );
+    const route = Array.from({ length: 20 }, (_, offset) => ({
+      x: target.x - 20 + offset,
+      y: target.y,
+    }))
+      .map((start) =>
+        findPath({
+          start,
+          goal: target,
+          maxVisited: 128,
+          bounds: {
+            minX: Math.min(start.x, target.x) - 8,
+            maxX: Math.max(start.x, target.x) + 8,
+            minY: target.y - 8,
+            maxY: target.y + 8,
+          },
+          isPassable: (tile) =>
+            (tile.x === target.x && tile.y === target.y) ||
+            (terrainAt(world.seed, tile.x, tile.y) !== 'water' &&
+              !occupied.has(`${tile.x}:${tile.y}`)),
+        }),
+      )
+      .find((candidate) => candidate.status === 'found' && candidate.path.length > 2);
+    if (!route || route.status !== 'found')
+      throw new Error('Expected a deterministic threat route.');
+    const [start, blockedTile] = route.path;
+    if (!start || !blockedTile) throw new Error('Expected a route with a next tile.');
+    world.threats.dynamic = {
+      id: 'dynamic',
+      targetBuildingId: target.id,
+      health: 10,
+      damage: 1,
+      spawnedTick: 0,
+      ...start,
+    };
+    world.buildings['dynamic-blocker'] = {
+      ...target,
+      id: 'dynamic-blocker' as never,
+      kind: 'storage',
+      x: blockedTile.x,
+      y: blockedTile.y,
+      inventory: { ore: 0, wood: 0, ingot: 0, tool: 0 },
+      inventoryCapacity: 200,
+      populationCapacity: 0,
+      jobPriority: 0,
+      recipeId: null,
+      productionState: 'idle',
+    };
+    advanceTick(world);
+    expect({ x: world.threats.dynamic?.x, y: world.threats.dynamic?.y }).not.toEqual(blockedTile);
+  });
+
+  it('shares a bounded pathfinding budget fairly across a large raider wave', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const target = world.buildings['center-player-a']!;
+    for (let index = 0; index < 8; index += 1) {
+      const y = index * 2;
+      const x = Array.from({ length: 16 }, (_, offset) => -24 + offset).find(
+        (candidate) => terrainAt(world.seed, candidate, y) !== 'water',
+      );
+      if (x === undefined) throw new Error('Expected a passable deterministic wave spawn tile.');
+      world.threats[`budget-raider-${index}`] = {
+        id: `budget-raider-${index}`,
+        targetBuildingId: target.id,
+        health: 100,
+        damage: 0,
+        spawnedTick: 0,
+        x,
+        y,
+      };
+    }
+    const before = Object.fromEntries(
+      Object.values(world.threats).map((threat) => [threat.id, { x: threat.x, y: threat.y }]),
+    );
+    advanceTick(world);
+    const movedFirstTick = Object.values(world.threats)
+      .filter((threat) => {
+        const start = before[threat.id]!;
+        return threat.x !== start.x || threat.y !== start.y;
+      })
+      .map((threat) => threat.id);
+    expect(movedFirstTick.length).toBeGreaterThan(0);
+    expect(movedFirstTick.length).toBeLessThan(8);
+    const afterFirstTick = Object.fromEntries(
+      Object.values(world.threats).map((threat) => [threat.id, { x: threat.x, y: threat.y }]),
+    );
+    advanceTick(world);
+    const movedSecondTick = Object.values(world.threats)
+      .filter((threat) => {
+        const start = afterFirstTick[threat.id]!;
+        return threat.x !== start.x || threat.y !== start.y;
+      })
+      .map((threat) => threat.id);
+    expect(movedSecondTick.some((id) => !movedFirstTick.includes(id))).toBe(true);
   });
 
   it('transfers resources atomically between players and rejects duplicate retries', () => {
@@ -1052,9 +1326,173 @@ describe('world simulation', () => {
     expect(storage.inventory.ore).toBe(1);
     expect(smelter.inventory.ore).toBe(1);
     expect(Object.keys(world.logisticsLinks)).toHaveLength(1);
+    const createdLink = Object.values(world.logisticsLinks)[0]!;
+    expect(createdLink).toMatchObject({ throughputPerTick: 1, status: 'transferred' });
+    expect(
+      applyCommand(world, {
+        id: 'prioritize-link',
+        playerId: 'player-a' as never,
+        sequence: 4,
+        type: 'setLogisticsPriority',
+        linkId: createdLink.id,
+        priority: 3,
+      }).result.accepted,
+    ).toBe(true);
+    expect(world.logisticsLinks[createdLink.id]?.priority).toBe(3);
+    storage.inventory.ore = 1;
+    smelter.inventory = { ore: smelter.inventoryCapacity - 1, wood: 0, ingot: 0, tool: 0 };
+    smelter.progress = 3;
+    advanceTick(world);
+    expect(world.logisticsLinks[createdLink.id]?.status).toBe('target-full');
+    expect(storage.inventory.ore).toBe(1);
     delete world.buildings[storage.id];
     advanceTick(world);
     expect(Object.keys(world.logisticsLinks)).toHaveLength(0);
+  });
+
+  it('uses a higher-priority logistics link first when a producer has one input slot left', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    world.players['player-a']!.inventory.wood = 12;
+    for (const [sequence, type, x] of [
+      [1, 'placeSmelter', 12],
+      [2, 'placeStorage', 13],
+      [3, 'placeStorage', 14],
+    ] as const)
+      expect(
+        applyCommand(world, {
+          id: `${type}-${x}`,
+          playerId: 'player-a' as never,
+          sequence,
+          type,
+          x,
+          y: 0,
+        }).result.accepted,
+      ).toBe(true);
+    for (let index = 0; index < 20; index += 1) advanceTick(world);
+    const smelter = Object.values(world.buildings).find((building) => building.kind === 'smelter')!;
+    const storages = Object.values(world.buildings).filter(
+      (building) => building.kind === 'storage',
+    );
+    const [normalSource, urgentSource] = storages;
+    if (!normalSource || !urgentSource) throw new Error('Expected both storage buildings.');
+    smelter.jobPriority = 0;
+    smelter.inventory.ore = smelter.inventoryCapacity - 1;
+    normalSource.inventory.ore = 1;
+    urgentSource.inventory.ore = 1;
+    for (const [sequence, sourceBuildingId, priority] of [
+      [4, normalSource.id, 1],
+      [5, urgentSource.id, 3],
+    ] as const)
+      expect(
+        applyCommand(world, {
+          id: `priority-link-${sequence}`,
+          playerId: 'player-a' as never,
+          sequence,
+          type: 'createLogisticsLink',
+          sourceBuildingId,
+          targetBuildingId: smelter.id,
+          item: 'ore',
+        }).result.accepted,
+      ).toBe(true);
+    const urgentLink = Object.values(world.logisticsLinks).find(
+      (link) => link.sourceBuildingId === urgentSource.id,
+    )!;
+    expect(
+      applyCommand(world, {
+        id: 'set-urgent-link-priority',
+        playerId: 'player-a' as never,
+        sequence: 6,
+        type: 'setLogisticsPriority',
+        linkId: urgentLink.id,
+        priority: 3,
+      }).result.accepted,
+    ).toBe(true);
+    advanceTick(world);
+    expect(smelter.inventory.ore).toBe(smelter.inventoryCapacity);
+    expect(urgentSource.inventory.ore).toBe(0);
+    expect(normalSource.inventory.ore).toBe(1);
+  });
+
+  it('preserves recipe material and transport capacity invariants across generated cases', () => {
+    for (let seed = 1; seed <= 64; seed += 1) {
+      const world = createWorld(seed);
+      joinPlayer(world, 'player-a');
+      const center = world.buildings['center-player-a']!;
+      const sourceId = `property-storage-${seed}`;
+      const targetId = `property-smelter-${seed}`;
+      const source = {
+        ...center,
+        id: sourceId as never,
+        kind: 'storage' as const,
+        x: center.x + 1,
+        inventory: { ore: (seed * 7) % 101, wood: 0, ingot: 0, tool: 0 },
+        inventoryCapacity: 200,
+        populationCapacity: 0,
+        jobPriority: 0 as const,
+        recipeId: null,
+        productionState: 'idle' as const,
+      };
+      const target = {
+        ...center,
+        id: targetId as never,
+        kind: 'smelter' as const,
+        x: center.x + 2,
+        inventory: { ore: (seed * 11) % 20, wood: 0, ingot: 0, tool: 0 },
+        inventoryCapacity: 20,
+        populationCapacity: 0,
+        jobPriority: 0 as const,
+        recipeId: 'smelt-ore',
+        productionState: 'idle' as const,
+        progress: seed % 2 === 0 ? 3 : 0,
+      };
+      world.buildings[sourceId] = source;
+      world.buildings[targetId] = target;
+      expect(
+        applyCommand(world, {
+          id: `property-link-${seed}`,
+          playerId: 'player-a' as never,
+          sequence: 1,
+          type: 'createLogisticsLink',
+          sourceBuildingId: source.id,
+          targetBuildingId: target.id,
+          item: 'ore',
+        }).result.accepted,
+      ).toBe(true);
+      const before = source.inventory.ore + target.inventory.ore;
+      advanceTick(world);
+      const after = source.inventory.ore + target.inventory.ore;
+      expect(after).toBe(before);
+      expect(source.inventory.ore).toBeGreaterThanOrEqual(0);
+      expect(target.inventory.ore).toBeGreaterThanOrEqual(0);
+      expect(target.inventory.ore + target.inventory.ingot).toBeLessThanOrEqual(
+        target.inventoryCapacity,
+      );
+
+      const recipeWorld = createWorld(seed + 100);
+      joinPlayer(recipeWorld, 'player-a');
+      const recipeCenter = recipeWorld.buildings['center-player-a']!;
+      const recipeSmelter = {
+        ...recipeCenter,
+        id: `property-recipe-${seed}` as never,
+        kind: 'smelter' as const,
+        x: recipeCenter.x + 1,
+        inventory: { ore: 1 + (seed % 5), wood: 0, ingot: 0, tool: 0 },
+        inventoryCapacity: 20,
+        populationCapacity: 0,
+        jobPriority: 1 as const,
+        recipeId: 'smelt-ore',
+        productionState: 'idle' as const,
+      };
+      recipeWorld.buildings[recipeSmelter.id] = recipeSmelter;
+      const initialMaterial = recipeSmelter.inventory.ore;
+      for (let tickIndex = 0; tickIndex < initialMaterial * 4; tickIndex += 1)
+        advanceTick(recipeWorld);
+      expect(recipeSmelter.inventory.ore + recipeSmelter.inventory.ingot).toBe(initialMaterial);
+      expect(recipeSmelter.inventory.ore + recipeSmelter.inventory.ingot).toBeLessThanOrEqual(
+        recipeSmelter.inventoryCapacity,
+      );
+    }
   });
 
   it("routes producer output into only the next recipe's required inputs", () => {
@@ -1162,6 +1600,149 @@ describe('world simulation', () => {
     expect(highPriority.progress).toBe(3);
   });
 
+  it('rotates equal-priority jobs so lower-ID producers do not monopolize workers', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    world.players['player-a']!.inventory.wood = 6;
+    for (const [sequence, x] of [
+      [1, 12],
+      [2, 13],
+    ] as const)
+      applyCommand(world, {
+        id: `equal-priority-${sequence}`,
+        playerId: 'player-a' as never,
+        sequence,
+        type: 'placeSmelter',
+        x,
+        y: 0,
+      });
+    for (let index = 0; index < 10; index += 1) advanceTick(world);
+    const smelters = Object.values(world.buildings).filter(
+      (building) => building.kind === 'smelter',
+    );
+    world.players['player-a']!.population.total = 1;
+    for (const smelter of smelters) smelter.inventory.ore = 1;
+    advanceTick(world);
+    advanceTick(world);
+    expect(smelters.map((smelter) => smelter.progress)).toEqual([3, 3]);
+  });
+
+  it('switches idle producer recipes without changing inventory and rejects mid-batch changes', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const player = world.players['player-a']!;
+    player.inventory.wood = 4;
+    player.research.unlocked.metallurgy = true;
+    expect(
+      applyCommand(world, {
+        id: 'workshop',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'placeWorkshop',
+        x: 12,
+        y: 0,
+      }).result.accepted,
+    ).toBe(true);
+    for (let index = 0; index < 10; index += 1) advanceTick(world);
+    const workshop = Object.values(world.buildings).find(
+      (building) => building.kind === 'workshop',
+    )!;
+    workshop.inventory.ingot = 2;
+    const inventoryBeforeSwitch = structuredClone(workshop.inventory);
+    expect(
+      applyCommand(world, {
+        id: 'set-alternate-recipe',
+        playerId: 'player-a' as never,
+        sequence: 2,
+        type: 'setRecipe',
+        buildingId: workshop.id,
+        recipeId: 'forge-tool-without-wood',
+      }).result.accepted,
+    ).toBe(true);
+    expect(workshop.recipeId).toBe('forge-tool-without-wood');
+    expect(workshop.inventory).toEqual(inventoryBeforeSwitch);
+    advanceTick(world);
+    expect(workshop.progress).toBe(4);
+    expect(workshop.inventory).toEqual({ ore: 0, wood: 0, ingot: 0, tool: 0 });
+    expect(
+      applyCommand(world, {
+        id: 'change-busy-recipe',
+        playerId: 'player-a' as never,
+        sequence: 3,
+        type: 'setRecipe',
+        buildingId: workshop.id,
+        recipeId: 'forge-tool',
+      }).result,
+    ).toMatchObject({ accepted: false, code: 'busy' });
+    for (let index = 0; index < 4; index += 1) advanceTick(world);
+    expect(workshop.inventory.tool).toBe(1);
+    expect(
+      applyCommand(world, {
+        id: 'invalid-recipe',
+        playerId: 'player-a' as never,
+        sequence: 4,
+        type: 'setRecipe',
+        buildingId: workshop.id,
+        recipeId: 'smelt-ore',
+      }).result,
+    ).toMatchObject({ accepted: false, code: 'invalid-recipe' });
+  });
+
+  it('copies compatible idle producer configuration without affecting inventory or active batches', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const center = world.buildings['center-player-a']!;
+    const source = {
+      ...center,
+      id: 'copy-source' as never,
+      kind: 'workshop' as const,
+      x: center.x + 1,
+      inventory: { ore: 0, wood: 0, ingot: 2, tool: 0 },
+      inventoryCapacity: 30,
+      populationCapacity: 0,
+      jobPriority: 3 as const,
+      recipeId: 'forge-tool-without-wood',
+      productionState: 'idle' as const,
+    };
+    const target = {
+      ...source,
+      id: 'copy-target' as never,
+      x: center.x + 2,
+      inventory: { ore: 0, wood: 1, ingot: 1, tool: 0 },
+      jobPriority: 0 as const,
+      recipeId: 'forge-tool',
+    };
+    world.buildings[source.id] = source;
+    world.buildings[target.id] = target;
+    const inventoryBefore = structuredClone(target.inventory);
+    expect(
+      applyCommand(world, {
+        id: 'copy-config',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'copyBuildingConfiguration',
+        sourceBuildingId: source.id,
+        targetBuildingId: target.id,
+      }).result.accepted,
+    ).toBe(true);
+    expect(target).toMatchObject({
+      recipeId: 'forge-tool-without-wood',
+      jobPriority: 3,
+      inventory: inventoryBefore,
+    });
+    target.progress = 2;
+    expect(
+      applyCommand(world, {
+        id: 'copy-active-target',
+        playerId: 'player-a' as never,
+        sequence: 2,
+        type: 'copyBuildingConfiguration',
+        sourceBuildingId: source.id,
+        targetBuildingId: target.id,
+      }).result,
+    ).toMatchObject({ accepted: false, code: 'busy' });
+  });
+
   it('derives settlement satisfaction from shelter and available work', () => {
     const world = createWorld();
     joinPlayer(world, 'player-a');
@@ -1216,7 +1797,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 7;
     delete legacy.settlements;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(15);
+    expect(migrated.schemaVersion).toBe(19);
     expect(migrated.settlements['settlement-player-a']?.members['player-a']).toBe('owner');
   });
 
@@ -1313,5 +1894,65 @@ describe('world simulation', () => {
     expect(first.hash).toBe(second.hash);
     expect(Object.keys(first.state.buildings)).toHaveLength(100);
     expect(first.invariantErrors).toEqual([]);
+  });
+
+  it('keeps a multi-settlement simulation stable through a long headless run', () => {
+    const first = runBotScenario(4, 1_000, 50);
+    const second = runBotScenario(4, 1_000, 50);
+    expect(first.hash).toBe(second.hash);
+    expect(first.invariantErrors).toEqual([]);
+    for (const player of Object.values(first.state.players)) {
+      expect(player.population.total).toBeGreaterThanOrEqual(2);
+      expect(player.population.total).toBeLessThanOrEqual(player.population.capacity);
+      expect(player.population.satisfaction).toBeGreaterThanOrEqual(0);
+      expect(player.population.satisfaction).toBeLessThanOrEqual(100);
+    }
+    expect(
+      Object.values(first.state.buildings)
+        .filter((building) => building.kind === 'workshop')
+        .reduce((total, building) => total + building.inventory.tool, 0),
+    ).toBeGreaterThan(0);
+  });
+
+  it('runs a deterministic thousand-pair logistics stress scenario without loss or invariant errors', () => {
+    const first = runInfrastructureStressScenario();
+    const second = runInfrastructureStressScenario();
+    expect(first.hash).toBe(second.hash);
+    expect(Object.keys(first.state.buildings)).toHaveLength(2_001);
+    expect(Object.keys(first.state.logisticsLinks)).toHaveLength(1_000);
+    expect(
+      Object.values(first.state.buildings)
+        .filter((building) => building.kind === 'storage')
+        .reduce((total, building) => total + building.inventory.ore, 0),
+    ).toBe(0);
+    expect(
+      Object.values(first.state.buildings)
+        .filter((building) => building.kind === 'smelter')
+        .reduce((total, building) => total + building.inventory.ore, 0),
+    ).toBe(1_000);
+    expect(first.invariantErrors).toEqual([]);
+  });
+
+  it('reports every deterministic tick phase for the infrastructure stress profile', () => {
+    let clock = 0;
+    const profile = profileInfrastructureStressScenario(
+      () => {
+        clock += 1;
+        return clock;
+      },
+      1_000,
+      2,
+    );
+    expect(profile.phaseDurationsMs).toEqual({
+      'advance-clock': 2,
+      'research-and-population': 2,
+      'construction-and-production': 2,
+      'environmental-events': 2,
+      logistics: 2,
+      'threat-spawning': 2,
+      'threat-navigation-and-combat': 2,
+      'emit-events-and-mark-changes': 2,
+    });
+    expect(profile.result.invariantErrors).toEqual([]);
   });
 });

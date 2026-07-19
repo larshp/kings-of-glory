@@ -10,12 +10,15 @@ import {
 import {
   buildings as buildingDefinitions,
   environmentalEvents,
+  logisticsLinks as logisticsDefinitions,
+  producers as producerDefinitions,
+  resources as resourceDefinitions,
   recipes,
   technologies,
   threats as threatDefinitions,
   type TechnologyId,
 } from '@kings/content';
-import { findPath, manhattanDistance } from '@kings/pathfinding';
+import { chunkFor, findHierarchicalPath, findPath, manhattanDistance } from '@kings/pathfinding';
 import { stableHash } from './hash.js';
 import { createRandomState, takeRandomIndex, type RandomState } from './random.js';
 import { chunkKeyFor } from './spatial.js';
@@ -65,10 +68,22 @@ export interface Building {
   maxHealth: number;
   progress: number;
   constructionTicks: number;
+  /** Reserved construction inputs still waiting for a worker to deliver them. */
+  constructionMaterials: Inventory;
   inventory: Inventory;
   inventoryCapacity: number;
   populationCapacity: number;
   jobPriority: 0 | 1 | 2 | 3;
+  /** The configured recipe is always one allowed by the building's producer definition. */
+  recipeId: string | null;
+  productionState:
+    | 'idle'
+    | 'constructing'
+    | 'working'
+    | 'blocked-input'
+    | 'blocked-output'
+    | 'unassigned'
+    | 'damaged';
 }
 export interface Threat {
   id: string;
@@ -99,9 +114,19 @@ export interface LogisticsLink {
   sourceBuildingId: BuildingId;
   targetBuildingId: BuildingId;
   item: ItemId;
+  priority: 0 | 1 | 2 | 3;
+  throughputPerTick: number;
+  status:
+    | 'idle'
+    | 'transferred'
+    | 'paused'
+    | 'source-empty'
+    | 'target-full'
+    | 'target-reconfigured'
+    | 'constructing';
 }
 export interface WorldState {
-  schemaVersion: 15;
+  schemaVersion: 19;
   seed: number;
   /** Server-only deterministic PRNG state. Never expose this to clients. */
   randomState: RandomState;
@@ -155,10 +180,18 @@ export const TICK_PIPELINE = [
 ] as const;
 export type TickPhase = (typeof TICK_PIPELINE)[number];
 
+/** Optional, platform-neutral instrumentation for headless performance runs. */
+export interface TickProfiler {
+  now(): number;
+  record(phase: TickPhase, durationMs: number): void;
+}
+
 const INVENTORY_CAPACITY = 100;
-const ORE_PER_NODE = 10;
 const TERRITORY_CELL_SIZE = 8;
 const RESOURCE_SECTOR_SIZE = 8;
+/** Bounds all threat route work together, rather than once per threat. */
+export const THREAT_PATH_VISITS_PER_TICK = 128;
+const THREAT_PATH_VISITS_PER_SEARCH = 128;
 const emptyInventory = (): Inventory => ({ ore: 0, wood: 0, ingot: 0, tool: 0 });
 const tileKey = (x: number, y: number) => `${x}:${y}`;
 const coordinateNoise = (seed: number, x: number, y: number) =>
@@ -217,7 +250,34 @@ const inventoryTotal = (inventory: Inventory) =>
 const inventoryItems: readonly ItemId[] = ['ore', 'wood', 'ingot', 'tool'];
 const hasInvalidInventory = (inventory: Inventory) =>
   inventoryItems.some((item) => !Number.isSafeInteger(inventory[item]) || inventory[item] < 0);
-const woodCostFor = (kind: Building['kind']) => buildingDefinitions[kind].cost.wood;
+const constructionMaterialsFor = (kind: Building['kind']): Inventory => {
+  const cost = buildingDefinitions[kind].cost as Partial<Inventory>;
+  return {
+    ore: cost.ore ?? 0,
+    wood: cost.wood ?? 0,
+    ingot: cost.ingot ?? 0,
+    tool: cost.tool ?? 0,
+  };
+};
+const canAffordConstruction = (inventory: Inventory, kind: Building['kind']) => {
+  const cost = constructionMaterialsFor(kind);
+  return inventoryItems.every((item) => inventory[item] >= cost[item]);
+};
+const deductConstructionCost = (inventory: Inventory, kind: Building['kind']) => {
+  const cost = constructionMaterialsFor(kind);
+  for (const item of inventoryItems) inventory[item] -= cost[item];
+};
+const canRefundConstructionCost = (inventory: Inventory, kind: Building['kind']) => {
+  const cost = constructionMaterialsFor(kind);
+  return (
+    inventoryItems.every((item) => inventory[item] + cost[item] <= INVENTORY_CAPACITY) &&
+    inventoryTotal(inventory) + inventoryTotal(cost) <= INVENTORY_CAPACITY
+  );
+};
+const refundConstructionCost = (inventory: Inventory, kind: Building['kind']) => {
+  const cost = constructionMaterialsFor(kind);
+  for (const item of inventoryItems) inventory[item] += cost[item];
+};
 const canStore = (inventory: Inventory, capacity: number, item: ItemId, amount: number) =>
   Number.isInteger(amount) &&
   amount > 0 &&
@@ -228,21 +288,34 @@ type ProductionRecipe = {
   readonly output: Readonly<Partial<Record<ItemId, number>>>;
   readonly ticks: number;
 };
-const recipeFor = (kind: Building['kind']): ProductionRecipe | undefined => {
-  const definition = buildingDefinitions[kind];
-  if (!('recipe' in definition)) return undefined;
-  return Object.values(recipes).find((recipe) => recipe.id === definition.recipe);
-};
-const isProducer = (kind: Building['kind']) => recipeFor(kind) !== undefined;
+const producerFor = (kind: Building['kind']) =>
+  producerDefinitions[kind as keyof typeof producerDefinitions];
+const recipeIdsFor = (kind: Building['kind']): readonly string[] =>
+  producerFor(kind)?.recipeIds ?? [];
+const defaultRecipeIdFor = (kind: Building['kind']) => producerFor(kind)?.defaultRecipeId ?? null;
+const recipesById: Readonly<Record<string, ProductionRecipe>> = Object.fromEntries(
+  Object.values(recipes).map((recipe) => [recipe.id, recipe]),
+);
+const recipeFor = (building: Building): ProductionRecipe | undefined =>
+  building.recipeId && recipeIdsFor(building.kind).includes(building.recipeId)
+    ? recipesById[building.recipeId]
+    : undefined;
+const isProducer = (kind: Building['kind']) => Boolean(producerFor(kind));
 const acceptsRecipeInput = (building: Building, item: ItemId) =>
-  Boolean(recipeFor(building.kind)?.input[item]);
-const canStartRecipe = (building: Building, recipe: ProductionRecipe) =>
+  Boolean(recipeFor(building)?.input[item]);
+const hasRecipeInputs = (building: Building, recipe: ProductionRecipe) =>
   Object.entries(recipe.input).every(
     ([item, amount]) => building.inventory[item as ItemId] >= (amount ?? 0),
-  ) &&
+  );
+const hasRecipeOutputCapacity = (building: Building, recipe: ProductionRecipe) =>
   Object.entries(recipe.output).every(([item, amount]) =>
     canStore(building.inventory, building.inventoryCapacity, item as ItemId, amount ?? 0),
   );
+const canStartRecipe = (building: Building, recipe: ProductionRecipe) =>
+  hasRecipeInputs(building, recipe) && hasRecipeOutputCapacity(building, recipe);
+const outputReservationFor = (building: Building): Partial<Inventory> =>
+  building.progress > 0 ? (recipeFor(building)?.output ?? {}) : {};
+const logisticsThroughput = logisticsDefinitions.internalInventory.throughputPerTick;
 const consumeRecipe = (building: Building, recipe: ProductionRecipe) => {
   for (const [item, amount] of Object.entries(recipe.input))
     building.inventory[item as ItemId] -= amount ?? 0;
@@ -300,7 +373,7 @@ const plotFor = (state: WorldState): Plot => {
 };
 
 export const createWorld = (seed = 1): WorldState => ({
-  schemaVersion: 15,
+  schemaVersion: 19,
   seed,
   randomState: createRandomState(seed),
   tick: 0,
@@ -350,10 +423,13 @@ export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
     maxHealth: center.maxHealth,
     progress: 0,
     constructionTicks: center.constructionTicks,
+    constructionMaterials: emptyInventory(),
     inventory: emptyInventory(),
     inventoryCapacity: center.inventoryCapacity,
     populationCapacity: center.populationCapacity,
     jobPriority: 0,
+    recipeId: null,
+    productionState: 'idle',
   };
   return [{ type: 'playerJoined', playerId: typedId }];
 };
@@ -408,6 +484,11 @@ const canManageLogistics = (state: WorldState, playerId: PlayerId, building: Bui
   const role = settlementRoleFor(state, playerId, building.ownerId);
   return role === 'owner' || role === 'logistics';
 };
+const canConfigureBuilding = (state: WorldState, playerId: PlayerId, building: Building) => {
+  if (building.ownerId === playerId) return true;
+  const role = settlementRoleFor(state, playerId, building.ownerId);
+  return role === 'owner' || role === 'builder';
+};
 const threatSpawnPosition = (state: WorldState, target: Building) => {
   const threat = threatDefinitions['raider-swarm'];
   for (let radius = threat.spawnDistance.min; radius <= threat.spawnDistance.max; radius += 1) {
@@ -454,7 +535,8 @@ export const applyCommand = (
     const key = tileKey(command.x, command.y);
     const resource = terrainAt(state.seed, command.x, command.y);
     if (resource !== 'ore' && resource !== 'wood') return reject('resource-depleted');
-    if ((state.minedTiles[key] ?? 0) >= ORE_PER_NODE) return reject('resource-depleted');
+    if ((state.minedTiles[key] ?? 0) >= resourceDefinitions[resource].yield)
+      return reject('resource-depleted');
     if (inventoryTotal(player.inventory) >= INVENTORY_CAPACITY) return reject('inventory-full');
     state.minedTiles[key] = (state.minedTiles[key] ?? 0) + 1;
     player.inventory[resource] += 1;
@@ -607,6 +689,9 @@ export const applyCommand = (
       sourceBuildingId: source.id,
       targetBuildingId: target.id,
       item: command.item,
+      priority: 1,
+      throughputPerTick: logisticsThroughput,
+      status: 'idle',
     };
     return accept([]);
   }
@@ -624,6 +709,45 @@ export const applyCommand = (
     )
       return reject('settlement-permission-denied');
     delete state.logisticsLinks[link.id];
+    return accept([]);
+  }
+  if (command.type === 'setLogisticsPriority') {
+    const link = state.logisticsLinks[command.linkId];
+    if (!link) return reject('unknown-logistics-link');
+    const source = state.buildings[link.sourceBuildingId];
+    const target = state.buildings[link.targetBuildingId];
+    if (
+      player.id !== link.ownerId &&
+      (!source ||
+        !target ||
+        !canManageLogistics(state, player.id, source) ||
+        !canManageLogistics(state, player.id, target))
+    )
+      return reject('settlement-permission-denied');
+    link.priority = command.priority;
+    return accept([]);
+  }
+  if (command.type === 'copyBuildingConfiguration') {
+    const source = state.buildings[command.sourceBuildingId];
+    const target = state.buildings[command.targetBuildingId];
+    if (!source || !target) return reject('unknown-building');
+    if (
+      source.id === target.id ||
+      source.kind !== target.kind ||
+      !isProducer(source.kind) ||
+      !isProducer(target.kind)
+    )
+      return reject('incompatible-building');
+    if (source.constructionTicks > 0 || target.constructionTicks > 0)
+      return reject('construction-incomplete');
+    if (target.progress > 0) return reject('busy');
+    if (
+      !canConfigureBuilding(state, player.id, source) ||
+      !canConfigureBuilding(state, player.id, target)
+    )
+      return reject('settlement-permission-denied');
+    target.recipeId = source.recipeId;
+    target.jobPriority = source.jobPriority;
     return accept([]);
   }
   const isPlacement =
@@ -667,10 +791,9 @@ export const applyCommand = (
     const definition = buildingDefinitions[kind];
     if (definition.requiredTechnology && !player.research.unlocked[definition.requiredTechnology])
       return reject('technology-locked');
-    const woodCost = woodCostFor(kind);
-    if (player.inventory.wood < woodCost) return reject('insufficient-wood');
+    if (!canAffordConstruction(player.inventory, kind)) return reject('insufficient-wood');
     const id = buildingId(`${kind}-${state.tick}-${Object.keys(state.buildings).length}`);
-    player.inventory.wood -= woodCost;
+    deductConstructionCost(player.inventory, kind);
     state.buildings[id] = {
       id,
       kind,
@@ -681,10 +804,13 @@ export const applyCommand = (
       maxHealth: definition.maxHealth,
       progress: 0,
       constructionTicks: definition.constructionTicks,
+      constructionMaterials: constructionMaterialsFor(kind),
       inventory: emptyInventory(),
       inventoryCapacity: definition.inventoryCapacity,
       populationCapacity: definition.populationCapacity,
       jobPriority: isProducer(kind) ? 1 : 0,
+      recipeId: defaultRecipeIdFor(kind),
+      productionState: definition.constructionTicks > 0 ? 'constructing' : 'idle',
     };
     return accept([{ type: 'buildingPlaced', playerId: player.id, buildingId: id }]);
   }
@@ -701,11 +827,10 @@ export const applyCommand = (
     if (building.kind === 'settlement-center') return reject('cannot-demolish');
     if (building.constructionTicks === 0) return reject('construction-incomplete');
     const owner = state.players[building.ownerId];
-    const refund = woodCostFor(building.kind);
-    if (!owner || !canStore(owner.inventory, INVENTORY_CAPACITY, 'wood', refund))
+    if (!owner || !canRefundConstructionCost(owner.inventory, building.kind))
       return reject('inventory-full');
     delete state.buildings[building.id];
-    owner.inventory.wood += refund;
+    refundConstructionCost(owner.inventory, building.kind);
     return accept([{ type: 'buildingCancelled', playerId: player.id, buildingId: building.id }]);
   }
   if (command.type === 'demolish') {
@@ -731,6 +856,13 @@ export const applyCommand = (
     building.jobPriority = command.priority;
     return accept([]);
   }
+  if (command.type === 'setRecipe') {
+    if (!isProducer(building.kind)) return reject('wrong-building');
+    if (building.progress > 0) return reject('busy');
+    if (!recipeIdsFor(building.kind).includes(command.recipeId)) return reject('invalid-recipe');
+    building.recipeId = command.recipeId;
+    return accept([]);
+  }
   if (building.constructionTicks > 0) return reject('construction-incomplete');
   if (command.type === 'transfer') {
     if (!Number.isInteger(command.amount) || command.amount < 1) return reject('invalid-amount');
@@ -749,24 +881,69 @@ export const applyCommand = (
   if (command.type === 'smelt') {
     if (building.kind !== 'smelter') return reject('wrong-building');
     if (building.progress > 0) return reject('busy');
-    const recipe = recipeFor(building.kind);
+    const recipe = recipeFor(building);
     if (!recipe || !canStartRecipe(building, recipe))
       return reject(building.inventory.ore < 1 ? 'insufficient-ore' : 'inventory-full');
     consumeRecipe(building, recipe);
     building.progress = recipe.ticks;
+    building.productionState = 'working';
     return accept([]);
   }
   building.health = Math.min(building.maxHealth, building.health + 2);
   return accept([{ type: 'repaired', playerId: player.id, buildingId: building.id }]);
 };
 
-export const advanceTick = (state: WorldState): WorldEvent[] => {
+/**
+ * Higher job priorities always win, but equal-priority producers rotate by the
+ * authoritative tick so lexicographically early IDs cannot monopolize workers.
+ */
+const fairJobOrder = (producers: readonly Building[], tick: number): Building[] => {
+  const ordered: Building[] = [];
+  for (let priority = 3; priority >= 1; priority -= 1) {
+    const group = producers
+      .filter((building) => building.jobPriority === priority)
+      .sort((left, right) => left.id.localeCompare(right.id));
+    if (group.length === 0) continue;
+    const offset = tick % group.length;
+    ordered.push(...group.slice(offset), ...group.slice(0, offset));
+  }
+  return ordered;
+};
+
+/** Rotates equal work across ticks so the same threats cannot consume every route budget. */
+const fairThreatOrder = (threats: readonly Threat[], tick: number): Threat[] => {
+  const ordered = [...threats].sort((left, right) => left.id.localeCompare(right.id));
+  if (ordered.length === 0) return ordered;
+  const offset = tick % ordered.length;
+  return [...ordered.slice(offset), ...ordered.slice(0, offset)];
+};
+
+const fairConstructionOrder = (projects: readonly Building[], tick: number): Building[] => {
+  const ordered = [...projects].sort((left, right) => left.id.localeCompare(right.id));
+  if (ordered.length === 0) return ordered;
+  const offset = tick % ordered.length;
+  return [...ordered.slice(offset), ...ordered.slice(0, offset)];
+};
+
+export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEvent[] => {
+  const beginPhase = (phase: TickPhase) => {
+    const startedAt = profiler?.now();
+    return () => {
+      if (startedAt !== undefined) profiler?.record(phase, profiler.now() - startedAt);
+    };
+  };
   // Phase 1: advance-clock.
+  let endPhase = beginPhase('advance-clock');
   state.tick += 1;
+  endPhase();
   const events: WorldEvent[] = [];
   const staffedSmelters = new Set<BuildingId>();
+  const staffedConstruction = new Set<BuildingId>();
   // Phase 2: research-and-population.
-  for (const player of Object.values(state.players)) {
+  endPhase = beginPhase('research-and-population');
+  for (const player of Object.values(state.players).sort((left, right) =>
+    left.id.localeCompare(right.id),
+  )) {
     if (player.research.activeTechnology) {
       player.research.ticksRemaining -= 1;
       if (player.research.ticksRemaining === 0) {
@@ -774,9 +951,19 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
         player.research.activeTechnology = null;
       }
     }
-    player.population.capacity = Object.values(state.buildings)
-      .filter((building) => building.ownerId === player.id && building.constructionTicks === 0)
-      .reduce((capacity, building) => capacity + building.populationCapacity, 0);
+    // Reuse the ownership scan for all population calculations. This is a hot
+    // phase in dense worlds, and previously scanned every building three times
+    // for each player.
+    const ownedBuildings = Object.values(state.buildings).filter(
+      (building) => building.ownerId === player.id,
+    );
+    const completedBuildings = ownedBuildings.filter(
+      (building) => building.constructionTicks === 0,
+    );
+    player.population.capacity = completedBuildings.reduce(
+      (capacity, building) => capacity + building.populationCapacity,
+      0,
+    );
     if (state.tick % 200 === 0) {
       if (
         player.population.total < player.population.capacity &&
@@ -786,31 +973,27 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
       else if (player.population.total > 2 && player.population.satisfaction < 50)
         player.population.total -= 1;
     }
-    const producers = Object.values(state.buildings)
-      .filter(
-        (building) =>
-          building.ownerId === player.id &&
-          isProducer(building.kind) &&
-          building.constructionTicks === 0 &&
-          building.jobPriority > 0,
-      )
-      .sort(
-        (left, right) => right.jobPriority - left.jobPriority || left.id.localeCompare(right.id),
-      );
+    const producers = fairJobOrder(
+      completedBuildings.filter(
+        (building) => isProducer(building.kind) && building.jobPriority > 0,
+      ),
+      state.tick,
+    );
     const staffed = producers.slice(0, player.population.total);
-    player.population.employed = staffed.length;
-    player.population.unemployed = player.population.total - staffed.length;
+    const availableConstructionWorkers = player.population.total - staffed.length;
+    const constructionWorkers = fairConstructionOrder(
+      ownedBuildings.filter((building) => building.constructionTicks > 0),
+      state.tick,
+    ).slice(0, availableConstructionWorkers);
+    player.population.employed = staffed.length + constructionWorkers.length;
+    player.population.unemployed = player.population.total - player.population.employed;
     const shelterSatisfaction = player.population.capacity >= player.population.total ? 60 : 0;
     const workSatisfaction =
       player.population.total === 0
         ? 40
         : Math.floor((player.population.employed * 40) / player.population.total);
-    const serviceSatisfaction = Object.values(state.buildings).some(
-      (building) =>
-        building.ownerId === player.id &&
-        building.kind === 'hearth' &&
-        building.constructionTicks === 0 &&
-        building.health === building.maxHealth,
+    const serviceSatisfaction = completedBuildings.some(
+      (building) => building.kind === 'hearth' && building.health === building.maxHealth,
     )
       ? buildingDefinitions.hearth.serviceSatisfaction
       : 0;
@@ -819,10 +1002,21 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
       shelterSatisfaction + workSatisfaction + serviceSatisfaction,
     );
     for (const producer of staffed) staffedSmelters.add(producer.id);
+    for (const project of constructionWorkers) staffedConstruction.add(project.id);
   }
+  endPhase();
   // Phase 3: construction-and-production.
-  for (const building of Object.values(state.buildings)) {
+  endPhase = beginPhase('construction-and-production');
+  for (const building of Object.values(state.buildings).sort((left, right) =>
+    left.id.localeCompare(right.id),
+  )) {
     if (building.constructionTicks > 0) {
+      building.productionState = 'constructing';
+      if (!staffedConstruction.has(building.id)) continue;
+      const nextMaterial = inventoryItems.find((item) => building.constructionMaterials[item] > 0);
+      if (nextMaterial) {
+        building.constructionMaterials[nextMaterial] -= 1;
+      }
       building.constructionTicks -= 1;
       if (building.constructionTicks === 0)
         events.push({
@@ -832,21 +1026,39 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
         });
       continue;
     }
-    const recipe = recipeFor(building.kind);
-    const canWork =
-      building.health === building.maxHealth && (!recipe || staffedSmelters.has(building.id));
-    if (canWork && recipe && building.progress > 0) {
+    const recipe = recipeFor(building);
+    if (!recipe) {
+      building.productionState = 'idle';
+      continue;
+    }
+    if (building.health !== building.maxHealth) {
+      building.productionState = 'damaged';
+      continue;
+    }
+    if (!staffedSmelters.has(building.id)) {
+      building.productionState = 'unassigned';
+      continue;
+    }
+    if (building.progress > 0) {
+      building.productionState = 'working';
       building.progress -= 1;
       if (building.progress === 0) {
         produceRecipe(building, recipe);
         events.push({ type: 'smelted', buildingId: building.id, playerId: building.ownerId });
       }
-    } else if (canWork && recipe && canStartRecipe(building, recipe)) {
+    } else if (!hasRecipeInputs(building, recipe)) {
+      building.productionState = 'blocked-input';
+    } else if (!hasRecipeOutputCapacity(building, recipe)) {
+      building.productionState = 'blocked-output';
+    } else if (canStartRecipe(building, recipe)) {
       consumeRecipe(building, recipe);
       building.progress = recipe.ticks;
+      building.productionState = 'working';
     }
   }
+  endPhase();
   // Phase 4: environmental-events.
+  endPhase = beginPhase('environmental-events');
   const acidRain = environmentalEvents['acid-rain'];
   if (state.tick % acidRain.intervalTicks === 0) {
     const targets = Object.values(state.buildings)
@@ -867,9 +1079,14 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
       });
     }
   }
+  endPhase();
   // Phase 5: logistics.
-  for (const link of Object.values(state.logisticsLinks).sort((left, right) =>
-    left.id.localeCompare(right.id),
+  endPhase = beginPhase('logistics');
+  const sourceReservations = new Map<string, number>();
+  const targetReservations = new Map<string, number>();
+  const logisticsReservations: Array<{ link: LogisticsLink; amount: number }> = [];
+  for (const link of Object.values(state.logisticsLinks).sort(
+    (left, right) => right.priority - left.priority || left.id.localeCompare(right.id),
   )) {
     const source = state.buildings[link.sourceBuildingId];
     const target = state.buildings[link.targetBuildingId];
@@ -877,17 +1094,65 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
       delete state.logisticsLinks[link.id];
       continue;
     }
-    if (
-      source.constructionTicks > 0 ||
-      target.constructionTicks > 0 ||
-      source.inventory[link.item] < 1 ||
-      !canStore(target.inventory, target.inventoryCapacity, link.item, 1)
-    )
+    if (link.priority === 0) {
+      link.status = 'paused';
       continue;
-    source.inventory[link.item] -= 1;
-    target.inventory[link.item] += 1;
+    }
+    if (source.constructionTicks > 0 || target.constructionTicks > 0) {
+      link.status = 'constructing';
+      continue;
+    }
+    if (!acceptsRecipeInput(target, link.item)) {
+      link.status = 'target-reconfigured';
+      continue;
+    }
+    const sourceKey = `${source.id}:${link.item}`;
+    const sourceAvailable = source.inventory[link.item] - (sourceReservations.get(sourceKey) ?? 0);
+    if (sourceAvailable < 1) {
+      link.status = 'source-empty';
+      continue;
+    }
+    const targetKey = `${target.id}:${link.item}`;
+    const outputReservation = outputReservationFor(target);
+    const totalOutputReservation = inventoryItems.reduce(
+      (total, item) => total + (outputReservation[item] ?? 0),
+      0,
+    );
+    const availableCapacity =
+      target.inventoryCapacity -
+      inventoryTotal(target.inventory) -
+      totalOutputReservation -
+      (targetReservations.get(target.id) ?? 0);
+    const availableStack =
+      INVENTORY_CAPACITY -
+      target.inventory[link.item] -
+      (outputReservation[link.item] ?? 0) -
+      (targetReservations.get(targetKey) ?? 0);
+    const amount = Math.min(
+      link.throughputPerTick,
+      sourceAvailable,
+      availableCapacity,
+      availableStack,
+    );
+    if (amount < 1) {
+      link.status = 'target-full';
+      continue;
+    }
+    sourceReservations.set(sourceKey, (sourceReservations.get(sourceKey) ?? 0) + amount);
+    targetReservations.set(target.id, (targetReservations.get(target.id) ?? 0) + amount);
+    targetReservations.set(targetKey, (targetReservations.get(targetKey) ?? 0) + amount);
+    logisticsReservations.push({ link, amount });
   }
+  for (const { link, amount } of logisticsReservations) {
+    const source = state.buildings[link.sourceBuildingId]!;
+    const target = state.buildings[link.targetBuildingId]!;
+    source.inventory[link.item] -= amount;
+    target.inventory[link.item] += amount;
+    link.status = 'transferred';
+  }
+  endPhase();
   // Phase 6: threat-spawning.
+  endPhase = beginPhase('threat-spawning');
   const raider = threatDefinitions['raider-swarm'];
   if (state.tick % raider.spawnIntervalTicks === 0) {
     const targets = Object.values(state.buildings)
@@ -919,7 +1184,9 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
       events.push({ type: 'threatSpawned', buildingId: target.id, threatId: id });
     }
   }
+  endPhase();
   // Phase 7: threat-navigation-and-combat.
+  endPhase = beginPhase('threat-navigation-and-combat');
   // Threats may each visit many path tiles. Build these immutable per-tick
   // indexes once instead of scanning every building for every path tile.
   const occupiedBuildingTiles = new Set(
@@ -933,30 +1200,51 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
     towers.push(building);
     watchtowersByOwner.set(building.ownerId, towers);
   }
-  for (const threat of Object.values(state.threats).sort((left, right) =>
-    left.id.localeCompare(right.id),
-  )) {
+  let pathVisitsRemaining = THREAT_PATH_VISITS_PER_TICK;
+  for (const threat of fairThreatOrder(Object.values(state.threats), state.tick)) {
     const target = state.buildings[threat.targetBuildingId];
     if (!target || target.health <= 0) {
       delete state.threats[threat.id];
       continue;
     }
-    const path = findPath({
-      start: threat,
-      goal: target,
-      maxVisited: 128,
-      bounds: {
-        minX: Math.min(threat.x, target.x) - 8,
-        maxX: Math.max(threat.x, target.x) + 8,
-        minY: Math.min(threat.y, target.y) - 8,
-        maxY: Math.max(threat.y, target.y) + 8,
-      },
-      isPassable: (tile) =>
-        (tile.x === target.x && tile.y === target.y) ||
-        (terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
-          !occupiedBuildingTiles.has(tileKey(tile.x, tile.y))),
-    });
-    const next = path.status === 'found' ? path.path[1] : undefined;
+    const path =
+      pathVisitsRemaining > 0
+        ? chunkFor(threat).x !== chunkFor(target).x || chunkFor(threat).y !== chunkFor(target).y
+          ? findHierarchicalPath({
+              start: threat,
+              goal: target,
+              maxVisited: Math.min(THREAT_PATH_VISITS_PER_SEARCH, pathVisitsRemaining),
+              maxChunkVisited: 32,
+              bounds: {
+                minX: Math.min(threat.x, target.x) - 8,
+                maxX: Math.max(threat.x, target.x) + 8,
+                minY: Math.min(threat.y, target.y) - 8,
+                maxY: Math.max(threat.y, target.y) + 8,
+              },
+              isChunkPassable: () => true,
+              isPassable: (tile) =>
+                (tile.x === target.x && tile.y === target.y) ||
+                (terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
+                  !occupiedBuildingTiles.has(tileKey(tile.x, tile.y))),
+            })
+          : findPath({
+              start: threat,
+              goal: target,
+              maxVisited: Math.min(THREAT_PATH_VISITS_PER_SEARCH, pathVisitsRemaining),
+              bounds: {
+                minX: Math.min(threat.x, target.x) - 8,
+                maxX: Math.max(threat.x, target.x) + 8,
+                minY: Math.min(threat.y, target.y) - 8,
+                maxY: Math.max(threat.y, target.y) + 8,
+              },
+              isPassable: (tile) =>
+                (tile.x === target.x && tile.y === target.y) ||
+                (terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
+                  !occupiedBuildingTiles.has(tileKey(tile.x, tile.y))),
+            })
+        : undefined;
+    pathVisitsRemaining -= path?.visited ?? 0;
+    const next = path?.status === 'found' ? path.path[1] : undefined;
     if (next) {
       threat.x = next.x;
       threat.y = next.y;
@@ -978,6 +1266,9 @@ export const advanceTick = (state: WorldState): WorldEvent[] => {
   }
   // Phase 8: emit-events-and-mark-changes. Events are returned; callers obtain
   // an entity/chunk dirty set with `diffWorld` against their pre-tick snapshot.
+  endPhase();
+  endPhase = beginPhase('emit-events-and-mark-changes');
+  endPhase();
   return events;
 };
 
@@ -1068,6 +1359,36 @@ type LegacyWorldBase = Omit<WorldState, 'schemaVersion' | 'randomState'>;
 interface Version14World extends LegacyWorldBase {
   schemaVersion: 14;
 }
+type PreFlowLogisticsLink = Omit<LogisticsLink, 'throughputPerTick' | 'status'>;
+type Version15LogisticsLink = Omit<PreFlowLogisticsLink, 'priority'>;
+type LegacyBuildingWithoutRecipe = Omit<
+  Building,
+  'recipeId' | 'productionState' | 'constructionMaterials'
+>;
+interface Version16World extends Omit<
+  WorldState,
+  'schemaVersion' | 'buildings' | 'logisticsLinks'
+> {
+  schemaVersion: 16;
+  buildings: Record<string, LegacyBuildingWithoutRecipe>;
+  logisticsLinks: Record<string, PreFlowLogisticsLink>;
+}
+interface Version15World extends Omit<Version16World, 'schemaVersion' | 'logisticsLinks'> {
+  schemaVersion: 15;
+  logisticsLinks: Record<string, Version15LogisticsLink>;
+}
+interface Version17World extends Omit<
+  WorldState,
+  'schemaVersion' | 'buildings' | 'logisticsLinks'
+> {
+  schemaVersion: 17;
+  buildings: Record<string, Omit<Building, 'productionState' | 'constructionMaterials'>>;
+  logisticsLinks: Record<string, PreFlowLogisticsLink>;
+}
+interface Version18World extends Omit<WorldState, 'schemaVersion' | 'buildings'> {
+  schemaVersion: 18;
+  buildings: Record<string, Omit<Building, 'constructionMaterials'>>;
+}
 interface Version10World extends Omit<LegacyWorldBase, 'threats'> {
   schemaVersion: 10;
   threats: Record<string, LegacyThreat>;
@@ -1125,6 +1446,15 @@ const withJobPriorities = <T extends { kind: Building['kind'] }>(buildings: Reco
       { ...building, jobPriority: isProducer(building.kind) ? 1 : 0 },
     ]),
   );
+const withConfiguredRecipes = <T extends { kind: Building['kind'] }>(
+  buildings: Record<string, T>,
+): Record<string, T & Pick<Building, 'recipeId'>> =>
+  Object.fromEntries(
+    Object.entries(buildings).map(([id, building]) => [
+      id,
+      { ...building, recipeId: defaultRecipeIdFor(building.kind) },
+    ]),
+  ) as Record<string, T & Pick<Building, 'recipeId'>>;
 const withThreatPositions = (
   threats: Record<string, LegacyThreat>,
   buildings: Record<string, { x: number; y: number }>,
@@ -1152,15 +1482,81 @@ const migrateMinedTilesToOreNodes = (seed: number, minedTiles: Record<string, nu
     const node = terrainAt(seed, x, y) === 'ore' ? { x, y } : nearestOreTile(seed, x, y, 16);
     if (!node) continue;
     const nodeKey = tileKey(node.x, node.y);
-    migrated[nodeKey] = Math.min(ORE_PER_NODE, (migrated[nodeKey] ?? 0) + Math.max(0, amount));
+    migrated[nodeKey] = Math.min(
+      resourceDefinitions.ore.yield,
+      (migrated[nodeKey] ?? 0) + Math.max(0, amount),
+    );
   }
   return migrated;
 };
-const migrateVersion14 = (state: Version14World): WorldState => ({
+const withLogisticsPriorities = <T extends Version15LogisticsLink>(
+  links: Record<string, T>,
+): Record<string, PreFlowLogisticsLink> =>
+  Object.fromEntries(
+    Object.entries(links).map(([id, link]) => [id, { ...link, priority: 1 }]),
+  ) as Record<string, PreFlowLogisticsLink>;
+const withProductionStates = <
+  T extends Omit<Building, 'productionState' | 'constructionMaterials'>,
+>(
+  buildings: Record<string, T>,
+): Record<string, T & Pick<Building, 'productionState'>> =>
+  Object.fromEntries(
+    Object.entries(buildings).map(([id, building]) => [
+      id,
+      {
+        ...building,
+        productionState: building.constructionTicks > 0 ? 'constructing' : 'idle',
+      },
+    ]),
+  ) as Record<string, T & Pick<Building, 'productionState'>>;
+const withEmptyConstructionMaterials = <T extends Omit<Building, 'constructionMaterials'>>(
+  buildings: Record<string, T>,
+): Record<string, T & Pick<Building, 'constructionMaterials'>> =>
+  Object.fromEntries(
+    Object.entries(buildings).map(([id, building]) => [
+      id,
+      { ...building, constructionMaterials: emptyInventory() },
+    ]),
+  ) as Record<string, T & Pick<Building, 'constructionMaterials'>>;
+const withFlowControls = <T extends PreFlowLogisticsLink>(
+  links: Record<string, T>,
+): Record<string, LogisticsLink> =>
+  Object.fromEntries(
+    Object.entries(links).map(([id, link]) => [
+      id,
+      { ...link, throughputPerTick: logisticsThroughput, status: 'idle' },
+    ]),
+  ) as Record<string, LogisticsLink>;
+const migrateVersion17 = (state: Version17World): WorldState => ({
   ...state,
-  schemaVersion: 15,
-  randomState: createRandomState(state.seed),
+  schemaVersion: 19,
+  buildings: withEmptyConstructionMaterials(withProductionStates(state.buildings)),
+  logisticsLinks: withFlowControls(state.logisticsLinks),
 });
+const migrateVersion18 = (state: Version18World): WorldState => ({
+  ...state,
+  schemaVersion: 19,
+  buildings: withEmptyConstructionMaterials(state.buildings),
+});
+const migrateVersion16 = (state: Version16World): Version17World => ({
+  ...state,
+  schemaVersion: 17,
+  buildings: withConfiguredRecipes(state.buildings),
+});
+const migrateVersion15 = (state: Version15World): WorldState =>
+  migrateVersion17(
+    migrateVersion16({
+      ...state,
+      schemaVersion: 16,
+      logisticsLinks: withLogisticsPriorities(state.logisticsLinks),
+    }),
+  );
+const migrateVersion14 = (state: Version14World): WorldState =>
+  migrateVersion15({
+    ...state,
+    schemaVersion: 15,
+    randomState: createRandomState(state.seed),
+  } as Version15World);
 const migrateVersion13 = (state: Version13World): WorldState =>
   migrateVersion14({
     ...state,
@@ -1198,7 +1594,12 @@ const migrateToCurrentSchema = (state: unknown): WorldState => {
 /** Forward-only snapshot migration kept inside the platform-independent simulation. */
 export const deserializeWorld = (raw: unknown): WorldState => {
   const candidate = structuredClone(raw) as { schemaVersion?: number };
-  if (candidate.schemaVersion === 15) return candidate as WorldState;
+  if (candidate.schemaVersion === 19) return candidate as WorldState;
+  if (candidate.schemaVersion === 18) return migrateVersion18(candidate as Version18World);
+  if (candidate.schemaVersion === 17) return migrateVersion17(candidate as Version17World);
+  if (candidate.schemaVersion === 16)
+    return migrateVersion17(migrateVersion16(candidate as Version16World));
+  if (candidate.schemaVersion === 15) return migrateVersion15(candidate as Version15World);
   if (candidate.schemaVersion === 14) return migrateVersion14(candidate as Version14World);
   if (candidate.schemaVersion === 13) return migrateVersion13(candidate as Version13World);
   if (candidate.schemaVersion === 12) return migrateVersion12(candidate as Version12World);
@@ -1459,6 +1860,30 @@ export const inspectWorld = (state: WorldState): string[] => {
       hasInvalidInventory(building.inventory)
     )
       errors.push(`building ${id} has invalid inventory`);
+    const constructionCost = constructionMaterialsFor(building.kind);
+    if (
+      hasInvalidInventory(building.constructionMaterials) ||
+      inventoryItems.some((item) => building.constructionMaterials[item] > constructionCost[item])
+    )
+      errors.push(`building ${id} has invalid construction materials`);
+    if (
+      (isProducer(building.kind) &&
+        (!building.recipeId || !recipeIdsFor(building.kind).includes(building.recipeId))) ||
+      (!isProducer(building.kind) && building.recipeId !== null)
+    )
+      errors.push(`building ${id} has an invalid configured recipe`);
+    if (
+      ![
+        'idle',
+        'constructing',
+        'working',
+        'blocked-input',
+        'blocked-output',
+        'unassigned',
+        'damaged',
+      ].includes(building.productionState)
+    )
+      errors.push(`building ${id} has an invalid production state`);
   }
   for (const [id, threat] of Object.entries(state.threats)) {
     registerEntity(threat.id, 'threat');
@@ -1498,7 +1923,10 @@ export const inspectWorld = (state: WorldState): string[] => {
       !Number.isSafeInteger(Number(xText)) ||
       !Number.isSafeInteger(Number(yText)) ||
       !isNonNegativeInteger(amount) ||
-      amount > ORE_PER_NODE
+      amount >
+        (terrainAt(state.seed, Number(xText), Number(yText)) === 'wood'
+          ? resourceDefinitions.wood.yield
+          : resourceDefinitions.ore.yield)
     )
       errors.push(`mined tile ${key} has an invalid depletion value`);
   }
@@ -1534,6 +1962,26 @@ export const inspectWorld = (state: WorldState): string[] => {
       !acceptsRecipeInput(target, link.item)
     )
       errors.push(`logistics link ${id} has invalid endpoints`);
+    if (!Number.isInteger(link.priority) || link.priority < 0 || link.priority > 3)
+      errors.push(`logistics link ${id} has an invalid priority`);
+    if (
+      !Number.isSafeInteger(link.throughputPerTick) ||
+      link.throughputPerTick < 1 ||
+      link.throughputPerTick > logisticsThroughput
+    )
+      errors.push(`logistics link ${id} has an invalid throughput`);
+    if (
+      ![
+        'idle',
+        'transferred',
+        'paused',
+        'source-empty',
+        'target-full',
+        'target-reconfigured',
+        'constructing',
+      ].includes(link.status)
+    )
+      errors.push(`logistics link ${id} has an invalid status`);
   }
   return errors;
 };

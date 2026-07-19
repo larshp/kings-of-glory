@@ -199,9 +199,33 @@ export type Command =
       readonly id: string;
       readonly playerId: PlayerId;
       readonly sequence: number;
+      readonly type: 'setLogisticsPriority';
+      readonly linkId: string;
+      readonly priority: 0 | 1 | 2 | 3;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
       readonly type: 'setJobPriority';
       readonly buildingId: BuildingId;
       readonly priority: 0 | 1 | 2 | 3;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'setRecipe';
+      readonly buildingId: BuildingId;
+      readonly recipeId: string;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'copyBuildingConfiguration';
+      readonly sourceBuildingId: BuildingId;
+      readonly targetBuildingId: BuildingId;
     }
   | {
       readonly id: string;
@@ -247,6 +271,8 @@ export type RejectionCode =
   | 'construction-incomplete'
   | 'busy'
   | 'wrong-building'
+  | 'invalid-recipe'
+  | 'incompatible-building'
   | 'cannot-demolish'
   | 'invalid-amount'
   | 'not-explored'

@@ -5,11 +5,23 @@ import {
   useRef,
   useState,
 } from 'react';
-import { buildings as buildingDefinitions, recipes, technologies } from '@kings/content';
-import type { ClientWorldState, ServerMessage } from '@kings/protocol';
+import {
+  buildings as buildingDefinitions,
+  producers as producerDefinitions,
+  recipes,
+  technologies,
+} from '@kings/content';
+import { PROTOCOL_VERSION, type ClientWorldState, type ServerMessage } from '@kings/protocol';
 import { type Building, type SettlementRole } from '@kings/simulation';
 import { WorldCanvas } from './WorldCanvas.js';
-import type { PickedEntity, WorldCanvasMetrics } from './WorldCanvas.js';
+import type {
+  OperationsOverlay,
+  PickedEntity,
+  WorldCanvasDebugState,
+  WorldCanvasMetrics,
+} from './WorldCanvas.js';
+import { loadRenderAssets, type RenderAssets } from './render-assets.js';
+import { synchronizeWorld } from './world-sync.js';
 import {
   defaultPreferences,
   displayKey,
@@ -37,6 +49,9 @@ const rejectionMessage = (code: string | undefined) => {
     'insufficient-resources': 'Gather, craft, or transfer the required resources first.',
     'inventory-full': 'Move or use items to make inventory space.',
     'construction-incomplete': 'Wait for construction to finish before using this building.',
+    busy: 'Wait for the current production batch to finish before changing its recipe.',
+    'invalid-recipe': 'That recipe cannot run in this building.',
+    'incompatible-building': 'Copy settings only between completed producers of the same kind.',
     'building-destroyed': 'Repair or demolish the destroyed building first.',
     'technology-locked': 'Research the required technology first.',
     'not-explored': 'Explore that area before claiming it.',
@@ -69,16 +84,22 @@ const technologyCostLabel = (
   Object.entries(cost)
     .map(([item, amount]) => `${amount} ${item}${amount === 1 ? '' : 's'}`)
     .join(', ');
-const recipeForBuilding = (kind: Building['kind']) => {
-  const definition = buildingDefinitions[kind];
-  if (!('recipe' in definition)) return undefined;
-  return Object.values(recipes).find((recipe) => recipe.id === definition.recipe);
+const recipeForBuilding = (building: Building) =>
+  Object.values(recipes).find((recipe) => recipe.id === building.recipeId);
+const recipeOptionsForBuilding = (building: Building) => {
+  const producer = producerDefinitions[building.kind as keyof typeof producerDefinitions];
+  return producer
+    ? Object.values(recipes).filter((recipe) =>
+        (producer.recipeIds as readonly string[]).includes(recipe.id),
+      )
+    : [];
 };
 
 export const App = () => {
   const socket = useRef<WebSocket | undefined>(undefined);
   const sequence = useRef(0);
   const stateVersion = useRef<number | undefined>(undefined);
+  const clientWorldState = useRef<ClientWorldState | undefined>(undefined);
   const resyncRequested = useRef(false);
   const [state, setState] = useState<ClientWorldState>();
   const [status, setStatus] = useState('Connecting');
@@ -97,6 +118,17 @@ export const App = () => {
   );
   const [canvasMetrics, setCanvasMetrics] = useState<WorldCanvasMetrics>();
   const [rendererError, setRendererError] = useState('');
+  const [renderAssets, setRenderAssets] = useState<RenderAssets>();
+  const [assetLoadError, setAssetLoadError] = useState('');
+  const [assetLoadProgress, setAssetLoadProgress] = useState({ loaded: 0, total: 1 });
+  const [assetLoadAttempt, setAssetLoadAttempt] = useState(0);
+  const [rendererDebug, setRendererDebug] = useState<WorldCanvasDebugState>({
+    enabled: false,
+    showCoordinates: false,
+    showChunks: false,
+    showEntityIds: false,
+  });
+  const [operationsOverlay, setOperationsOverlay] = useState<OperationsOverlay>('none');
   const messageCount = useRef({ received: 0, sent: 0 });
   const [messageRate, setMessageRate] = useState({ received: 0, sent: 0 });
 
@@ -119,7 +151,7 @@ export const App = () => {
         }
         setConnectionIndicator('Connected to the server. Loading your world…');
         attempts = 0;
-        connection.send(JSON.stringify({ type: 'hello', version: 1, playerId }));
+        connection.send(JSON.stringify({ type: 'hello', version: PROTOCOL_VERSION, playerId }));
         messageCount.current.sent += 1;
         setStatus('Connected');
         heartbeatTimer = window.setInterval(() => {
@@ -175,34 +207,30 @@ export const App = () => {
         }
         messageCount.current.received += 1;
         if (message.type === 'welcome') {
+          setStatus('Connected');
+        }
+        const synchronization = synchronizeWorld(
+          { version: stateVersion.current, state: clientWorldState.current },
+          message,
+        );
+        if (synchronization.sync.state !== clientWorldState.current) {
           setConnectionIndicator('Game world connected.', true);
-          stateVersion.current = message.stateVersion;
+          stateVersion.current = synchronization.sync.version;
+          clientWorldState.current = synchronization.sync.state;
           resyncRequested.current = false;
-          setState(message.state);
+          setState(synchronization.sync.state);
         }
-        if (message.type === 'state') {
-          if (message.state) {
-            stateVersion.current = message.version;
-            resyncRequested.current = false;
-            setStatus('Connected');
-            setState(message.state);
-          } else if (
-            message.delta &&
-            message.baseVersion === stateVersion.current &&
-            stateVersion.current !== undefined
-          ) {
-            stateVersion.current = message.version;
-            resyncRequested.current = false;
-            setState((current) => (current ? { ...current, ...message.delta } : current));
-          } else if (!resyncRequested.current && connection.readyState === WebSocket.OPEN) {
-            resyncRequested.current = true;
-            setStatus('Resynchronizing');
-            connection.send(JSON.stringify({ type: 'resync', version: stateVersion.current ?? 0 }));
-            messageCount.current.sent += 1;
-          }
+        if (
+          synchronization.needsResync &&
+          !resyncRequested.current &&
+          connection.readyState === WebSocket.OPEN
+        ) {
+          resyncRequested.current = true;
+          setStatus('Resynchronizing');
+          connection.send(JSON.stringify({ type: 'resync', version: stateVersion.current ?? 0 }));
+          messageCount.current.sent += 1;
         }
-        if (message.type === 'commandResult' && !message.result.accepted)
-          setNotice(rejectionMessage(message.result.code));
+        if (message.type === 'commandRejected') setNotice(rejectionMessage(message.result.code));
         if (message.type === 'maintenance') {
           reconnectAllowed = false;
           setStatus('Maintenance');
@@ -232,6 +260,27 @@ export const App = () => {
       activeConnection?.close();
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRenderAssets(undefined);
+    setAssetLoadError('');
+    loadRenderAssets((loaded, total) => {
+      if (!cancelled) setAssetLoadProgress({ loaded, total });
+    })
+      .then((assets) => {
+        if (!cancelled) setRenderAssets(assets);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled)
+          setAssetLoadError(
+            error instanceof Error ? error.message : 'The world artwork could not be loaded.',
+          );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [assetLoadAttempt]);
 
   useEffect(() => {
     localStorage.setItem(PREFERENCE_STORAGE_KEY, JSON.stringify(preferences));
@@ -429,6 +478,8 @@ export const App = () => {
         threats={Object.values(state?.threats ?? {})}
         terrain={state?.terrain ?? {}}
         territory={state?.territory ?? {}}
+        logisticsLinks={logisticsLinks}
+        operationsOverlay={operationsOverlay}
         cameraBindings={preferences.camera}
         focus={
           plot
@@ -447,6 +498,8 @@ export const App = () => {
         onMetrics={setCanvasMetrics}
         onVisibleChunks={sendInterest}
         onError={(message) => setRendererError(message)}
+        assets={renderAssets}
+        debug={rendererDebug}
       />
       <aside className="hud">
         <h1>Kings of Glory</h1>
@@ -457,6 +510,24 @@ export const App = () => {
           are timber groves, and blue tiles are public claimed sectors.
         </p>
         <p className="status">{status}</p>
+        {!renderAssets && !assetLoadError && (
+          <section className="asset-loading" aria-live="polite" aria-label="Loading map artwork">
+            <strong>Loading map artwork</strong>
+            <span>
+              {assetLoadProgress.loaded}/{assetLoadProgress.total} atlas
+              {assetLoadProgress.total === 1 ? '' : 'es'} loaded
+            </span>
+          </section>
+        )}
+        {assetLoadError && (
+          <section className="asset-loading error" role="alert">
+            <strong>Map artwork unavailable</strong>
+            <span>{assetLoadError}</span>
+            <button onClick={() => setAssetLoadAttempt((attempt) => attempt + 1)}>
+              Retry artwork
+            </button>
+          </section>
+        )}
         {status === 'Maintenance' && (
           <p className="alert" role="alert">
             The server is completing maintenance. Refresh the page in a moment to reconnect.
@@ -528,6 +599,78 @@ export const App = () => {
           >
             Restore control defaults
           </button>
+        </section>
+        <details className="renderer-debug">
+          <summary>Renderer diagnostics</summary>
+          <p>Diagnostics are local-only and do not change the shared world.</p>
+          <label className="checkbox-label" htmlFor="renderer-debug-enabled">
+            <input
+              id="renderer-debug-enabled"
+              type="checkbox"
+              checked={rendererDebug.enabled}
+              onChange={(event) =>
+                setRendererDebug((current) => ({ ...current, enabled: event.target.checked }))
+              }
+            />
+            Show map overlays
+          </label>
+          <label className="checkbox-label" htmlFor="renderer-debug-coordinates">
+            <input
+              id="renderer-debug-coordinates"
+              type="checkbox"
+              disabled={!rendererDebug.enabled}
+              checked={rendererDebug.showCoordinates}
+              onChange={(event) =>
+                setRendererDebug((current) => ({
+                  ...current,
+                  showCoordinates: event.target.checked,
+                }))
+              }
+            />
+            Tile coordinates
+          </label>
+          <label className="checkbox-label" htmlFor="renderer-debug-chunks">
+            <input
+              id="renderer-debug-chunks"
+              type="checkbox"
+              disabled={!rendererDebug.enabled}
+              checked={rendererDebug.showChunks}
+              onChange={(event) =>
+                setRendererDebug((current) => ({ ...current, showChunks: event.target.checked }))
+              }
+            />
+            Chunk labels
+          </label>
+          <label className="checkbox-label" htmlFor="renderer-debug-entities">
+            <input
+              id="renderer-debug-entities"
+              type="checkbox"
+              disabled={!rendererDebug.enabled}
+              checked={rendererDebug.showEntityIds}
+              onChange={(event) =>
+                setRendererDebug((current) => ({ ...current, showEntityIds: event.target.checked }))
+              }
+            />
+            Entity IDs
+          </label>
+        </details>
+        <section className="operations-overlay" aria-labelledby="operations-overlay-title">
+          <h2 id="operations-overlay-title">Operations overlay</h2>
+          <label htmlFor="operations-overlay-select">
+            Map layer
+            <select
+              id="operations-overlay-select"
+              value={operationsOverlay}
+              onChange={(event) => setOperationsOverlay(event.target.value as OperationsOverlay)}
+            >
+              <option value="none">None</option>
+              <option value="resources">Resources</option>
+              <option value="logistics">Logistics flow</option>
+              <option value="production">Production state</option>
+              <option value="bottlenecks">Bottlenecks</option>
+            </select>
+          </label>
+          <p>Layers are local views of already-authorized world state.</p>
         </section>
         <details className="performance-panel">
           <summary>Performance</summary>
@@ -886,8 +1029,8 @@ export const App = () => {
             <section className="automation-panel" aria-labelledby="automation-title">
               <h2 id="automation-title">Automation</h2>
               <p>
-                Link completed storage or production buildings to a producer. Each link moves one
-                required input per tick.
+                Link completed storage or production buildings to a producer. Higher-priority links
+                reserve source and target capacity first; each link uses its configured throughput.
               </p>
               <label htmlFor="logistics-source">Source</label>
               <select
@@ -958,7 +1101,25 @@ export const App = () => {
                     ['owner', 'logistics'].includes(roleForBuilding(target) ?? ''));
                 return (
                   <p className="logistics-link" key={link.id}>
-                    {link.sourceBuildingId} → {link.targetBuildingId} ({link.item})
+                    {link.sourceBuildingId} → {link.targetBuildingId} ({link.item},{' '}
+                    {link.throughputPerTick}/tick, {link.status.replaceAll('-', ' ')})
+                    <select
+                      aria-label={`Priority for ${link.id}`}
+                      disabled={!canRemove}
+                      value={link.priority}
+                      onChange={(event) =>
+                        send({
+                          type: 'setLogisticsPriority',
+                          linkId: link.id,
+                          priority: Number(event.target.value),
+                        })
+                      }
+                    >
+                      <option value={0}>Paused</option>
+                      <option value={1}>Normal</option>
+                      <option value={2}>High</option>
+                      <option value={3}>Urgent</option>
+                    </select>
                     <button
                       disabled={!canRemove}
                       onClick={() => send({ type: 'removeLogisticsLink', linkId: link.id })}
@@ -1009,7 +1170,14 @@ export const App = () => {
               const role = roleForBuilding(building);
               const canBuild = role === 'owner' || role === 'builder';
               const canMoveItems = role === 'owner' || role === 'logistics';
-              const recipe = recipeForBuilding(building.kind);
+              const recipe = recipeForBuilding(building);
+              const recipeOptions = recipeOptionsForBuilding(building);
+              const configurationTargets = manageableBuildings.filter(
+                (candidate) =>
+                  candidate.id !== building.id &&
+                  candidate.kind === building.kind &&
+                  candidate.constructionTicks === 0,
+              );
               const missingInputs = recipe
                 ? Object.entries(recipe.input).filter(
                     ([item, amount]) =>
@@ -1037,14 +1205,50 @@ export const App = () => {
                     <span>Housing capacity: {building.populationCapacity}</span>
                   )}
                   {building.constructionTicks > 0 ? (
-                    <span>Construction: {building.constructionTicks} ticks</span>
+                    <>
+                      <span>Construction: {building.constructionTicks} worker ticks</span>
+                      {Object.values(building.constructionMaterials).some(
+                        (amount) => amount > 0,
+                      ) && (
+                        <span>
+                          Delivery remaining: ore {building.constructionMaterials.ore} Â· wood{' '}
+                          {building.constructionMaterials.wood} Â· ingot{' '}
+                          {building.constructionMaterials.ingot} Â· tool{' '}
+                          {building.constructionMaterials.tool}
+                        </span>
+                      )}
+                    </>
                   ) : (
                     <>
                       {recipe && (
                         <>
+                          {recipeOptions.length > 1 && (
+                            <label>
+                              Recipe
+                              <select
+                                disabled={!canBuild || building.progress > 0}
+                                value={building.recipeId ?? ''}
+                                onChange={(event) =>
+                                  send({
+                                    type: 'setRecipe',
+                                    buildingId: building.id,
+                                    recipeId: event.target.value,
+                                  })
+                                }
+                              >
+                                {recipeOptions.map((option) => (
+                                  <option key={option.id} value={option.id}>
+                                    {option.id}: {technologyCostLabel(option.input)} →{' '}
+                                    {technologyCostLabel(option.output)}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          )}
                           <span>
                             Production: {building.progress}/{recipe.ticks} ticks
                           </span>
+                          <span>Machine: {building.productionState.replaceAll('-', ' ')}</span>
                           {building.health === building.maxHealth &&
                             building.jobPriority > 0 &&
                             building.progress === 0 &&
@@ -1060,25 +1264,52 @@ export const App = () => {
                         </>
                       )}
                       {(building.kind === 'smelter' || building.kind === 'workshop') && (
-                        <label>
-                          Job priority
-                          <select
-                            disabled={!canBuild}
-                            value={building.jobPriority}
-                            onChange={(event) =>
-                              send({
-                                type: 'setJobPriority',
-                                buildingId: building.id,
-                                priority: Number(event.target.value),
-                              })
-                            }
-                          >
-                            <option value={0}>Paused</option>
-                            <option value={1}>Normal</option>
-                            <option value={2}>High</option>
-                            <option value={3}>Urgent</option>
-                          </select>
-                        </label>
+                        <>
+                          <label>
+                            Job priority
+                            <select
+                              disabled={!canBuild}
+                              value={building.jobPriority}
+                              onChange={(event) =>
+                                send({
+                                  type: 'setJobPriority',
+                                  buildingId: building.id,
+                                  priority: Number(event.target.value),
+                                })
+                              }
+                            >
+                              <option value={0}>Paused</option>
+                              <option value={1}>Normal</option>
+                              <option value={2}>High</option>
+                              <option value={3}>Urgent</option>
+                            </select>
+                          </label>
+                          {configurationTargets.length > 0 && (
+                            <label>
+                              Copy settings to
+                              <select
+                                defaultValue=""
+                                disabled={!canBuild || building.progress > 0}
+                                onChange={(event) => {
+                                  if (!event.target.value) return;
+                                  send({
+                                    type: 'copyBuildingConfiguration',
+                                    sourceBuildingId: building.id,
+                                    targetBuildingId: event.target.value,
+                                  });
+                                  event.target.value = '';
+                                }}
+                              >
+                                <option value="">Choose producer</option>
+                                {configurationTargets.map((target) => (
+                                  <option key={target.id} value={target.id}>
+                                    {target.id}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          )}
+                        </>
                       )}
                       <button
                         disabled={!canMoveItems || player.inventory.ore < 1}

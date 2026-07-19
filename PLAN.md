@@ -118,13 +118,13 @@ Exit criteria:
 - [x] Render a small tile grid with placeholder terrain assets.
 - [x] Implement camera pan, zoom, viewport resize, bounds, and configurable input bindings.
 - [x] Implement accurate tile and entity picking under the pointer.
-- [ ] Implement sprite layering for terrain, buildings, units, effects, and selection markers.
+- [x] Implement sprite layering for terrain, buildings, units, effects, and selection markers.
 - [x] Avoid sorting the entire world every frame. Sort visible objects by stable isometric depth keys and update only when required.
-- [ ] Implement chunk-based render containers, viewport culling, and object pooling where measurements justify it.
+- [x] Implement chunk-based render containers, viewport culling, and object pooling where measurements justify it.
 - [x] Add selection, hover, placement preview, valid/invalid placement feedback, and cancellation controls.
 - [x] Add a React HUD shell with connection status, selected-object details, resources, notifications, and a build menu placeholder.
-- [ ] Create an asset manifest and loading screen with progress and error handling.
-- [ ] Use texture atlases and establish asset naming, scale, origin, and animation conventions.
+- [x] Create an asset manifest and loading screen with progress and error handling.
+- [x] Use texture atlases and establish asset naming, scale, origin, and animation conventions.
 - [ ] Add debug overlays for coordinates, chunks, entity IDs, paths, frame time, and visible-object count.
 - [ ] Add rendering tests for projection math and lightweight browser tests for camera and selection behavior.
 
@@ -138,7 +138,7 @@ Exit criteria:
 
 - [x] Define a versioned network protocol in `packages/protocol`.
 - [x] Start with inspectable JSON messages. Move high-volume messages to binary encoding only after measurement.
-- [ ] Define handshake, authentication, world bootstrap, chunk snapshot, state delta, command, acknowledgement, rejection, heartbeat, resync, maintenance, and server-error messages.
+- [x] Define handshake, authentication, world bootstrap, chunk snapshot, state delta, command, acknowledgement, rejection, heartbeat, resync, maintenance, and server-error messages.
 - [x] Implement one global world host in the server. Do not implement room selection or matchmaking.
 - [x] Add development authentication that assigns stable test players. Replace it before public access.
 - [x] Implement monotonically increasing server tick and state-version numbers.
@@ -146,7 +146,7 @@ Exit criteria:
 - [x] Validate message shape, size, frequency, permissions, coordinates, and game preconditions on the server.
 - [x] Implement interest management based on visible chunks plus explicitly relevant owned or observed entities.
 - [x] Send a complete snapshot when a chunk becomes relevant, then versioned deltas while it remains relevant.
-- [ ] Handle entities moving between chunks without duplication or disappearance.
+- [x] Handle entities moving between chunks without duplication or disappearance.
 - [x] Add acknowledgements and user-facing rejection reasons for player commands.
 - [x] Implement heartbeat, timeout, disconnect cleanup, exponential reconnect, and full resynchronization.
 - [x] Implement backpressure limits. Disconnect or degrade slow clients before their outgoing queues exhaust server memory.
@@ -212,20 +212,20 @@ Exit criteria:
 
 ## Phase 7: Expand automation and production
 
-- [ ] Define data schemas for items, resources, recipes, buildings, producers, storage, and logistics links.
-- [ ] Validate all content at build time and server startup, including references and recipe cycles.
-- [ ] Implement multiple resource nodes with finite or renewable behavior according to the game design.
-- [ ] Implement the chosen logistics model from Phase 0.
-- [ ] Implement input and output buffers, reservation rules, throughput, congestion, and blocked-machine states.
-- [ ] Implement storage buildings and controlled resource-transfer priorities.
-- [ ] Implement producer configuration and recipe switching without item duplication or loss.
+- [x] Define data schemas for items, resources, recipes, buildings, producers, storage, and logistics links.
+- [x] Validate all content at build time and server startup, including references and recipe cycles.
+- [x] Implement multiple resource nodes with finite or renewable behavior according to the game design.
+- [x] Implement the chosen logistics model from Phase 0.
+- [x] Implement input and output buffers, reservation rules, throughput, congestion, and blocked-machine states.
+- [x] Implement storage buildings and controlled resource-transfer priorities.
+- [x] Implement producer configuration and recipe switching without item duplication or loss.
 - [ ] Implement construction logistics rather than creating completed buildings immediately where the design requires it.
-- [ ] Add resource, logistics, production-rate, and bottleneck overlays.
-- [ ] Add copy, upgrade, repair, pause, demolition, and configuration actions where appropriate.
-- [ ] Define deterministic update order so production results do not depend on entity insertion order.
-- [ ] Add property-based tests for inventory conservation, recipe conservation, capacity, and transport reservations.
-- [ ] Add stress scenarios with thousands of buildings and transported items.
-- [ ] Profile simulation cost per system and optimize measured bottlenecks.
+- [x] Add resource, logistics, production-rate, and bottleneck overlays.
+- [x] Add copy, upgrade, repair, pause, demolition, and configuration actions where appropriate.
+- [x] Define deterministic update order so production results do not depend on entity insertion order.
+- [x] Add property-based tests for inventory conservation, recipe conservation, capacity, and transport reservations.
+- [x] Add stress scenarios with thousands of buildings and transported items.
+- [x] Profile simulation cost per system and optimize measured bottlenecks.
 
 Exit criteria:
 
@@ -235,19 +235,19 @@ Exit criteria:
 
 ## Phase 8: Implement the settlement simulation
 
-- [ ] Implement the population model selected in Phase 0.
-- [ ] Add housing, population capacity, growth or arrival, and departure or death rules.
-- [ ] Add jobs, workplace assignment, availability, and priority controls.
-- [ ] Add basic settler needs and a transparent satisfaction model.
+- [x] Implement the population model selected in Phase 0.
+- [x] Add housing, population capacity, growth or arrival, and departure or death rules.
+- [x] Add jobs, workplace assignment, availability, and priority controls.
+- [x] Add basic settler needs and a transparent satisfaction model.
 - [ ] Add walking or transport behavior between homes, workplaces, storage, construction, and services where required.
-- [ ] Implement hierarchical pathfinding: local paths inside chunks and higher-level routes across chunks.
-- [ ] Add path invalidation when buildings, terrain, or threats change accessibility.
-- [ ] Spread expensive path searches across ticks with explicit per-tick budgets.
-- [ ] Implement construction workers and material delivery if not completed in the production phase.
-- [ ] Add service buildings and settlement-level statistics.
-- [ ] Add alerts for homelessness, unemployment, shortages, inaccessible destinations, and stalled construction.
-- [ ] Add deterministic scheduling and fairness so low-ID entities do not permanently receive preferential service.
-- [ ] Add headless long-duration tests for population stability, deadlocks, and pathfinding failures.
+- [x] Implement hierarchical pathfinding: local paths inside chunks and higher-level routes across chunks.
+- [x] Add path invalidation when buildings, terrain, or threats change accessibility.
+- [x] Spread expensive path searches across ticks with explicit per-tick budgets.
+- [x] Implement construction workers and material delivery if not completed in the production phase.
+- [x] Add service buildings and settlement-level statistics.
+- [x] Add alerts for homelessness, unemployment, shortages, inaccessible destinations, and stalled construction.
+- [x] Add deterministic scheduling and fairness so low-ID entities do not permanently receive preferential service.
+- [x] Add headless long-duration tests for population stability, deadlocks, and pathfinding failures.
 
 Exit criteria:
 
@@ -258,19 +258,19 @@ Exit criteria:
 ## Phase 9: Implement exploration and civilization progression
 
 - [ ] Add unexplored, explored, and currently visible states for world chunks or tiles.
-- [ ] Decide and implement which exploration information is private, settlement-shared, or globally shared.
-- [ ] Ensure hidden entities and resources are never sent to unauthorized clients.
+- [x] Decide and implement which exploration information is private, settlement-shared, or globally shared.
+- [x] Ensure hidden entities and resources are never sent to unauthorized clients.
 - [ ] Add exploration units or mechanics and safe server-authoritative movement commands.
-- [ ] Add territory acquisition, borders, settlement influence, and construction permissions.
-- [ ] Resolve border contention without PvP and provide fair, understandable outcomes.
+- [x] Add territory acquisition, borders, settlement influence, and construction permissions.
+- [x] Resolve border contention without PvP and provide fair, understandable outcomes.
 - [ ] Add research resources, research production, prerequisites, and a data-driven technology graph.
-- [ ] Validate the technology graph for missing references and unintended cycles.
+- [x] Validate the technology graph for missing references and unintended cycles.
 - [ ] Implement unlocks for buildings, recipes, upgrades, exploration, and defenses.
 - [ ] Add era or progression milestones if included in the game design.
 - [ ] Add a technology interface, progression overview, and clear explanations of locked content.
 - [ ] Add a strategic world-map view that requests aggregated data rather than every entity.
-- [ ] Persist exploration, territory, and research state and migrate it safely when content changes.
-- [ ] Add tests for fog-of-war information leaks and technology prerequisites.
+- [x] Persist exploration, territory, and research state and migrate it safely when content changes.
+- [x] Add tests for fog-of-war information leaks and technology prerequisites.
 
 Exit criteria:
 
@@ -279,17 +279,17 @@ Exit criteria:
 
 ## Phase 10: Build the cooperative PvE game
 
-- [ ] Define a threat model connecting player expansion or world time to environmental pressure.
-- [ ] Implement server-controlled enemy or hazard spawning with safe-distance and population rules.
-- [ ] Implement PvE perception, target selection, navigation, attacks, damage, armor or resistance, and death.
-- [ ] Implement defensive buildings, repair, replacement, and warning systems.
-- [ ] Add environmental events that affect production or settlement decisions rather than only dealing damage.
+- [x] Define a threat model connecting player expansion or world time to environmental pressure.
+- [x] Implement server-controlled enemy or hazard spawning with safe-distance and population rules.
+- [x] Implement PvE perception, target selection, navigation, attacks, damage, armor or resistance, and death.
+- [x] Implement defensive buildings, repair, replacement, and warning systems.
+- [x] Add environmental events that affect production or settlement decisions rather than only dealing damage.
 - [ ] Add cooperative objectives or global events that allow multiple settlements to contribute.
 - [ ] Make rewards deterministic, auditable, and safe against duplicate claims.
-- [ ] Explicitly reject player-issued attacks against other players, allied units, or protected settlements.
+- [x] Explicitly reject player-issued attacks against other players, allied units, or protected settlements.
 - [ ] Add anti-griefing rules for blocking paths, surrounding settlements, consuming spawn resources, and dragging enemies onto others.
 - [ ] Define threat behavior for offline players so leaving the game is neither an exploit nor guaranteed destruction.
-- [ ] Add difficulty telemetry and content configuration without embedding balance constants throughout code.
+- [x] Add difficulty telemetry and content configuration without embedding balance constants throughout code.
 - [ ] Add AI behavior tests, combat conservation tests, pathfinding stress tests, and long-running threat simulations.
 
 Exit criteria:
@@ -300,10 +300,10 @@ Exit criteria:
 
 ## Phase 11: Add cooperation, trade, and global-world governance
 
-- [ ] Implement settlement membership and roles with least-privilege defaults.
-- [ ] Define permissions for building, configuring production, withdrawing resources, inviting players, and contributing to projects.
-- [ ] Implement direct resource transfers or trade offers as atomic server transactions.
-- [ ] Prevent duplication through retries, disconnects, concurrent acceptance, and inventory-capacity changes.
+- [x] Implement settlement membership and roles with least-privilege defaults.
+- [x] Define permissions for building, configuring production, withdrawing resources, inviting players, and contributing to projects.
+- [x] Implement direct resource transfers or trade offers as atomic server transactions.
+- [x] Prevent duplication through retries, disconnects, concurrent acceptance, and inventory-capacity changes.
 - [ ] Add shared construction projects and contribution history if included in the first release.
 - [ ] Add player and settlement discovery without exposing private or hidden information.
 - [ ] Add chat or another minimal cooperation channel with rate limits, blocking, reporting, and moderation controls.
@@ -321,16 +321,16 @@ Exit criteria:
 
 ## Phase 12: Complete UX, onboarding, and accessibility
 
-- [ ] Build an onboarding flow that teaches camera movement, gathering, construction, production, logistics, settlement needs, research, and threats in the global world.
+- [x] Build an onboarding flow that teaches camera movement, gathering, construction, production, logistics, settlement needs, research, and threats in the global world.
 - [ ] Ensure onboarding cannot reserve unlimited land or resources through abandoned accounts.
 - [ ] Build searchable construction, recipe, inventory, population, research, defense, and alert interfaces.
-- [ ] Provide actionable explanations for rejected commands and stalled systems.
+- [x] Provide actionable explanations for rejected commands and stalled systems.
 - [ ] Add notification grouping and severity so large settlements do not overwhelm players.
-- [ ] Add keyboard navigation and remappable controls for primary actions.
-- [ ] Avoid relying on color alone and provide readable contrast and scalable UI text.
-- [ ] Add reduced-motion and volume controls where relevant.
-- [ ] Provide loading, reconnecting, maintenance, version-mismatch, and unrecoverable-error screens.
-- [ ] Persist client preferences locally without treating them as authoritative game data.
+- [x] Add keyboard navigation and remappable controls for primary actions.
+- [x] Avoid relying on color alone and provide readable contrast and scalable UI text.
+- [x] Add reduced-motion and volume controls where relevant.
+- [x] Provide loading, reconnecting, maintenance, version-mismatch, and unrecoverable-error screens.
+- [x] Persist client preferences locally without treating them as authoritative game data.
 - [ ] Test supported viewport sizes, zoom levels, input methods, and browsers.
 - [ ] Conduct playtests with new players and revise interfaces based on observed confusion rather than only stated preferences.
 

@@ -1,11 +1,71 @@
+/** Content schemas deliberately use plain data so the same definitions work in builds and on the server. */
+export interface ItemDefinition {
+  readonly id: string;
+  readonly displayName: string;
+  readonly stackLimit: number;
+}
+export interface RecipeDefinition {
+  readonly id: string;
+  readonly input: Readonly<Record<string, number>>;
+  readonly output: Readonly<Record<string, number>>;
+  readonly ticks: number;
+}
+export interface BuildingDefinition {
+  readonly id: string;
+  readonly displayName: string;
+  readonly cost: Readonly<Record<string, number>>;
+  readonly inventoryCapacity: number;
+  readonly populationCapacity: number;
+  readonly maxHealth: number;
+  readonly constructionTicks: number;
+  readonly requiredTechnology: string | null;
+  readonly recipe?: string;
+  readonly serviceSatisfaction?: number;
+  readonly defenseDamage?: number;
+}
+export interface TechnologyDefinition {
+  readonly id: string;
+  readonly displayName: string;
+  readonly prerequisites: readonly string[];
+  readonly cost: Readonly<Record<string, number>>;
+  readonly ticks: number;
+}
+export interface ResourceNodeDefinition {
+  readonly id: string;
+  readonly terrain: 'ore' | 'wood';
+  readonly item: string;
+  readonly yield: number;
+  readonly renewable: boolean;
+}
+export interface ProducerDefinition {
+  readonly buildingId: string;
+  readonly recipeIds: readonly string[];
+  readonly defaultRecipeId: string;
+}
+export interface StorageDefinition {
+  readonly buildingId: string;
+  readonly capacity: number;
+}
+export interface LogisticsLinkDefinition {
+  readonly id: string;
+  readonly acceptedSourceKinds: readonly string[];
+  readonly acceptedTargetKinds: readonly string[];
+  readonly throughputPerTick: number;
+}
+
 export const items = {
   ore: { id: 'ore', displayName: 'Ore', stackLimit: 100 },
   wood: { id: 'wood', displayName: 'Wood', stackLimit: 100 },
   ingot: { id: 'ingot', displayName: 'Ingot', stackLimit: 100 },
   tool: { id: 'tool', displayName: 'Tool', stackLimit: 100 },
-} as const;
+} as const satisfies Readonly<Record<string, ItemDefinition>>;
 
 export type ItemId = keyof typeof items;
+
+export const resources = {
+  ore: { id: 'ore', terrain: 'ore', item: 'ore', yield: 10, renewable: false },
+  wood: { id: 'wood', terrain: 'wood', item: 'wood', yield: 10, renewable: false },
+} as const satisfies Readonly<Record<string, ResourceNodeDefinition>>;
 
 export const recipes = {
   smeltOre: { id: 'smelt-ore', input: { ore: 1 }, output: { ingot: 1 }, ticks: 3 },
@@ -15,7 +75,13 @@ export const recipes = {
     output: { tool: 1 },
     ticks: 5,
   },
-} as const;
+  forgeToolWithoutWood: {
+    id: 'forge-tool-without-wood',
+    input: { ingot: 2 },
+    output: { tool: 1 },
+    ticks: 4,
+  },
+} as const satisfies Readonly<Record<string, RecipeDefinition>>;
 
 export const buildings = {
   'settlement-center': {
@@ -92,7 +158,29 @@ export const buildings = {
     defenseDamage: 1,
     requiredTechnology: 'metallurgy',
   },
-} as const;
+} as const satisfies Readonly<Record<string, BuildingDefinition>>;
+
+export const producers = {
+  smelter: { buildingId: 'smelter', recipeIds: ['smelt-ore'], defaultRecipeId: 'smelt-ore' },
+  workshop: {
+    buildingId: 'workshop',
+    recipeIds: ['forge-tool', 'forge-tool-without-wood'],
+    defaultRecipeId: 'forge-tool',
+  },
+} as const satisfies Readonly<Record<string, ProducerDefinition>>;
+
+export const storage = {
+  storage: { buildingId: 'storage', capacity: 200 },
+} as const satisfies Readonly<Record<string, StorageDefinition>>;
+
+export const logisticsLinks = {
+  internalInventory: {
+    id: 'internal-inventory',
+    acceptedSourceKinds: ['storage', 'smelter', 'workshop'],
+    acceptedTargetKinds: ['smelter', 'workshop'],
+    throughputPerTick: 1,
+  },
+} as const satisfies Readonly<Record<string, LogisticsLinkDefinition>>;
 
 export const technologies = {
   metallurgy: {
@@ -109,7 +197,7 @@ export const technologies = {
     cost: { tool: 2 },
     ticks: 20,
   },
-} as const;
+} as const satisfies Readonly<Record<string, TechnologyDefinition>>;
 
 export const threats = {
   'raider-swarm': {
@@ -199,6 +287,12 @@ export const validateContent = (): string[] => {
       if (!(item in items)) errors.push(`${recipe.id} references unknown item ${item}`);
     if (recipe.ticks < 1) errors.push(`${recipe.id} must take at least one tick`);
   }
+  for (const resource of Object.values(resources)) {
+    if (!(resource.item in items))
+      errors.push(`${resource.id} references unknown item ${resource.item}`);
+    if (!Number.isInteger(resource.yield) || resource.yield < 1)
+      errors.push(`${resource.id} has an invalid yield`);
+  }
   errors.push(...validateRecipeGraph(recipes));
   for (const building of Object.values(buildings)) {
     if (building.inventoryCapacity < 0 || building.populationCapacity < 0)
@@ -215,6 +309,28 @@ export const validateContent = (): string[] => {
       !Object.values(recipes).some((recipe) => recipe.id === building.recipe)
     )
       errors.push(`${building.id} references unknown recipe ${building.recipe}`);
+  for (const producer of Object.values(producers)) {
+    if (!buildings[producer.buildingId as keyof typeof buildings])
+      errors.push(`producer references unknown building ${producer.buildingId}`);
+    if (!(producer.recipeIds as readonly string[]).includes(producer.defaultRecipeId))
+      errors.push(`producer ${producer.buildingId} has a default recipe outside its options`);
+    for (const recipeId of producer.recipeIds)
+      if (!Object.values(recipes).some((recipe) => recipe.id === recipeId))
+        errors.push(`producer references unknown recipe ${recipeId}`);
+  }
+  for (const entry of Object.values(storage)) {
+    const building = buildings[entry.buildingId as keyof typeof buildings];
+    if (!building) errors.push(`storage references unknown building ${entry.buildingId}`);
+    else if (building.inventoryCapacity !== entry.capacity)
+      errors.push(`storage ${entry.buildingId} capacity does not match its building`);
+  }
+  for (const link of Object.values(logisticsLinks)) {
+    if (!Number.isInteger(link.throughputPerTick) || link.throughputPerTick < 1)
+      errors.push(`logistics link ${link.id} has invalid throughput`);
+    for (const kind of [...link.acceptedSourceKinds, ...link.acceptedTargetKinds])
+      if (!buildings[kind as keyof typeof buildings])
+        errors.push(`logistics link ${link.id} references unknown building ${kind}`);
+  }
   for (const technology of Object.values(technologies)) {
     if (technology.ticks < 1) errors.push(`${technology.id} must take at least one tick`);
     for (const [item, amount] of Object.entries(technology.cost)) {

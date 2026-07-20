@@ -257,10 +257,10 @@ Exit criteria:
 
 ## Phase 9: Implement exploration and civilization progression
 
-- [ ] Add unexplored, explored, and currently visible states for world chunks or tiles.
+- [x] Add unexplored, explored, and currently visible states for world chunks or tiles.
 - [x] Decide and implement which exploration information is private, settlement-shared, or globally shared.
 - [x] Ensure hidden entities and resources are never sent to unauthorized clients.
-- [ ] Add exploration units or mechanics and safe server-authoritative movement commands.
+- [x] Add exploration units or mechanics and safe server-authoritative movement commands.
 - [x] Add territory acquisition, borders, settlement influence, and construction permissions.
 - [x] Resolve border contention without PvP and provide fair, understandable outcomes.
 - [ ] Add research resources, research production, prerequisites, and a data-driven technology graph.

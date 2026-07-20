@@ -53,6 +53,8 @@ export interface PlayerState {
   inventory: Inventory;
   population: Population;
   exploredChunks: Record<string, true>;
+  /** Current line-of-sight from active settlement assets; absent on pre-v20 snapshots. */
+  visibleChunks?: Record<string, true>;
   territoryCells: Record<string, true>;
   research: ResearchState;
   lastSequence: number;
@@ -94,6 +96,13 @@ export interface Threat {
   x: number;
   y: number;
 }
+export interface Scout {
+  id: string;
+  ownerId: PlayerId;
+  x: number;
+  y: number;
+  target?: { x: number; y: number };
+}
 export interface ResourceTransfer {
   id: string;
   fromPlayerId: PlayerId;
@@ -134,6 +143,7 @@ export interface WorldState {
   players: Record<string, PlayerState>;
   buildings: Record<string, Building>;
   threats: Record<string, Threat>;
+  scouts?: Record<string, Scout>;
   transfers: ResourceTransfer[];
   settlements: Record<string, Settlement>;
   logisticsLinks: Record<string, LogisticsLink>;
@@ -380,6 +390,7 @@ export const createWorld = (seed = 1): WorldState => ({
   players: {},
   buildings: {},
   threats: {},
+  scouts: {},
   transfers: [],
   settlements: {},
   logisticsLinks: {},
@@ -397,6 +408,7 @@ export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
     inventory: { ore: 0, wood: 5, ingot: 0, tool: 0 },
     population: { total: 2, capacity: 2, satisfaction: 100, employed: 0, unemployed: 2 },
     exploredChunks: { [chunkKey(plot.x, plot.y)]: true },
+    visibleChunks: { [chunkKey(plot.x, plot.y)]: true },
     territoryCells: plotTerritory(plot),
     research: {
       activeTechnology: null,
@@ -431,6 +443,13 @@ export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
     recipeId: null,
     productionState: 'idle',
   };
+  state.scouts ??= {};
+  state.scouts[`scout-${id}`] = {
+    id: `scout-${id}`,
+    ownerId: typedId,
+    x: plot.x + Math.floor(plot.size / 2),
+    y: plot.y + Math.floor(plot.size / 2),
+  };
   return [{ type: 'playerJoined', playerId: typedId }];
 };
 
@@ -460,6 +479,20 @@ const isClaimedByOther = (state: WorldState, playerId: PlayerId, key: string) =>
 const canBuildAt = (state: WorldState, player: PlayerState, x: number, y: number) =>
   (inPlot(player.plot, x, y) || player.territoryCells[territoryKey(x, y)]) &&
   !isClaimedByOther(state, player.id, territoryKey(x, y));
+const visibleChunksFor = (state: WorldState, player: PlayerState): Record<string, true> => {
+  const visible: Record<string, true> = { [chunkKey(player.plot.x, player.plot.y)]: true };
+  for (const building of Object.values(state.buildings)) {
+    if (building.ownerId !== player.id || building.health <= 0) continue;
+    const chunkX = Math.floor(building.x / 16);
+    const chunkY = Math.floor(building.y / 16);
+    for (let offsetX = -1; offsetX <= 1; offsetX += 1)
+      for (let offsetY = -1; offsetY <= 1; offsetY += 1)
+        visible[chunkKey(chunkX * 16 + offsetX * 16, chunkY * 16 + offsetY * 16)] = true;
+  }
+  for (const scout of Object.values(state.scouts ?? {}))
+    if (scout.ownerId === player.id) visible[chunkKey(scout.x, scout.y)] = true;
+  return visible;
+};
 const roleWeight: Record<SettlementRole, number> = {
   member: 0,
   builder: 1,
@@ -545,6 +578,17 @@ export const applyCommand = (
   if (command.type === 'explore') {
     if (distance(player.plot, command.x, command.y) > 64) return reject('out-of-range');
     player.exploredChunks[chunkKey(command.x, command.y)] = true;
+    return accept([]);
+  }
+  if (command.type === 'moveScout') {
+    const scout = state.scouts?.[command.scoutId];
+    if (!scout) return reject('unknown-scout');
+    if (scout.ownerId !== player.id) return reject('unauthorized');
+    if (Math.abs(scout.x - command.x) + Math.abs(scout.y - command.y) > 64)
+      return reject('out-of-range');
+    if (terrainAt(state.seed, command.x, command.y) === 'water')
+      return reject('tile-not-buildable');
+    scout.target = { x: command.x, y: command.y };
     return accept([]);
   }
   if (command.type === 'claimTerritory') {
@@ -1003,7 +1047,42 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
     );
     for (const producer of staffed) staffedSmelters.add(producer.id);
     for (const project of constructionWorkers) staffedConstruction.add(project.id);
+    player.visibleChunks = visibleChunksFor(state, player);
   }
+  for (const scout of Object.values(state.scouts ?? {}).sort((left, right) =>
+    left.id.localeCompare(right.id),
+  )) {
+    const target = scout.target;
+    if (!target) continue;
+    const path = findPath({
+      start: scout,
+      goal: target,
+      maxVisited: 64,
+      bounds: {
+        minX: Math.min(scout.x, target.x) - 4,
+        maxX: Math.max(scout.x, target.x) + 4,
+        minY: Math.min(scout.y, target.y) - 4,
+        maxY: Math.max(scout.y, target.y) + 4,
+      },
+      isPassable: (tile) =>
+        (tile.x === target.x && tile.y === target.y) ||
+        (terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
+          !Object.values(state.buildings).some(
+            (building) => building.x === tile.x && building.y === tile.y,
+          )),
+    });
+    const next = path.status === 'found' ? path.path[1] : undefined;
+    if (next) {
+      scout.x = next.x;
+      scout.y = next.y;
+    }
+    if ((scout.x === target.x && scout.y === target.y) || path.status !== 'found')
+      delete scout.target;
+    const owner = state.players[scout.ownerId];
+    if (owner) owner.exploredChunks[chunkKey(scout.x, scout.y)] = true;
+  }
+  for (const player of Object.values(state.players))
+    player.visibleChunks = visibleChunksFor(state, player);
   endPhase();
   // Phase 3: construction-and-production.
   endPhase = beginPhase('construction-and-production');
@@ -1831,6 +1910,14 @@ export const inspectWorld = (state: WorldState): string[] => {
       hasInvalidInventory(player.inventory)
     )
       errors.push(`player ${id} has invalid inventory`);
+    if (
+      player.visibleChunks &&
+      Object.keys(player.visibleChunks).some((key) => {
+        const [xText, yText] = key.split(':');
+        return !Number.isSafeInteger(Number(xText)) || !Number.isSafeInteger(Number(yText));
+      })
+    )
+      errors.push(`player ${id} has invalid visible chunks`);
   }
   for (const [id, building] of Object.entries(state.buildings)) {
     registerEntity(building.id, 'building');

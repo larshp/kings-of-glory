@@ -95,6 +95,15 @@ export type Command =
       readonly id: string;
       readonly playerId: PlayerId;
       readonly sequence: number;
+      readonly type: 'moveScout';
+      readonly scoutId: string;
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
       readonly type: 'claimTerritory';
       readonly x: number;
       readonly y: number;
@@ -262,6 +271,7 @@ export type RejectionCode =
   | 'insufficient-ore'
   | 'insufficient-resources'
   | 'unknown-building'
+  | 'unknown-scout'
   | 'not-owner'
   | 'building-destroyed'
   | 'persistence-failed'

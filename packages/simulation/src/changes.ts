@@ -1,5 +1,5 @@
 import { chunkKeyFor } from './spatial.js';
-import type { Building, PlayerState, Threat, WorldState } from './world.js';
+import type { Building, PlayerState, Scout, Threat, WorldState } from './world.js';
 
 /**
  * A serializable summary of state that changed between two completed simulation
@@ -11,6 +11,7 @@ export interface WorldChangeSet {
   readonly players: readonly string[];
   readonly buildings: readonly string[];
   readonly threats: readonly string[];
+  readonly scouts: readonly string[];
   readonly settlements: readonly string[];
   readonly logisticsLinks: readonly string[];
   readonly minedTiles: readonly string[];
@@ -53,10 +54,12 @@ const changedPlayerChunks = (
     if (before) {
       chunks.add(chunkKeyFor(before.plot.x, before.plot.y));
       for (const chunk of Object.keys(before.exploredChunks)) chunks.add(chunk);
+      for (const chunk of Object.keys(before.visibleChunks ?? {})) chunks.add(chunk);
     }
     if (after) {
       chunks.add(chunkKeyFor(after.plot.x, after.plot.y));
       for (const chunk of Object.keys(after.exploredChunks)) chunks.add(chunk);
+      for (const chunk of Object.keys(after.visibleChunks ?? {})) chunks.add(chunk);
     }
   }
   return chunks;
@@ -82,12 +85,14 @@ export const diffWorld = (previous: WorldState, next: WorldState): WorldChangeSe
   const players = changedKeys(previous.players, next.players);
   const buildings = changedKeys(previous.buildings, next.buildings);
   const threats = changedKeys(previous.threats, next.threats);
+  const scouts = changedKeys(previous.scouts ?? {}, next.scouts ?? {});
   const settlements = changedKeys(previous.settlements, next.settlements);
   const logisticsLinks = changedKeys(previous.logisticsLinks, next.logisticsLinks);
   const minedTiles = changedKeys(previous.minedTiles, next.minedTiles);
   const chunks = new Set<string>([
     ...entityChunks<Building>(previous.buildings, next.buildings, buildings),
     ...entityChunks<Threat>(previous.threats, next.threats, threats),
+    ...entityChunks<Scout>(previous.scouts ?? {}, next.scouts ?? {}, scouts),
     ...changedPlayerChunks(previous.players, next.players, players),
     ...minedTileChunks(minedTiles),
   ]);
@@ -95,6 +100,7 @@ export const diffWorld = (previous: WorldState, next: WorldState): WorldChangeSe
     players,
     buildings,
     threats,
+    scouts,
     settlements,
     logisticsLinks,
     minedTiles,

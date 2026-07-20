@@ -332,6 +332,12 @@ export class GlobalWorldHost {
     }
     for (const [id, threat] of Object.entries(state.threats))
       if (!state.buildings[threat.targetBuildingId]) delete state.threats[id];
+    state.scouts = Object.fromEntries(
+      Object.entries(state.scouts ?? {}).filter(
+        ([, scout]) =>
+          scout.ownerId === playerId || relevantChunks.has(chunkKeyFor(scout.x, scout.y)),
+      ),
+    );
     state.logisticsLinks = Object.fromEntries(
       Object.entries(state.logisticsLinks).filter(
         ([, link]) =>

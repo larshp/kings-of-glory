@@ -710,6 +710,64 @@ describe('world simulation', () => {
     ).toBe(true);
   });
 
+  it('tracks historical exploration separately from currently visible settlement chunks', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const player = world.players['player-a']!;
+    expect(player.exploredChunks['3:0']).toBeUndefined();
+    expect(player.visibleChunks?.['0:0']).toBe(true);
+    expect(
+      applyCommand(world, {
+        id: 'survey-distant-chunk',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'explore',
+        x: 48,
+        y: 0,
+      }).result.accepted,
+    ).toBe(true);
+    advanceTick(world);
+    expect(player.exploredChunks['3:0']).toBe(true);
+    expect(player.visibleChunks?.['3:0']).toBeUndefined();
+    expect(player.visibleChunks?.['1:0']).toBe(true);
+  });
+
+  it('moves an owned scout authoritatively and reveals the chunk it reaches', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    joinPlayer(world, 'player-b');
+    const scout = world.scouts?.['scout-player-a'];
+    if (!scout) throw new Error('Expected player scout.');
+    const target = { x: scout.x + 4, y: scout.y };
+    expect(
+      applyCommand(world, {
+        id: 'other-player-scout',
+        playerId: 'player-b' as never,
+        sequence: 1,
+        type: 'moveScout',
+        scoutId: scout.id,
+        ...target,
+      }).result,
+    ).toMatchObject({ accepted: false, code: 'unauthorized' });
+    expect(
+      applyCommand(world, {
+        id: 'move-own-scout',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'moveScout',
+        scoutId: scout.id,
+        ...target,
+      }).result.accepted,
+    ).toBe(true);
+    for (let tick = 0; tick < 8; tick += 1) advanceTick(world);
+    expect(scout).toMatchObject(target);
+    expect(
+      world.players['player-a']?.exploredChunks[
+        `${Math.floor(target.x / 16)}:${Math.floor(target.y / 16)}`
+      ],
+    ).toBe(true);
+  });
+
   it('unlocks a workshop that deterministically turns ingots and wood into tools', () => {
     const world = createWorld();
     joinPlayer(world, 'player-a');

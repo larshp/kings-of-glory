@@ -103,6 +103,10 @@ const isCommand = (value: unknown): value is Command => {
     value.type === 'claimTerritory'
   )
     return Number.isSafeInteger(value.x) && Number.isSafeInteger(value.y);
+  if (value.type === 'moveScout')
+    return (
+      isIdentifier(value.scoutId) && Number.isSafeInteger(value.x) && Number.isSafeInteger(value.y)
+    );
   if (value.type === 'research')
     return value.technologyId === 'metallurgy' || value.technologyId === 'territorial-charter';
   if (value.type === 'transferToPlayer')

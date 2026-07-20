@@ -411,6 +411,8 @@ export const App = () => {
         return target && roleForBuilding(target);
       })
     : [];
+  const exploredChunkCount = Object.keys(player?.exploredChunks ?? {}).length;
+  const visibleChunkCount = Object.keys(player?.visibleChunks ?? {}).length;
   const transfers = state?.transfers ?? [];
   const personalSettlement = state?.settlements[`settlement-${playerId}`];
   const logisticsLinks = Object.values(state?.logisticsLinks ?? {});
@@ -713,6 +715,9 @@ export const App = () => {
             </p>
             <p>
               Jobs: {player.population.employed} employed · {player.population.unemployed} available
+            </p>
+            <p>
+              Exploration: {exploredChunkCount} explored · {visibleChunkCount} currently visible
             </p>
             {player.population.capacity <= player.population.total && (
               <p className="alert">

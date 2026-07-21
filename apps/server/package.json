@@ -1,0 +1,28 @@
+{
+  "name": "@kings/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "inspect": "node dist/inspect.js",
+    "load": "node dist/load.js",
+    "profile": "node dist/profile.js",
+    "soak": "node dist/soak.js",
+    "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "test": "node ../../node_modules/vitest/vitest.mjs run --passWithNoTests",
+    "typecheck": "node ../../node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
+    "lint": "node ../../node_modules/eslint/bin/eslint.js src"
+  },
+  "dependencies": {
+    "@kings/content": "workspace:*",
+    "@kings/protocol": "workspace:*",
+    "@kings/server-runtime": "workspace:*",
+    "@kings/simulation": "workspace:*",
+    "ws": "^8.18.2"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.14",
+    "tsx": "^4.19.3"
+  }
+}

@@ -1438,9 +1438,9 @@ describe('world simulation', () => {
     smelter.inventory.ore = smelter.inventoryCapacity - 1;
     normalSource.inventory.ore = 1;
     urgentSource.inventory.ore = 1;
-    for (const [sequence, sourceBuildingId, priority] of [
-      [4, normalSource.id, 1],
-      [5, urgentSource.id, 3],
+    for (const [sequence, sourceBuildingId] of [
+      [4, normalSource.id],
+      [5, urgentSource.id],
     ] as const)
       expect(
         applyCommand(world, {

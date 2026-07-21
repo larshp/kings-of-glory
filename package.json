@@ -6,7 +6,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "dev": "node scripts/run-pnpm.mjs --parallel --filter @kings/client --filter @kings/server dev",
+    "dev": "node scripts/dev.mjs",
     "build": "node scripts/run-pnpm.mjs -r build",
     "test": "node scripts/run-pnpm.mjs -r test",
     "typecheck": "node scripts/run-pnpm.mjs build",

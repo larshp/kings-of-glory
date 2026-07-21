@@ -487,7 +487,7 @@ describe('world simulation', () => {
     for (const player of Object.values(legacy.players)) delete player.inventory.tool;
     for (const building of Object.values(legacy.buildings)) delete building.inventory.tool;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(19);
+    expect(migrated.schemaVersion).toBe(20);
     expect(migrated.players['player-a']?.inventory.tool).toBe(0);
     expect(migrated.buildings['center-player-a']?.inventory.tool).toBe(0);
   });
@@ -497,7 +497,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 14;
     delete legacy.randomState;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(19);
+    expect(migrated.schemaVersion).toBe(20);
     expect(migrated.randomState).toBeGreaterThan(0);
     expect(inspectWorld(migrated)).toEqual([]);
   });
@@ -548,7 +548,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 16;
     for (const building of Object.values(legacy.buildings)) delete building.recipeId;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(19);
+    expect(migrated.schemaVersion).toBe(20);
     expect(migrated.buildings['center-player-a']?.recipeId).toBeNull();
     expect(
       Object.values(migrated.buildings).find((building) => building.kind === 'workshop')?.recipeId,
@@ -586,7 +586,7 @@ describe('world simulation', () => {
       priority: 1,
     };
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(19);
+    expect(migrated.schemaVersion).toBe(20);
     expect(migrated.buildings['center-player-a']?.productionState).toBe('idle');
     expect(migrated.logisticsLinks.legacy).toMatchObject({
       throughputPerTick: 1,
@@ -604,7 +604,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 18;
     for (const building of Object.values(legacy.buildings)) delete building.constructionMaterials;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(19);
+    expect(migrated.schemaVersion).toBe(20);
     expect(migrated.buildings['center-player-a']?.constructionMaterials).toEqual({
       ore: 0,
       wood: 0,
@@ -624,7 +624,7 @@ describe('world simulation', () => {
     legacy.minedTiles = { '12:0': 3 };
     const node = nearestOreTile(legacy.seed, 12, 0, 16)!;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(19);
+    expect(migrated.schemaVersion).toBe(20);
     expect(migrated.minedTiles[`${node.x}:${node.y}`]).toBe(3);
   });
 
@@ -680,31 +680,43 @@ describe('world simulation', () => {
       }).result.accepted,
     ).toBe(true);
     for (let index = 0; index < 20; index += 1) advanceTick(world);
+    // The starting settlement reveals its own footprint and gather range, so
+    // extend to that explored frontier first, then claim just beyond it.
     expect(
       applyCommand(world, {
-        id: 'claim-before-explore',
+        id: 'claim-frontier',
         playerId: 'player-a' as never,
         sequence: 3,
         type: 'claimTerritory',
         x: 24,
+        y: 0,
+      }).result.accepted,
+    ).toBe(true);
+    expect(
+      applyCommand(world, {
+        id: 'claim-before-explore',
+        playerId: 'player-a' as never,
+        sequence: 4,
+        type: 'claimTerritory',
+        x: 32,
         y: 0,
       }).result,
     ).toMatchObject({ code: 'not-explored' });
     applyCommand(world, {
       id: 'explore',
       playerId: 'player-a' as never,
-      sequence: 3,
+      sequence: 5,
       type: 'explore',
-      x: 24,
+      x: 32,
       y: 0,
     });
     expect(
       applyCommand(world, {
         id: 'claim',
         playerId: 'player-a' as never,
-        sequence: 4,
+        sequence: 6,
         type: 'claimTerritory',
-        x: 24,
+        x: 32,
         y: 0,
       }).result.accepted,
     ).toBe(true);
@@ -824,7 +836,7 @@ describe('world simulation', () => {
   });
 
   it('spawns PvE raids against assets and lets watchtowers defeat them automatically', () => {
-    const world = createWorld();
+    const world = createWorld(1, false);
     joinPlayer(world, 'player-a');
     expect(
       applyCommand(world, {
@@ -868,6 +880,27 @@ describe('world simulation', () => {
       }).result.accepted,
     ).toBe(true);
     for (let index = 0; index < 150; index += 1) advanceTick(world);
+    expect(Object.keys(world.threats)).toHaveLength(0);
+    expect(
+      Object.values(world.buildings).find((building) => building.kind === 'smelter')?.health,
+    ).toBeGreaterThan(0);
+  });
+
+  it('defaults to a peaceful world where no PvE raids spawn against valid targets', () => {
+    expect(createWorld().peaceful).toBe(true);
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    expect(
+      applyCommand(world, {
+        id: 'smelter',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'placeSmelter',
+        x: 12,
+        y: 0,
+      }).result.accepted,
+    ).toBe(true);
+    for (let index = 0; index < 200; index += 1) advanceTick(world);
     expect(Object.keys(world.threats)).toHaveLength(0);
     expect(
       Object.values(world.buildings).find((building) => building.kind === 'smelter')?.health,
@@ -940,7 +973,7 @@ describe('world simulation', () => {
   });
 
   it('navigates raiders toward their target before they can deal damage', () => {
-    const world = createWorld();
+    const world = createWorld(1, false);
     joinPlayer(world, 'player-a');
     applyCommand(world, {
       id: 'smelter',
@@ -1855,7 +1888,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 7;
     delete legacy.settlements;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(19);
+    expect(migrated.schemaVersion).toBe(20);
     expect(migrated.settlements['settlement-player-a']?.members['player-a']).toBe('owner');
   });
 

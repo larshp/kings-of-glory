@@ -4,6 +4,7 @@ export interface ServerEnvironment {
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   persistence: 'memory' | 'postgres';
   production: boolean;
+  peaceful: boolean;
   allowedOrigins: readonly string[];
   databaseUrl?: string;
 }
@@ -13,6 +14,7 @@ export const parseEnvironment = (env: Record<string, string | undefined>): Serve
   const logLevel = env.LOG_LEVEL ?? 'info';
   const persistence = env.PERSISTENCE ?? 'memory';
   const production = env.NODE_ENV === 'production';
+  const peaceful = env.PEACEFUL !== 'false';
   const allowedOrigins = (env.ALLOWED_ORIGINS ?? '')
     .split(',')
     .map((origin) => origin.trim())
@@ -34,6 +36,7 @@ export const parseEnvironment = (env: Record<string, string | undefined>): Serve
     logLevel: logLevel as ServerEnvironment['logLevel'],
     persistence,
     production,
+    peaceful,
     allowedOrigins,
     ...(env.DATABASE_URL ? { databaseUrl: env.DATABASE_URL } : {}),
   };

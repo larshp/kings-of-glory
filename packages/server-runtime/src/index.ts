@@ -68,13 +68,19 @@ export class GlobalWorldHost {
   #deltaStateMessages = 0;
   #deltaStateBytes = 0;
   #lastStateBuildDurationMs = 0;
+  // Serializes every mutation of #world. Commands snapshot the world, await
+  // persistence, then commit the snapshot back; without a queue, commands (and
+  // ticks) that overlap that await would each start from the same pre-commit
+  // world and clobber one another, silently dropping accepted commands.
+  #worldQueue: Promise<void> = Promise.resolve();
 
   constructor(
     seed = 1,
     private readonly persistence: WorldPersistence = new MemoryWorldPersistence(),
     private readonly checkpointIntervalTicks = 300,
+    peaceful = true,
   ) {
-    this.#world = createWorld(seed);
+    this.#world = createWorld(seed, peaceful);
     this.#checkpointBaseline = snapshot(this.#world);
   }
 
@@ -159,7 +165,22 @@ export class GlobalWorldHost {
       this.sendChunkSnapshot(connection, connectionState.playerId, addedChunks);
   }
 
-  async command(
+  /** Runs world mutations one at a time so overlapping awaits cannot clobber #world. */
+  private serialize<T>(task: () => Promise<T> | T): Promise<T> {
+    const run = this.#worldQueue.then(() => task());
+    // Keep the chain alive (and unrejected) so one failed task cannot wedge the rest.
+    this.#worldQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  command(connection: Connection, command: Parameters<typeof applyCommand>[1]): Promise<void> {
+    return this.serialize(() => this.runCommand(connection, command));
+  }
+
+  private async runCommand(
     connection: Connection,
     command: Parameters<typeof applyCommand>[1],
   ): Promise<void> {
@@ -206,8 +227,10 @@ export class GlobalWorldHost {
   }
 
   async tick(): Promise<void> {
-    advanceTick(this.#world);
-    this.broadcastState();
+    await this.serialize(() => {
+      advanceTick(this.#world);
+      this.broadcastState();
+    });
     if (this.#world.tick % this.checkpointIntervalTicks === 0 && !this.#checkpointInProgress) {
       this.#checkpointInProgress = true;
       try {

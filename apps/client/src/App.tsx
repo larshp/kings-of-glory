@@ -42,6 +42,7 @@ const rejectionMessage = (code: string | undefined) => {
   const messages: Record<string, string> = {
     'invalid-coordinate': 'That map coordinate is invalid.',
     'out-of-range': 'That tile is too far from your settlement.',
+    'resource-depleted': 'That deposit is exhausted. Try another resource tile.',
     'outside-plot': 'Build inside your claimed territory.',
     occupied: 'Another building already occupies that tile.',
     'insufficient-wood': 'Gather more wood before starting this construction.',
@@ -101,6 +102,7 @@ export const App = () => {
   const stateVersion = useRef<number | undefined>(undefined);
   const clientWorldState = useRef<ClientWorldState | undefined>(undefined);
   const resyncRequested = useRef(false);
+  const pendingCommands = useRef(new Map<string, string>());
   const [state, setState] = useState<ClientWorldState>();
   const [status, setStatus] = useState('Connecting');
   const [notice, setNotice] = useState('');
@@ -230,7 +232,17 @@ export const App = () => {
           connection.send(JSON.stringify({ type: 'resync', version: stateVersion.current ?? 0 }));
           messageCount.current.sent += 1;
         }
-        if (message.type === 'commandRejected') setNotice(rejectionMessage(message.result.code));
+        if (message.type === 'commandAcknowledged') {
+          const successMessage = pendingCommands.current.get(message.result.commandId);
+          if (successMessage) {
+            setNotice(successMessage);
+            pendingCommands.current.delete(message.result.commandId);
+          }
+        }
+        if (message.type === 'commandRejected') {
+          pendingCommands.current.delete(message.result.commandId);
+          setNotice(rejectionMessage(message.result.code));
+        }
         if (message.type === 'maintenance') {
           reconnectAllowed = false;
           setStatus('Maintenance');
@@ -313,12 +325,14 @@ export const App = () => {
     setPreferences(updated);
     setNotice(`Camera control updated to ${displayKey(event.code)}.`);
   };
-  const send = (command: Record<string, unknown>) => {
+  const send = (command: Record<string, unknown>, successMessage?: string) => {
     if (socket.current?.readyState !== WebSocket.OPEN) return;
+    const id = crypto.randomUUID();
+    if (successMessage) pendingCommands.current.set(id, successMessage);
     socket.current.send(
       JSON.stringify({
         type: 'command',
-        command: { id: crypto.randomUUID(), playerId, sequence: ++sequence.current, ...command },
+        command: { id, playerId, sequence: ++sequence.current, ...command },
       }),
     );
     messageCount.current.sent += 1;
@@ -800,7 +814,12 @@ export const App = () => {
             </section>
             <button
               disabled={selectedResource !== 'ore' && selectedResource !== 'wood'}
-              onClick={() => send({ type: 'gather', ...actionTile })}
+              onClick={() =>
+                send(
+                  { type: 'gather', ...actionTile },
+                  selectedResource === 'wood' ? 'Gathered wood.' : 'Gathered ore.',
+                )
+              }
             >
               Gather{' '}
               {selectedResource === 'ore'

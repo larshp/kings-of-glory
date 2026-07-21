@@ -78,8 +78,9 @@ export class GlobalWorldHost {
     seed = 1,
     private readonly persistence: WorldPersistence = new MemoryWorldPersistence(),
     private readonly checkpointIntervalTicks = 300,
+    peaceful = true,
   ) {
-    this.#world = createWorld(seed);
+    this.#world = createWorld(seed, peaceful);
     this.#checkpointBaseline = snapshot(this.#world);
   }
 

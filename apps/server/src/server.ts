@@ -35,7 +35,12 @@ export const createGameServer = async (
   if (contentErrors.length > 0)
     throw new Error(`Invalid game content: ${contentErrors.join('; ')}`);
 
-  const host = new GlobalWorldHost(environment.worldSeed, persistence);
+  const host = new GlobalWorldHost(
+    environment.worldSeed,
+    persistence,
+    undefined,
+    environment.peaceful,
+  );
   await host.restore();
   let stopping = false;
   let lastTickDurationMs = 0;

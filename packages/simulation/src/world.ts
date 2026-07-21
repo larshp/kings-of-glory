@@ -135,8 +135,10 @@ export interface LogisticsLink {
     | 'constructing';
 }
 export interface WorldState {
-  schemaVersion: 19;
+  schemaVersion: 20;
   seed: number;
+  /** When true, no PvE threats spawn. Peaceful worlds stay threat-free. */
+  peaceful: boolean;
   /** Server-only deterministic PRNG state. Never expose this to clients. */
   randomState: RandomState;
   tick: number;
@@ -383,9 +385,10 @@ const plotFor = (state: WorldState): Plot => {
   }
 };
 
-export const createWorld = (seed = 1): WorldState => ({
-  schemaVersion: 19,
+export const createWorld = (seed = 1, peaceful = true): WorldState => ({
+  schemaVersion: 20,
   seed,
+  peaceful,
   randomState: createRandomState(seed),
   tick: 0,
   players: {},
@@ -1251,7 +1254,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
   // Phase 6: threat-spawning.
   endPhase = beginPhase('threat-spawning');
   const raider = threatDefinitions['raider-swarm'];
-  if (state.tick % raider.spawnIntervalTicks === 0) {
+  if (!state.peaceful && state.tick % raider.spawnIntervalTicks === 0) {
     const targets = Object.values(state.buildings)
       .filter(
         (building) =>
@@ -1452,7 +1455,7 @@ interface Version9Player extends Omit<PlayerState, 'population'> {
 }
 type Version9Building = Omit<Building, 'jobPriority'>;
 type LegacyThreat = Omit<Threat, 'x' | 'y'>;
-type LegacyWorldBase = Omit<WorldState, 'schemaVersion' | 'randomState'>;
+type LegacyWorldBase = Omit<WorldState, 'schemaVersion' | 'randomState' | 'peaceful'>;
 interface Version14World extends LegacyWorldBase {
   schemaVersion: 14;
 }
@@ -1464,7 +1467,7 @@ type LegacyBuildingWithoutRecipe = Omit<
 >;
 interface Version16World extends Omit<
   WorldState,
-  'schemaVersion' | 'buildings' | 'logisticsLinks'
+  'schemaVersion' | 'buildings' | 'logisticsLinks' | 'peaceful'
 > {
   schemaVersion: 16;
   buildings: Record<string, LegacyBuildingWithoutRecipe>;
@@ -1476,15 +1479,18 @@ interface Version15World extends Omit<Version16World, 'schemaVersion' | 'logisti
 }
 interface Version17World extends Omit<
   WorldState,
-  'schemaVersion' | 'buildings' | 'logisticsLinks'
+  'schemaVersion' | 'buildings' | 'logisticsLinks' | 'peaceful'
 > {
   schemaVersion: 17;
   buildings: Record<string, Omit<Building, 'productionState' | 'constructionMaterials'>>;
   logisticsLinks: Record<string, PreFlowLogisticsLink>;
 }
-interface Version18World extends Omit<WorldState, 'schemaVersion' | 'buildings'> {
+interface Version18World extends Omit<WorldState, 'schemaVersion' | 'buildings' | 'peaceful'> {
   schemaVersion: 18;
   buildings: Record<string, Omit<Building, 'constructionMaterials'>>;
+}
+interface Version19World extends Omit<WorldState, 'schemaVersion' | 'peaceful'> {
+  schemaVersion: 19;
 }
 interface Version10World extends Omit<LegacyWorldBase, 'threats'> {
   schemaVersion: 10;
@@ -1626,14 +1632,21 @@ const withFlowControls = <T extends PreFlowLogisticsLink>(
   ) as Record<string, LogisticsLink>;
 const migrateVersion17 = (state: Version17World): WorldState => ({
   ...state,
-  schemaVersion: 19,
+  schemaVersion: 20,
+  peaceful: true,
   buildings: withEmptyConstructionMaterials(withProductionStates(state.buildings)),
   logisticsLinks: withFlowControls(state.logisticsLinks),
 });
 const migrateVersion18 = (state: Version18World): WorldState => ({
   ...state,
-  schemaVersion: 19,
+  schemaVersion: 20,
+  peaceful: true,
   buildings: withEmptyConstructionMaterials(state.buildings),
+});
+const migrateVersion19 = (state: Version19World): WorldState => ({
+  ...state,
+  schemaVersion: 20,
+  peaceful: true,
 });
 const migrateVersion16 = (state: Version16World): Version17World => ({
   ...state,
@@ -1691,7 +1704,8 @@ const migrateToCurrentSchema = (state: unknown): WorldState => {
 /** Forward-only snapshot migration kept inside the platform-independent simulation. */
 export const deserializeWorld = (raw: unknown): WorldState => {
   const candidate = structuredClone(raw) as { schemaVersion?: number };
-  if (candidate.schemaVersion === 19) return candidate as WorldState;
+  if (candidate.schemaVersion === 20) return candidate as WorldState;
+  if (candidate.schemaVersion === 19) return migrateVersion19(candidate as Version19World);
   if (candidate.schemaVersion === 18) return migrateVersion18(candidate as Version18World);
   if (candidate.schemaVersion === 17) return migrateVersion17(candidate as Version17World);
   if (candidate.schemaVersion === 16)
@@ -1886,6 +1900,7 @@ export const stateHash = (state: WorldState): string => stableHash(snapshot(stat
 export const inspectWorld = (state: WorldState): string[] => {
   const errors: string[] = [];
   const isNonNegativeInteger = (value: number) => Number.isSafeInteger(value) && value >= 0;
+  if (typeof state.peaceful !== 'boolean') errors.push('world has an invalid peaceful flag');
   if (!Number.isSafeInteger(state.seed)) errors.push('world has an invalid seed');
   if (!isNonNegativeInteger(state.tick)) errors.push('world has an invalid tick');
   if (

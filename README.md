@@ -123,6 +123,8 @@ npm --prefix apps/server run dev
 
 `PERSISTENCE=memory` remains the default for local UI work. PostgreSQL mode journals accepted commands before applying them, saves a completed checkpoint every 300 ticks, retains the newest three completed checkpoints with replayable journal history, and writes one final checkpoint during graceful shutdown. See [001_initial.sql](packages/server-runtime/migrations/001_initial.sql) for the initial schema.
 
+New worlds are peaceful by default, so no PvE threats spawn; start the server with `PEACEFUL=false` to create a world with raids enabled. The flag is stored in world state, so it applies when a world is first created — with `PERSISTENCE=memory` that is every restart, while a persisted PostgreSQL world keeps whatever value it was created with.
+
 Operational procedures for failed deployments, storage failures, runaway ticks, client floods, and
 world rollback are in the [operations runbook](docs/runbooks/operations.md).
 

@@ -197,6 +197,7 @@ export interface TickProfiler {
 }
 
 const INVENTORY_CAPACITY = 100;
+const GATHER_RANGE = 8;
 const TERRITORY_CELL_SIZE = 8;
 const RESOURCE_SECTOR_SIZE = 8;
 /** Bounds all threat route work together, rather than once per threat. */
@@ -407,8 +408,8 @@ export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
     plot,
     inventory: { ore: 0, wood: 5, ingot: 0, tool: 0 },
     population: { total: 2, capacity: 2, satisfaction: 100, employed: 0, unemployed: 2 },
-    exploredChunks: { [chunkKey(plot.x, plot.y)]: true },
-    visibleChunks: { [chunkKey(plot.x, plot.y)]: true },
+    exploredChunks: plotExploration(plot),
+    visibleChunks: plotExploration(plot),
     territoryCells: plotTerritory(plot),
     research: {
       activeTechnology: null,
@@ -464,6 +465,23 @@ const plotTerritory = (plot: Plot): Record<string, true> => {
       cells[territoryKey(x, y)] = true;
   cells[territoryKey(plot.x + plot.size - 1, plot.y + plot.size - 1)] = true;
   return cells;
+};
+/**
+ * Chunks a new settlement starts with revealed. The plot straddles chunk
+ * boundaries and gathering is allowed anywhere within GATHER_RANGE of the plot
+ * centre, so reveal every chunk that range touches — otherwise reachable ore or
+ * wood can sit in an unexplored chunk the client never receives terrain for,
+ * leaving it visible on no map yet impossible to select and gather.
+ */
+const plotExploration = (plot: Plot): Record<string, true> => {
+  const centerX = plot.x + Math.floor(plot.size / 2);
+  const centerY = plot.y + Math.floor(plot.size / 2);
+  const chunks: Record<string, true> = {};
+  for (let x = centerX - GATHER_RANGE; x <= centerX + GATHER_RANGE; x += 1)
+    for (let y = centerY - GATHER_RANGE; y <= centerY + GATHER_RANGE; y += 1)
+      if (Math.abs(centerX - x) + Math.abs(centerY - y) <= GATHER_RANGE)
+        chunks[chunkKey(x, y)] = true;
+  return chunks;
 };
 const individualSettlementsFor = (players: Record<string, { id: PlayerId }>) =>
   Object.fromEntries(
@@ -564,7 +582,7 @@ export const applyCommand = (
     return { result: { accepted: true as const, commandId: command.id }, events };
   };
   if (command.type === 'gather') {
-    if (distance(player.plot, command.x, command.y) > 8) return reject('out-of-range');
+    if (distance(player.plot, command.x, command.y) > GATHER_RANGE) return reject('out-of-range');
     const key = tileKey(command.x, command.y);
     const resource = terrainAt(state.seed, command.x, command.y);
     if (resource !== 'ore' && resource !== 'wood') return reject('resource-depleted');

@@ -680,31 +680,43 @@ describe('world simulation', () => {
       }).result.accepted,
     ).toBe(true);
     for (let index = 0; index < 20; index += 1) advanceTick(world);
+    // The starting settlement reveals its own footprint and gather range, so
+    // extend to that explored frontier first, then claim just beyond it.
     expect(
       applyCommand(world, {
-        id: 'claim-before-explore',
+        id: 'claim-frontier',
         playerId: 'player-a' as never,
         sequence: 3,
         type: 'claimTerritory',
         x: 24,
+        y: 0,
+      }).result.accepted,
+    ).toBe(true);
+    expect(
+      applyCommand(world, {
+        id: 'claim-before-explore',
+        playerId: 'player-a' as never,
+        sequence: 4,
+        type: 'claimTerritory',
+        x: 32,
         y: 0,
       }).result,
     ).toMatchObject({ code: 'not-explored' });
     applyCommand(world, {
       id: 'explore',
       playerId: 'player-a' as never,
-      sequence: 3,
+      sequence: 5,
       type: 'explore',
-      x: 24,
+      x: 32,
       y: 0,
     });
     expect(
       applyCommand(world, {
         id: 'claim',
         playerId: 'player-a' as never,
-        sequence: 4,
+        sequence: 6,
         type: 'claimTerritory',
-        x: 24,
+        x: 32,
         y: 0,
       }).result.accepted,
     ).toBe(true);

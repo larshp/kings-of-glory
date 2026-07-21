@@ -83,10 +83,10 @@ packages/
 
 ## Local development
 
-Prerequisites: Node.js 22.16.0 (see `.nvmrc`) and pnpm 10.14.0. Corepack is one way to supply pnpm, but is not required. To install the pinned package manager without Corepack, run `npm install --global pnpm@10.14.0`. GitHub Actions runs the same locked install, format, lint, build, and test gate on pull requests and `main`. The npm scripts select `pnpm.cmd` automatically on Windows, so `npm run dev` works even when PowerShell blocks `pnpm.ps1`.
+Prerequisites: Node.js 22.16.0 (see `.nvmrc`) and pnpm 10.14.0. Install the pinned package manager with `npm install --global pnpm@10.14.0`. GitHub Actions runs the same locked install, format, lint, build, and test gate on pull requests and `main`. The npm scripts select `pnpm.cmd` automatically on Windows, so `npm run dev` works even when PowerShell blocks `pnpm.ps1`.
 
 ```powershell
-corepack enable
+npm install --global pnpm@10.14.0
 pnpm install --frozen-lockfile
 pnpm build
 pnpm test

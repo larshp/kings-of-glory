@@ -105,7 +105,11 @@ export const App = () => {
   const pendingCommands = useRef(new Map<string, string>());
   const [state, setState] = useState<ClientWorldState>();
   const [status, setStatus] = useState('Connecting');
-  const [notice, setNotice] = useState('');
+  // seq bumps on every message so an identical repeated toast (e.g. "Gathered
+  // wood.") still re-shows and resets its auto-dismiss timer.
+  const [notice, setNoticeState] = useState<{ text: string; seq: number }>({ text: '', seq: 0 });
+  const notify = (text: string) => setNoticeState((previous) => ({ text, seq: previous.seq + 1 }));
+  const dismissNotice = () => setNoticeState((previous) => ({ ...previous, text: '' }));
   const [selectedTile, setSelectedTile] = useState<{ x: number; y: number }>();
   const [selectedEntity, setSelectedEntity] = useState<PickedEntity>();
   const [hoveredTile, setHoveredTile] = useState<{ x: number; y: number }>();
@@ -165,7 +169,7 @@ export const App = () => {
       };
       connection.onerror = () => {
         setConnectionIndicator('Network error. Retrying the game server connection…');
-        setNotice('The connection encountered a network error. Retrying…');
+        notify('The connection encountered a network error. Retrying…');
       };
       connection.onclose = (event) => {
         if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
@@ -175,7 +179,7 @@ export const App = () => {
           reconnectAllowed = false;
           setStatus('Maintenance');
           setConnectionIndicator('The game server is under maintenance. Please try again shortly.');
-          setNotice('The server is saving the world for maintenance. Your actions are paused.');
+          notify('The server is saving the world for maintenance. Your actions are paused.');
           return;
         }
         if (event.code === 1002 && event.reason === 'Client upgrade required') {
@@ -184,13 +188,13 @@ export const App = () => {
           setConnectionIndicator(
             'This game client is incompatible with the server. Refresh to update.',
           );
-          setNotice('A newer game client is required. Refresh this page after it is deployed.');
+          notify('A newer game client is required. Refresh this page after it is deployed.');
           return;
         }
         setConnectionIndicator(
           `Server connection closed (${event.code}${event.reason ? `: ${event.reason}` : ''}). Retrying…`,
         );
-        setNotice(
+        notify(
           `Connection closed (${event.code}${event.reason ? `: ${event.reason}` : ''}). Retrying…`,
         );
         attempts += 1;
@@ -203,7 +207,7 @@ export const App = () => {
           message = JSON.parse(data) as ServerMessage;
         } catch {
           setConnectionIndicator('The server sent an unreadable update. Reconnecting…');
-          setNotice('The server sent an unreadable update. Reconnecting…');
+          notify('The server sent an unreadable update. Reconnecting…');
           connection.close(1002, 'Malformed server message');
           return;
         }
@@ -235,29 +239,29 @@ export const App = () => {
         if (message.type === 'commandAcknowledged') {
           const successMessage = pendingCommands.current.get(message.result.commandId);
           if (successMessage) {
-            setNotice(successMessage);
+            notify(successMessage);
             pendingCommands.current.delete(message.result.commandId);
           }
         }
         if (message.type === 'commandRejected') {
           pendingCommands.current.delete(message.result.commandId);
-          setNotice(rejectionMessage(message.result.code));
+          notify(rejectionMessage(message.result.code));
         }
         if (message.type === 'maintenance') {
           reconnectAllowed = false;
           setStatus('Maintenance');
           setConnectionIndicator(message.message);
-          setNotice(message.message);
+          notify(message.message);
         }
         if (message.type === 'error') {
-          setNotice(message.message ?? 'Connection error');
+          notify(message.message ?? 'Connection error');
           if (message.code === 'version-mismatch') {
             reconnectAllowed = false;
             setStatus('Upgrade required');
             setConnectionIndicator(
               'This game client is incompatible with the server. Refresh to update.',
             );
-            setNotice('A newer game client is required. Refresh this page after it is deployed.');
+            notify('A newer game client is required. Refresh this page after it is deployed.');
             connection.close(1002, 'Client upgrade required');
           }
         }
@@ -306,6 +310,15 @@ export const App = () => {
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    if (!notice.text) return;
+    const timer = window.setTimeout(
+      () => setNoticeState((previous) => ({ ...previous, text: '' })),
+      5_000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [notice.seq, notice.text]);
+
   const player = state?.players[playerId];
   const canAffordTechnology = (
     cost: Readonly<Partial<Record<'ore' | 'wood' | 'ingot' | 'tool', number>>>,
@@ -319,11 +332,11 @@ export const App = () => {
     event.preventDefault();
     const updated = withCameraBinding(preferences, action, event.code);
     if (!updated) {
-      setNotice('Choose a unique letter, digit, or arrow key for each camera direction.');
+      notify('Choose a unique letter, digit, or arrow key for each camera direction.');
       return;
     }
     setPreferences(updated);
-    setNotice(`Camera control updated to ${displayKey(event.code)}.`);
+    notify(`Camera control updated to ${displayKey(event.code)}.`);
   };
   const send = (command: Record<string, unknown>, successMessage?: string) => {
     if (socket.current?.readyState !== WebSocket.OPEN) return;
@@ -610,7 +623,7 @@ export const App = () => {
             type="button"
             onClick={() => {
               setPreferences(defaultPreferences);
-              setNotice('Accessibility and camera controls restored to defaults.');
+              notify('Accessibility and camera controls restored to defaults.');
             }}
           >
             Restore control defaults
@@ -1404,10 +1417,22 @@ export const App = () => {
         ) : (
           <p>Loading world…</p>
         )}
-        <p className="notice" role="status" aria-live="polite">
-          {notice}
-        </p>
       </aside>
+      <div className="toast-region" role="status" aria-live="polite">
+        {notice.text && (
+          <div className="toast" key={notice.seq}>
+            <span className="toast-message">{notice.text}</span>
+            <button
+              type="button"
+              className="toast-dismiss"
+              aria-label="Dismiss notification"
+              onClick={dismissNotice}
+            >
+              ×
+            </button>
+          </div>
+        )}
+      </div>
     </main>
   );
 };

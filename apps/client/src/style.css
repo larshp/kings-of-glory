@@ -81,11 +81,13 @@ button:disabled {
 }
 button:focus-visible,
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+textarea:focus-visible {
   outline: 3px solid #f5d56a;
   outline-offset: 2px;
 }
-input {
+input,
+textarea {
   width: 100%;
   box-sizing: border-box;
   margin: 0.25rem 0;
@@ -95,6 +97,10 @@ input {
   border: 1px solid #698b75;
   border-radius: 0.25rem;
   font: inherit;
+}
+textarea {
+  min-height: 4.5rem;
+  resize: vertical;
 }
 select {
   width: 100%;
@@ -192,8 +198,186 @@ select {
   font-size: 0.85rem;
   font-weight: 700;
 }
+.onboarding-reservation {
+  margin: 0.25rem 0;
+  color: #c8d8e7;
+  font-size: 0.8rem;
+}
 .onboarding .complete {
   color: #9fe2b1;
+}
+.information-browser {
+  padding: 0.5rem 0;
+  border-top: 1px solid #526576;
+  border-bottom: 1px solid #526576;
+}
+.information-search-controls {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.7fr) minmax(12rem, 1.3fr);
+  gap: 0.5rem;
+}
+.information-search-controls label {
+  display: grid;
+  gap: 0.2rem;
+}
+.information-results {
+  max-height: 20rem;
+  margin: 0.25rem 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+.information-results li {
+  display: grid;
+  grid-template-columns: minmax(5.5rem, auto) 1fr;
+  gap: 0.15rem 0.5rem;
+  padding: 0.4rem 0;
+  border-top: 1px solid #354958;
+}
+.information-results li > span:last-child {
+  grid-column: 2;
+  color: #c8d8e7;
+  font-size: 0.8rem;
+}
+.information-category {
+  align-self: start;
+  color: #d7e6f3;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.information-category.alerts,
+.information-category.defense {
+  color: #ffb4a7;
+}
+.notification-center {
+  padding: 0.4rem 0;
+  border-top: 1px solid #526576;
+}
+.notification-center > p {
+  margin: 0.25rem 0;
+}
+.notification-clear {
+  color: #9fe2b1;
+}
+.notification-group {
+  margin: 0.25rem 0;
+  padding: 0.25rem 0.4rem;
+  border-left: 0.25rem solid #8da2b5;
+  background: #1e2c37;
+}
+.notification-group summary {
+  cursor: pointer;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+.notification-group ul {
+  margin: 0.35rem 0;
+  padding-left: 1.25rem;
+}
+.notification-group.critical {
+  border-color: #ff7f6e;
+}
+.notification-group.warning {
+  border-color: #ffd166;
+}
+.notification-group.info {
+  border-color: #70b7e6;
+}
+@media (max-width: 560px) {
+  .information-search-controls {
+    grid-template-columns: 1fr;
+  }
+}
+.progression-milestones {
+  padding-left: 1.4rem;
+  font-size: 0.85rem;
+}
+.progression-milestones .complete {
+  color: #9fe2b1;
+}
+.strategic-map {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #526576;
+}
+.strategic-map p {
+  font-size: 0.85rem;
+}
+.strategic-map-list {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0;
+  list-style: none;
+}
+.strategic-map-list li {
+  display: grid;
+  gap: 0.1rem;
+  padding: 0.4rem;
+  border: 1px solid #526576;
+  border-radius: 0.25rem;
+  background: rgb(23 36 58 / 75%);
+  font-size: 0.8rem;
+}
+.global-objective {
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+  border: 1px solid #7d9f68;
+  border-radius: 0.25rem;
+  background: rgb(35 65 55 / 72%);
+}
+.global-objective h3,
+.global-objective p {
+  margin: 0.25rem 0;
+}
+.global-objective p {
+  font-size: 0.85rem;
+}
+.identity-panel,
+.chat-panel,
+.player-directory {
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+  border: 1px solid #526576;
+  border-radius: 0.25rem;
+  background: rgb(23 36 58 / 72%);
+}
+.chat-messages,
+.directory-results,
+.project-list {
+  display: grid;
+  gap: 0.35rem;
+  padding-left: 1.25rem;
+  font-size: 0.8rem;
+}
+.chat-controls {
+  display: inline-flex;
+  gap: 0.2rem;
+  margin-left: 0.35rem;
+}
+.chat-controls button {
+  width: auto;
+  padding: 0.2rem;
+  font-size: 0.72rem;
+}
+.account-deletion {
+  margin-top: 0.75rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #704d52;
+}
+.account-deletion summary {
+  color: #ffb5b5;
+  cursor: pointer;
+  font-weight: 700;
+}
+.danger-button {
+  border-color: #a85b64;
+  background: #6e2932;
+  color: #fff0f0;
+}
+.danger-button:disabled {
+  border-color: #65494d;
+  background: #3d3032;
 }
 .toast-region {
   position: fixed;

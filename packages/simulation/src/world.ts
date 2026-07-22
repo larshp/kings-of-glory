@@ -6,17 +6,22 @@ import {
   playerId,
   type PlayerId,
   type SettlementRole,
+  type SharedProjectBuildingKind,
 } from './commands.js';
 import {
   buildings as buildingDefinitions,
+  cooperativeObjectives as cooperativeObjectiveDefinitions,
   environmentalEvents,
   logisticsLinks as logisticsDefinitions,
+  onboardingRules,
   producers as producerDefinitions,
   resources as resourceDefinitions,
   recipes,
+  socialRules,
   technologies,
   threats as threatDefinitions,
   type TechnologyId,
+  type CooperativeObjectiveId,
 } from '@kings/content';
 import { chunkFor, findHierarchicalPath, findPath, manhattanDistance } from '@kings/pathfinding';
 import { stableHash } from './hash.js';
@@ -134,8 +139,94 @@ export interface LogisticsLink {
     | 'target-reconfigured'
     | 'constructing';
 }
+export interface ObjectiveContribution {
+  readonly commandId: string;
+  readonly playerId: PlayerId;
+  readonly settlementId: string;
+  readonly item: ItemId;
+  readonly amount: number;
+  readonly tick: number;
+}
+export interface ObjectiveRewardClaim {
+  readonly commandId: string;
+  readonly playerId: PlayerId;
+  readonly reward: Readonly<Partial<Inventory>>;
+  readonly tick: number;
+}
+export interface CooperativeObjectiveState {
+  readonly id: CooperativeObjectiveId;
+  totalContributed: number;
+  completedTick: number | null;
+  contributionsBySettlement: Record<string, number>;
+  contributionsByPlayer: Record<string, number>;
+  rewardClaims: Record<string, string>;
+  contributionHistory: ObjectiveContribution[];
+  rewardHistory: ObjectiveRewardClaim[];
+}
+export interface PlayerActivity {
+  /** Last accepted player command; persisted so recovery reproduces protection exactly. */
+  lastActiveTick: number;
+  /** New settlements cannot be selected by hazards or raids before this tick. */
+  raidEligibleTick: number;
+}
+export interface SharedProjectContribution {
+  readonly commandId: string;
+  readonly playerId: PlayerId;
+  readonly item: ItemId;
+  readonly amount: number;
+  readonly tick: number;
+}
+export interface SharedConstructionProject {
+  readonly id: string;
+  readonly settlementId: string;
+  readonly createdBy: PlayerId;
+  readonly buildingKind: SharedProjectBuildingKind;
+  readonly x: number;
+  readonly y: number;
+  readonly required: Inventory;
+  readonly contributed: Inventory;
+  readonly createdTick: number;
+  completedTick: number | null;
+  buildingId: BuildingId | null;
+  readonly contributionHistory: SharedProjectContribution[];
+}
+export interface ChatMessage {
+  readonly id: string;
+  readonly senderId: PlayerId;
+  readonly senderName: string;
+  readonly channel: 'global' | 'settlement';
+  readonly settlementId?: string;
+  readonly text: string;
+  readonly tick: number;
+}
+export interface ChatReport {
+  readonly id: string;
+  readonly reporterId: PlayerId;
+  readonly reportedMessage: ChatMessage;
+  readonly reason: string;
+  readonly tick: number;
+  status: 'open' | 'resolved';
+}
+export interface SocialState {
+  playerNames: Record<string, string>;
+  settlementNames: Record<string, string>;
+  blockedPlayers: Record<string, Record<string, true>>;
+  lastChatTick: Record<string, number>;
+  messages: ChatMessage[];
+  reports: ChatReport[];
+}
+export interface DeletedPlayer {
+  readonly id: PlayerId;
+  readonly deletedTick: number;
+  readonly reason?: 'account-deletion' | 'abandoned-onboarding';
+}
+export interface OnboardingReservation {
+  readonly createdTick: number;
+  expiresTick: number;
+  securedTick: number | null;
+}
 export interface WorldState {
-  schemaVersion: 20;
+  schemaVersion: 26;
   seed: number;
   /** When true, no PvE threats spawn. Peaceful worlds stay threat-free. */
   peaceful: boolean;
@@ -143,12 +234,19 @@ export interface WorldState {
   randomState: RandomState;
   tick: number;
   players: Record<string, PlayerState>;
+  /** Server-only tombstones prevent deleted identities from silently re-registering. */
+  deletedPlayers: Record<string, DeletedPlayer>;
   buildings: Record<string, Building>;
   threats: Record<string, Threat>;
   scouts?: Record<string, Scout>;
   transfers: ResourceTransfer[];
   settlements: Record<string, Settlement>;
   logisticsLinks: Record<string, LogisticsLink>;
+  cooperativeObjectives: Record<CooperativeObjectiveId, CooperativeObjectiveState>;
+  playerActivity: Record<string, PlayerActivity>;
+  onboardingReservations: Record<string, OnboardingReservation>;
+  sharedConstructionProjects: Record<string, SharedConstructionProject>;
+  social: SocialState;
   processedCommands: string[];
   minedTiles: Record<string, number>;
 }
@@ -167,12 +265,27 @@ export interface WorldEvent {
     | 'threatDefeated'
     | 'buildingDamaged'
     | 'resourceTransferred'
-    | 'settlementMemberChanged';
+    | 'settlementMemberChanged'
+    | 'objectiveContributed'
+    | 'objectiveCompleted'
+    | 'objectiveRewardClaimed'
+    | 'sharedProjectCreated'
+    | 'sharedProjectContributed'
+    | 'sharedProjectCompleted'
+    | 'playerNameChanged'
+    | 'settlementNameChanged'
+    | 'chatMessageSent'
+    | 'chatMessageReported'
+    | 'playerBlockChanged'
+    | 'playerDeleted'
+    | 'onboardingReservationReclaimed';
   playerId?: PlayerId;
   buildingId?: BuildingId;
   environmentalEventId?: keyof typeof environmentalEvents;
   threatId?: string;
   targetPlayerId?: PlayerId;
+  objectiveId?: CooperativeObjectiveId;
+  projectId?: string;
 }
 
 /**
@@ -198,7 +311,11 @@ export interface TickProfiler {
   record(phase: TickPhase, durationMs: number): void;
 }
 
-const INVENTORY_CAPACITY = 100;
+export const PLAYER_INVENTORY_CAPACITY = 100;
+const INVENTORY_CAPACITY = PLAYER_INVENTORY_CAPACITY;
+const MAX_ACTIVE_SHARED_PROJECTS_PER_SETTLEMENT = 3;
+export const MAX_ACTIVE_CONSTRUCTIONS_PER_PLAYER = 64;
+export const MAX_PLOT_CANDIDATE_ATTEMPTS = 100_000;
 const GATHER_RANGE = 8;
 const TERRITORY_CELL_SIZE = 8;
 const RESOURCE_SECTOR_SIZE = 8;
@@ -206,6 +323,14 @@ const RESOURCE_SECTOR_SIZE = 8;
 export const THREAT_PATH_VISITS_PER_TICK = 128;
 const THREAT_PATH_VISITS_PER_SEARCH = 128;
 const emptyInventory = (): Inventory => ({ ore: 0, wood: 0, ingot: 0, tool: 0 });
+const initialSocialState = (): SocialState => ({
+  playerNames: {},
+  settlementNames: {},
+  blockedPlayers: {},
+  lastChatTick: {},
+  messages: [],
+  reports: [],
+});
 const tileKey = (x: number, y: number) => `${x}:${y}`;
 const coordinateNoise = (seed: number, x: number, y: number) =>
   Math.abs(Math.imul(seed ^ x, 73856093) ^ Math.imul(y, 19349663));
@@ -347,6 +472,71 @@ const territoryNeighbors = (key: string) => {
   const y = Number(yText);
   return [`${x + 1}:${y}`, `${x - 1}:${y}`, `${x}:${y + 1}`, `${x}:${y - 1}`];
 };
+const plotCenter = (plot: Plot) => ({
+  x: plot.x + Math.floor(plot.size / 2),
+  y: plot.y + Math.floor(plot.size / 2),
+});
+const pointInBufferedPlot = (plot: Plot, x: number, y: number, buffer = 0) =>
+  x >= plot.x - buffer &&
+  y >= plot.y - buffer &&
+  x < plot.x + plot.size + buffer &&
+  y < plot.y + plot.size + buffer;
+const isForeignSettlementProtectedAt = (
+  state: WorldState,
+  ownerId: PlayerId,
+  x: number,
+  y: number,
+) =>
+  Object.values(state.players).some(
+    (player) =>
+      player.id !== ownerId &&
+      pointInBufferedPlot(
+        player.plot,
+        x,
+        y,
+        threatDefinitions['raider-swarm'].settlementBufferTiles,
+      ),
+  );
+const territoryIntersectsForeignSettlement = (
+  state: WorldState,
+  ownerId: PlayerId,
+  key: string,
+) => {
+  const [cellXText, cellYText] = key.split(':');
+  const minX = Number(cellXText) * TERRITORY_CELL_SIZE;
+  const minY = Number(cellYText) * TERRITORY_CELL_SIZE;
+  for (let x = minX; x < minX + TERRITORY_CELL_SIZE; x += 1)
+    for (let y = minY; y < minY + TERRITORY_CELL_SIZE; y += 1)
+      if (isForeignSettlementProtectedAt(state, ownerId, x, y)) return true;
+  return false;
+};
+/** A permanent one-tile westward lane prevents any settlement center being enclosed by buildings. */
+const isSettlementAccessTile = (state: WorldState, x: number, y: number) =>
+  Object.values(state.players).some((player) => {
+    const center = state.buildings[`center-${player.id}`];
+    return Boolean(center && y === center.y && x >= player.plot.x && x < center.x);
+  });
+const reservedResourceOwner = (state: WorldState, x: number, y: number): PlayerId | undefined =>
+  Object.values(state.players)
+    .map((player) => ({ player, distance: manhattanDistance(plotCenter(player.plot), { x, y }) }))
+    .filter(({ distance }) => distance <= GATHER_RANGE)
+    .sort(
+      (left, right) =>
+        left.distance - right.distance || left.player.id.localeCompare(right.player.id),
+    )[0]?.player.id;
+const activityFor = (state: WorldState, ownerId: PlayerId): PlayerActivity =>
+  state.playerActivity[ownerId] ?? { lastActiveTick: state.tick, raidEligibleTick: state.tick };
+const isRaidEligible = (state: WorldState, ownerId: PlayerId) =>
+  state.tick >= activityFor(state, ownerId).raidEligibleTick;
+const isInactive = (state: WorldState, ownerId: PlayerId) =>
+  state.tick - activityFor(state, ownerId).lastActiveTick >=
+  threatDefinitions['raider-swarm'].inactiveAfterTicks;
+const protectedHealthFloor = (state: WorldState, building: Building) =>
+  isInactive(state, building.ownerId)
+    ? Math.ceil(
+        (building.maxHealth * threatDefinitions['raider-swarm'].inactiveHealthFloorPercent) / 100,
+      )
+    : 0;
 
 const plotCandidate = (ordinal: number): Plot => {
   const radius = Math.floor(ordinal / 4) + 1;
@@ -373,7 +563,7 @@ const plotsOverlap = (left: Plot, right: Plot) =>
  */
 const plotFor = (state: WorldState): Plot => {
   const claimed = Object.values(state.players).map((player) => player.plot);
-  for (let ordinal = 0; ; ordinal += 1) {
+  for (let ordinal = 0; ordinal < MAX_PLOT_CANDIDATE_ATTEMPTS; ordinal += 1) {
     const candidate = plotCandidate(ordinal);
     const centerX = candidate.x + candidate.size - 2;
     const centerY = candidate.y + candidate.size - 2;
@@ -383,27 +573,51 @@ const plotFor = (state: WorldState): Plot => {
     )
       return candidate;
   }
+  throw new Error('World plot-allocation budget exhausted.');
 };
 
+const initialCooperativeObjectives = (): WorldState['cooperativeObjectives'] =>
+  Object.fromEntries(
+    Object.values(cooperativeObjectiveDefinitions).map((definition) => [
+      definition.id,
+      {
+        id: definition.id,
+        totalContributed: 0,
+        completedTick: null,
+        contributionsBySettlement: {},
+        contributionsByPlayer: {},
+        rewardClaims: {},
+        contributionHistory: [],
+        rewardHistory: [],
+      },
+    ]),
+  ) as unknown as WorldState['cooperativeObjectives'];
+
 export const createWorld = (seed = 1, peaceful = true): WorldState => ({
-  schemaVersion: 20,
+  schemaVersion: 26,
   seed,
   peaceful,
   randomState: createRandomState(seed),
   tick: 0,
   players: {},
+  deletedPlayers: {},
   buildings: {},
   threats: {},
   scouts: {},
   transfers: [],
   settlements: {},
   logisticsLinks: {},
+  cooperativeObjectives: initialCooperativeObjectives(),
+  playerActivity: {},
+  onboardingReservations: {},
+  sharedConstructionProjects: {},
+  social: initialSocialState(),
   processedCommands: [],
   minedTiles: {},
 });
 
 export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
-  if (state.players[id]) return [];
+  if (state.players[id] || state.deletedPlayers[id]) return [];
   const typedId = playerId(id);
   const plot = plotFor(state);
   state.players[id] = {
@@ -421,6 +635,26 @@ export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
     },
     lastSequence: 0,
   };
+  state.playerActivity[id] = {
+    lastActiveTick: state.tick,
+    raidEligibleTick: state.tick + threatDefinitions['raider-swarm'].newPlayerProtectionTicks,
+  };
+  state.onboardingReservations[id] = {
+    createdTick: state.tick,
+    expiresTick: state.tick + onboardingRules.abandonedReservationTicks,
+    securedTick: null,
+  };
+  const usedPlayerNames = new Set(Object.values(state.social.playerNames));
+  const usedSettlementNames = new Set(Object.values(state.social.settlementNames));
+  let ordinal = 1;
+  while (
+    usedPlayerNames.has(`Settler ${ordinal}`) ||
+    usedSettlementNames.has(`Settlement ${ordinal}`)
+  )
+    ordinal += 1;
+  state.social.playerNames[id] = `Settler ${ordinal}`;
+  state.social.settlementNames[`settlement-${id}`] = `Settlement ${ordinal}`;
+  state.social.blockedPlayers[id] = {};
   state.settlements[`settlement-${id}`] = {
     id: `settlement-${id}`,
     ownerId: typedId,
@@ -500,18 +734,21 @@ const isClaimedByOther = (state: WorldState, playerId: PlayerId, key: string) =>
 const canBuildAt = (state: WorldState, player: PlayerState, x: number, y: number) =>
   (inPlot(player.plot, x, y) || player.territoryCells[territoryKey(x, y)]) &&
   !isClaimedByOther(state, player.id, territoryKey(x, y));
-const visibleChunksFor = (state: WorldState, player: PlayerState): Record<string, true> => {
+const visibleChunksFor = (
+  player: PlayerState,
+  ownedBuildings: readonly Building[],
+  ownedScouts: readonly Scout[],
+): Record<string, true> => {
   const visible: Record<string, true> = { [chunkKey(player.plot.x, player.plot.y)]: true };
-  for (const building of Object.values(state.buildings)) {
-    if (building.ownerId !== player.id || building.health <= 0) continue;
+  for (const building of ownedBuildings) {
+    if (building.health <= 0) continue;
     const chunkX = Math.floor(building.x / 16);
     const chunkY = Math.floor(building.y / 16);
     for (let offsetX = -1; offsetX <= 1; offsetX += 1)
       for (let offsetY = -1; offsetY <= 1; offsetY += 1)
         visible[chunkKey(chunkX * 16 + offsetX * 16, chunkY * 16 + offsetY * 16)] = true;
   }
-  for (const scout of Object.values(state.scouts ?? {}))
-    if (scout.ownerId === player.id) visible[chunkKey(scout.x, scout.y)] = true;
+  for (const scout of ownedScouts) visible[chunkKey(scout.x, scout.y)] = true;
   return visible;
 };
 const roleWeight: Record<SettlementRole, number> = {
@@ -555,14 +792,167 @@ const threatSpawnPosition = (state: WorldState, target: Building) => {
     const candidate = candidates.find(
       (tile) =>
         terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
+        !isForeignSettlementProtectedAt(state, target.ownerId, tile.x, tile.y) &&
         !Object.values(state.buildings).some(
           (building) => building.x === tile.x && building.y === tile.y,
         ),
     );
     if (candidate) return candidate;
   }
-  return { x: target.x, y: target.y };
+  return undefined;
 };
+const createBuildingRecord = (
+  state: WorldState,
+  ownerId: PlayerId,
+  kind: SharedProjectBuildingKind,
+  x: number,
+  y: number,
+): Building => {
+  const definition = buildingDefinitions[kind];
+  const id = buildingId(`${kind}-${state.tick}-${Object.keys(state.buildings).length}`);
+  const building: Building = {
+    id,
+    kind,
+    ownerId,
+    x,
+    y,
+    health: definition.maxHealth,
+    maxHealth: definition.maxHealth,
+    progress: 0,
+    constructionTicks: definition.constructionTicks,
+    constructionMaterials: constructionMaterialsFor(kind),
+    inventory: emptyInventory(),
+    inventoryCapacity: definition.inventoryCapacity,
+    populationCapacity: definition.populationCapacity,
+    jobPriority: isProducer(kind) ? 1 : 0,
+    recipeId: defaultRecipeIdFor(kind),
+    productionState: definition.constructionTicks > 0 ? 'constructing' : 'idle',
+  };
+  state.buildings[id] = building;
+  return building;
+};
+const normalizeUserText = (value: string) => value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+const foldedUserText = (value: string) => normalizeUserText(value).toLocaleLowerCase('en-US');
+const containsModeratedTerm = (value: string) => {
+  const folded = foldedUserText(value);
+  return socialRules.moderatedTerms.some((term) => folded.includes(term));
+};
+const validDisplayName = (
+  value: string,
+  limits: { readonly min: number; readonly max: number },
+) => {
+  const length = [...value].length;
+  return (
+    length >= limits.min && length <= limits.max && /^[\p{L}\p{N}][\p{L}\p{N} .'-]*$/u.test(value)
+  );
+};
+
+const removePlayerData = (
+  state: WorldState,
+  player: PlayerState,
+  reason: NonNullable<DeletedPlayer['reason']>,
+  removeOwnedSettlements: boolean,
+) => {
+  const ownedBuildingIds = new Set(
+    Object.values(state.buildings)
+      .filter((building) => building.ownerId === player.id)
+      .map((building) => building.id),
+  );
+  for (const id of ownedBuildingIds) delete state.buildings[id];
+  for (const [id, threat] of Object.entries(state.threats))
+    if (ownedBuildingIds.has(threat.targetBuildingId)) delete state.threats[id];
+  for (const [id, link] of Object.entries(state.logisticsLinks))
+    if (
+      link.ownerId === player.id ||
+      ownedBuildingIds.has(link.sourceBuildingId) ||
+      ownedBuildingIds.has(link.targetBuildingId)
+    )
+      delete state.logisticsLinks[id];
+  for (const [id, scout] of Object.entries(state.scouts ?? {}))
+    if (scout.ownerId === player.id) delete state.scouts?.[id];
+
+  for (const [id, settlement] of Object.entries(state.settlements)) {
+    delete settlement.members[player.id];
+    delete settlement.invitations[player.id];
+    if (removeOwnedSettlements && settlement.ownerId === player.id) {
+      for (const [projectId, project] of Object.entries(state.sharedConstructionProjects))
+        if (project.settlementId === id) delete state.sharedConstructionProjects[projectId];
+      state.social.messages = state.social.messages.filter(
+        (message) => message.settlementId !== id,
+      );
+      delete state.settlements[id];
+      delete state.social.settlementNames[id];
+    }
+  }
+
+  let anonymizedOrdinal = 1;
+  const usedNames = new Set(Object.values(state.social.playerNames).map(foldedUserText));
+  let anonymizedName = `Deleted player ${anonymizedOrdinal}`;
+  while (usedNames.has(foldedUserText(anonymizedName))) {
+    anonymizedOrdinal += 1;
+    anonymizedName = `Deleted player ${anonymizedOrdinal}`;
+  }
+  for (const message of state.social.messages)
+    if (message.senderId === player.id) Object.assign(message, { senderName: anonymizedName });
+  for (const report of state.social.reports)
+    if (report.reportedMessage.senderId === player.id)
+      Object.assign(report.reportedMessage, { senderName: anonymizedName });
+  delete state.social.playerNames[player.id];
+  delete state.social.blockedPlayers[player.id];
+  delete state.social.lastChatTick[player.id];
+  for (const blocked of Object.values(state.social.blockedPlayers)) delete blocked[player.id];
+
+  delete state.players[player.id];
+  delete state.playerActivity[player.id];
+  delete state.onboardingReservations[player.id];
+  state.deletedPlayers[player.id] = { id: player.id, deletedTick: state.tick, reason };
+};
+
+const hasSafeReclaimableStarterSettlement = (state: WorldState, player: PlayerState) => {
+  const memberships = Object.values(state.settlements).filter(
+    (settlement) => settlement.members[player.id],
+  );
+  const owned = memberships.filter((settlement) => settlement.ownerId === player.id);
+  return (
+    owned.length === 1 &&
+    memberships.length === 1 &&
+    Object.keys(owned[0]?.members ?? {}).length === 1
+  );
+};
+
+const updateOnboardingReservations = (state: WorldState): WorldEvent[] => {
+  const events: WorldEvent[] = [];
+  for (const playerId of Object.keys(state.onboardingReservations).sort((left, right) =>
+    left.localeCompare(right),
+  )) {
+    const reservation = state.onboardingReservations[playerId];
+    const player = state.players[playerId];
+    if (!reservation || !player) {
+      delete state.onboardingReservations[playerId];
+      continue;
+    }
+    if (reservation.securedTick !== null) continue;
+    const completedSecuringBuilding = Object.values(state.buildings).some(
+      (building) =>
+        building.ownerId === player.id &&
+        building.kind === onboardingRules.securingBuildingKind &&
+        building.constructionTicks === 0,
+    );
+    if (completedSecuringBuilding) {
+      reservation.securedTick = state.tick;
+      continue;
+    }
+    if (state.tick < reservation.expiresTick) continue;
+    if (!hasSafeReclaimableStarterSettlement(state, player)) {
+      reservation.securedTick = state.tick;
+      continue;
+    }
+    removePlayerData(state, player, 'abandoned-onboarding', true);
+    events.push({ type: 'onboardingReservationReclaimed', playerId: player.id });
+  }
+  return events;
+};
+
 export const applyCommand = (
   state: WorldState,
   command: Command,
@@ -572,7 +962,8 @@ export const applyCommand = (
     events: [],
   });
   const player = state.players[command.playerId];
-  if (!player) return reject('unknown-player');
+  if (!player)
+    return reject(state.deletedPlayers[command.playerId] ? 'account-deleted' : 'unknown-player');
   if (!Number.isSafeInteger(command.sequence) || command.sequence < 1)
     return reject('out-of-order-command');
   if ('x' in command && (!Number.isSafeInteger(command.x) || !Number.isSafeInteger(command.y)))
@@ -581,11 +972,22 @@ export const applyCommand = (
   if (command.sequence <= player.lastSequence) return reject('out-of-order-command');
   const accept = (events: WorldEvent[]) => {
     player.lastSequence = command.sequence;
+    state.playerActivity[player.id] = {
+      ...(state.playerActivity[player.id] ?? {
+        raidEligibleTick: state.tick + threatDefinitions['raider-swarm'].newPlayerProtectionTicks,
+      }),
+      lastActiveTick: state.tick,
+    };
+    const reservation = state.onboardingReservations[player.id];
+    if (reservation?.securedTick === null)
+      reservation.expiresTick = state.tick + onboardingRules.abandonedReservationTicks;
     state.processedCommands.push(command.id);
     return { result: { accepted: true as const, commandId: command.id }, events };
   };
   if (command.type === 'gather') {
     if (distance(player.plot, command.x, command.y) > GATHER_RANGE) return reject('out-of-range');
+    if (reservedResourceOwner(state, command.x, command.y) !== player.id)
+      return reject('reserved-resource');
     const key = tileKey(command.x, command.y);
     const resource = terrainAt(state.seed, command.x, command.y);
     if (resource !== 'ore' && resource !== 'wood') return reject('resource-depleted');
@@ -618,6 +1020,8 @@ export const applyCommand = (
     if (!player.exploredChunks[chunkKey(command.x, command.y)]) return reject('not-explored');
     if (player.territoryCells[key] || isClaimedByOther(state, player.id, key))
       return reject('territory-claimed');
+    if (territoryIntersectsForeignSettlement(state, player.id, key))
+      return reject('protected-area');
     if (!territoryNeighbors(key).some((neighbor) => player.territoryCells[neighbor]))
       return reject('not-adjacent');
     player.territoryCells[key] = true;
@@ -642,6 +1046,264 @@ export const applyCommand = (
     player.research.activeTechnology = technology.id;
     player.research.ticksRemaining = technology.ticks;
     return accept([]);
+  }
+  if (command.type === 'contributeToObjective') {
+    const definition = cooperativeObjectiveDefinitions[command.objectiveId];
+    const objective = state.cooperativeObjectives[command.objectiveId];
+    if (!definition || !objective) return reject('unknown-objective');
+    if (objective.completedTick !== null) return reject('objective-complete');
+    const settlement = state.settlements[command.settlementId];
+    if (!settlement) return reject('unknown-settlement');
+    if (!settlement.members[player.id]) return reject('not-settlement-member');
+    if (!Number.isSafeInteger(command.amount) || command.amount < 1)
+      return reject('invalid-amount');
+    if (objective.totalContributed + command.amount > definition.targetAmount)
+      return reject('invalid-amount');
+    const item = definition.contributionItem as ItemId;
+    if (player.inventory[item] < command.amount) return reject('insufficient-resources');
+    player.inventory[item] -= command.amount;
+    objective.totalContributed += command.amount;
+    objective.contributionsBySettlement[settlement.id] =
+      (objective.contributionsBySettlement[settlement.id] ?? 0) + command.amount;
+    objective.contributionsByPlayer[player.id] =
+      (objective.contributionsByPlayer[player.id] ?? 0) + command.amount;
+    objective.contributionHistory.push({
+      commandId: command.id,
+      playerId: player.id,
+      settlementId: settlement.id,
+      item,
+      amount: command.amount,
+      tick: state.tick,
+    });
+    const events: WorldEvent[] = [
+      { type: 'objectiveContributed', playerId: player.id, objectiveId: objective.id },
+    ];
+    if (objective.totalContributed === definition.targetAmount) {
+      objective.completedTick = state.tick;
+      events.push({ type: 'objectiveCompleted', objectiveId: objective.id });
+    }
+    return accept(events);
+  }
+  if (command.type === 'claimObjectiveReward') {
+    const definition = cooperativeObjectiveDefinitions[command.objectiveId];
+    const objective = state.cooperativeObjectives[command.objectiveId];
+    if (!definition || !objective) return reject('unknown-objective');
+    if (objective.completedTick === null) return reject('objective-incomplete');
+    if (!objective.contributionsByPlayer[player.id])
+      return reject('objective-contribution-required');
+    if (objective.rewardClaims[player.id]) return reject('reward-already-claimed');
+    const rewardEntries = Object.entries(definition.reward) as Array<[ItemId, number]>;
+    const rewardTotal = rewardEntries.reduce((total, [, amount]) => total + amount, 0);
+    if (
+      inventoryTotal(player.inventory) + rewardTotal > INVENTORY_CAPACITY ||
+      rewardEntries.some(([item, amount]) => player.inventory[item] + amount > INVENTORY_CAPACITY)
+    )
+      return reject('inventory-full');
+    for (const [item, amount] of rewardEntries) player.inventory[item] += amount;
+    objective.rewardClaims[player.id] = command.id;
+    objective.rewardHistory.push({
+      commandId: command.id,
+      playerId: player.id,
+      reward: { ...definition.reward },
+      tick: state.tick,
+    });
+    return accept([
+      { type: 'objectiveRewardClaimed', playerId: player.id, objectiveId: objective.id },
+    ]);
+  }
+  if (command.type === 'createSharedConstructionProject') {
+    const settlement = state.settlements[command.settlementId];
+    if (!settlement) return reject('unknown-settlement');
+    const role = settlement.members[player.id];
+    if (role !== 'owner' && role !== 'builder') return reject('settlement-permission-denied');
+    const owner = state.players[settlement.ownerId];
+    if (!owner) return reject('unknown-player');
+    if (!canBuildAt(state, owner, command.x, command.y)) return reject('outside-plot');
+    if (
+      isSettlementAccessTile(state, command.x, command.y) ||
+      isForeignSettlementProtectedAt(state, owner.id, command.x, command.y)
+    )
+      return reject('protected-area');
+    if (terrainAt(state.seed, command.x, command.y) === 'water')
+      return reject('tile-not-buildable');
+    if (
+      Object.values(state.buildings).some(
+        (candidate) => candidate.x === command.x && candidate.y === command.y,
+      ) ||
+      Object.values(state.sharedConstructionProjects).some(
+        (project) =>
+          project.completedTick === null && project.x === command.x && project.y === command.y,
+      )
+    )
+      return reject('occupied');
+    const activeProjects = Object.values(state.sharedConstructionProjects).filter(
+      (project) => project.settlementId === settlement.id && project.completedTick === null,
+    );
+    if (activeProjects.length >= MAX_ACTIVE_SHARED_PROJECTS_PER_SETTLEMENT)
+      return reject('project-limit-reached');
+    const definition = buildingDefinitions[command.buildingKind];
+    if (definition.requiredTechnology && !owner.research.unlocked[definition.requiredTechnology])
+      return reject('technology-locked');
+    const projectId = command.id;
+    state.sharedConstructionProjects[projectId] = {
+      id: projectId,
+      settlementId: settlement.id,
+      createdBy: player.id,
+      buildingKind: command.buildingKind,
+      x: command.x,
+      y: command.y,
+      required: constructionMaterialsFor(command.buildingKind),
+      contributed: emptyInventory(),
+      createdTick: state.tick,
+      completedTick: null,
+      buildingId: null,
+      contributionHistory: [],
+    };
+    return accept([
+      {
+        type: 'sharedProjectCreated',
+        playerId: player.id,
+        projectId,
+      },
+    ]);
+  }
+  if (command.type === 'contributeToSharedConstructionProject') {
+    const project = state.sharedConstructionProjects[command.projectId];
+    if (!project) return reject('unknown-project');
+    if (project.completedTick !== null) return reject('project-complete');
+    const settlement = state.settlements[project.settlementId];
+    if (!settlement) return reject('unknown-settlement');
+    if (!settlement.members[player.id]) return reject('not-settlement-member');
+    if (!Number.isSafeInteger(command.amount) || command.amount < 1)
+      return reject('invalid-amount');
+    const remaining = project.required[command.item] - project.contributed[command.item];
+    if (remaining < command.amount) return reject('invalid-amount');
+    if (player.inventory[command.item] < command.amount) return reject('insufficient-resources');
+    player.inventory[command.item] -= command.amount;
+    project.contributed[command.item] += command.amount;
+    project.contributionHistory.push({
+      commandId: command.id,
+      playerId: player.id,
+      item: command.item,
+      amount: command.amount,
+      tick: state.tick,
+    });
+    const events: WorldEvent[] = [
+      { type: 'sharedProjectContributed', playerId: player.id, projectId: project.id },
+    ];
+    if (inventoryItems.every((item) => project.contributed[item] === project.required[item])) {
+      const building = createBuildingRecord(
+        state,
+        settlement.ownerId,
+        project.buildingKind,
+        project.x,
+        project.y,
+      );
+      project.completedTick = state.tick;
+      project.buildingId = building.id;
+      events.push({
+        type: 'sharedProjectCompleted',
+        playerId: player.id,
+        buildingId: building.id,
+        projectId: project.id,
+      });
+    }
+    return accept(events);
+  }
+  if (command.type === 'setPlayerName') {
+    const name = normalizeUserText(command.name);
+    if (!validDisplayName(name, socialRules.playerNameLength)) return reject('invalid-name');
+    if (containsModeratedTerm(name)) return reject('content-rejected');
+    if (
+      Object.entries(state.social.playerNames).some(
+        ([id, existing]) => id !== player.id && foldedUserText(existing) === foldedUserText(name),
+      )
+    )
+      return reject('name-taken');
+    state.social.playerNames[player.id] = name;
+    return accept([{ type: 'playerNameChanged', playerId: player.id }]);
+  }
+  if (command.type === 'setSettlementName') {
+    const settlement = state.settlements[command.settlementId];
+    if (!settlement) return reject('unknown-settlement');
+    if (settlement.ownerId !== player.id) return reject('settlement-permission-denied');
+    const name = normalizeUserText(command.name);
+    if (!validDisplayName(name, socialRules.settlementNameLength)) return reject('invalid-name');
+    if (containsModeratedTerm(name)) return reject('content-rejected');
+    if (
+      Object.entries(state.social.settlementNames).some(
+        ([id, existing]) =>
+          id !== settlement.id && foldedUserText(existing) === foldedUserText(name),
+      )
+    )
+      return reject('name-taken');
+    state.social.settlementNames[settlement.id] = name;
+    return accept([{ type: 'settlementNameChanged', playerId: player.id }]);
+  }
+  if (command.type === 'sendChatMessage') {
+    const text = normalizeUserText(command.text);
+    if (!text || [...text].length > socialRules.chatMessageMaxLength)
+      return reject('invalid-message');
+    if (containsModeratedTerm(text)) return reject('content-rejected');
+    const lastChatTick = state.social.lastChatTick[player.id];
+    if (lastChatTick !== undefined && state.tick - lastChatTick < socialRules.chatCooldownTicks)
+      return reject('chat-rate-limited');
+    if (command.channel === 'settlement') {
+      const settlement = state.settlements[command.settlementId];
+      if (!settlement) return reject('unknown-settlement');
+      if (!settlement.members[player.id]) return reject('not-settlement-member');
+    }
+    state.social.messages.push({
+      id: command.id,
+      senderId: player.id,
+      senderName: state.social.playerNames[player.id] ?? player.id,
+      channel: command.channel,
+      ...(command.channel === 'settlement' ? { settlementId: command.settlementId } : {}),
+      text,
+      tick: state.tick,
+    });
+    while (state.social.messages.length > socialRules.retainedMessages)
+      state.social.messages.shift();
+    state.social.lastChatTick[player.id] = state.tick;
+    return accept([{ type: 'chatMessageSent', playerId: player.id }]);
+  }
+  if (command.type === 'setPlayerBlocked') {
+    if (command.targetPlayerId === player.id) return reject('cannot-block-self');
+    if (!state.players[command.targetPlayerId]) return reject('unknown-recipient');
+    state.social.blockedPlayers[player.id] ??= {};
+    if (command.blocked) state.social.blockedPlayers[player.id]![command.targetPlayerId] = true;
+    else delete state.social.blockedPlayers[player.id]![command.targetPlayerId];
+    return accept([
+      {
+        type: 'playerBlockChanged',
+        playerId: player.id,
+        targetPlayerId: command.targetPlayerId,
+      },
+    ]);
+  }
+  if (command.type === 'reportChatMessage') {
+    const message = state.social.messages.find((candidate) => candidate.id === command.messageId);
+    if (!message) return reject('unknown-message');
+    if (
+      state.social.reports.some(
+        (report) =>
+          report.reporterId === player.id && report.reportedMessage.id === command.messageId,
+      )
+    )
+      return reject('already-reported');
+    const reason = normalizeUserText(command.reason);
+    if (!reason || [...reason].length > socialRules.reportReasonMaxLength)
+      return reject('invalid-message');
+    state.social.reports.push({
+      id: command.id,
+      reporterId: player.id,
+      reportedMessage: structuredClone(message),
+      reason,
+      tick: state.tick,
+      status: 'open',
+    });
+    while (state.social.reports.length > socialRules.retainedReports) state.social.reports.shift();
+    return accept([{ type: 'chatMessageReported', playerId: player.id }]);
   }
   if (command.type === 'transferToPlayer') {
     const target = state.players[command.targetPlayerId];
@@ -705,6 +1367,11 @@ export const applyCommand = (
     settlement.members[player.id] = 'member';
     settlement.members[command.targetPlayerId] = 'owner';
     settlement.ownerId = command.targetPlayerId;
+    for (const project of Object.values(state.sharedConstructionProjects)) {
+      if (project.settlementId !== settlement.id || !project.buildingId) continue;
+      const building = state.buildings[project.buildingId];
+      if (building) building.ownerId = command.targetPlayerId;
+    }
     return accept([
       { type: 'settlementMemberChanged', playerId: player.id },
       { type: 'settlementMemberChanged', playerId: command.targetPlayerId },
@@ -727,6 +1394,15 @@ export const applyCommand = (
       return reject('cannot-remove-settlement-owner');
     delete settlement.members[command.targetPlayerId];
     return accept([{ type: 'settlementMemberChanged', playerId: command.targetPlayerId }]);
+  }
+  if (command.type === 'deleteAccount') {
+    if (command.confirmation !== 'DELETE') return reject('account-deletion-confirmation-required');
+    if (Object.values(state.settlements).some((settlement) => settlement.ownerId === player.id))
+      return reject('cannot-delete-settlement-owner');
+
+    const outcome = accept([{ type: 'playerDeleted', playerId: player.id }]);
+    removePlayerData(state, player, 'account-deletion', false);
+    return outcome;
   }
   if (command.type === 'createLogisticsLink') {
     const source = state.buildings[command.sourceBuildingId];
@@ -832,12 +1508,27 @@ export const applyCommand = (
       ? undefined
       : state.buildings[command.buildingId];
   if (isPlacement) {
+    if (
+      Object.values(state.buildings).filter(
+        (candidate) => candidate.ownerId === player.id && candidate.constructionTicks > 0,
+      ).length >= MAX_ACTIVE_CONSTRUCTIONS_PER_PLAYER
+    )
+      return reject('construction-limit-reached');
     if (!canBuildAt(state, player, command.x, command.y)) return reject('outside-plot');
+    if (
+      isSettlementAccessTile(state, command.x, command.y) ||
+      isForeignSettlementProtectedAt(state, player.id, command.x, command.y)
+    )
+      return reject('protected-area');
     if (terrainAt(state.seed, command.x, command.y) === 'water')
       return reject('tile-not-buildable');
     if (
       Object.values(state.buildings).some(
         (candidate) => candidate.x === command.x && candidate.y === command.y,
+      ) ||
+      Object.values(state.sharedConstructionProjects).some(
+        (project) =>
+          project.completedTick === null && project.x === command.x && project.y === command.y,
       )
     )
       return reject('occupied');
@@ -857,27 +1548,9 @@ export const applyCommand = (
     if (definition.requiredTechnology && !player.research.unlocked[definition.requiredTechnology])
       return reject('technology-locked');
     if (!canAffordConstruction(player.inventory, kind)) return reject('insufficient-wood');
-    const id = buildingId(`${kind}-${state.tick}-${Object.keys(state.buildings).length}`);
     deductConstructionCost(player.inventory, kind);
-    state.buildings[id] = {
-      id,
-      kind,
-      ownerId: player.id,
-      x: command.x,
-      y: command.y,
-      health: definition.maxHealth,
-      maxHealth: definition.maxHealth,
-      progress: 0,
-      constructionTicks: definition.constructionTicks,
-      constructionMaterials: constructionMaterialsFor(kind),
-      inventory: emptyInventory(),
-      inventoryCapacity: definition.inventoryCapacity,
-      populationCapacity: definition.populationCapacity,
-      jobPriority: isProducer(kind) ? 1 : 0,
-      recipeId: defaultRecipeIdFor(kind),
-      productionState: definition.constructionTicks > 0 ? 'constructing' : 'idle',
-    };
-    return accept([{ type: 'buildingPlaced', playerId: player.id, buildingId: id }]);
+    const placed = createBuildingRecord(state, player.id, kind, command.x, command.y);
+    return accept([{ type: 'buildingPlaced', playerId: player.id, buildingId: placed.id }]);
   }
   if (!building) return reject('unknown-building');
   if (building.ownerId !== player.id) {
@@ -997,15 +1670,28 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
       if (startedAt !== undefined) profiler?.record(phase, profiler.now() - startedAt);
     };
   };
+  const events: WorldEvent[] = [];
   // Phase 1: advance-clock.
   let endPhase = beginPhase('advance-clock');
   state.tick += 1;
+  events.push(...updateOnboardingReservations(state));
   endPhase();
-  const events: WorldEvent[] = [];
   const staffedSmelters = new Set<BuildingId>();
   const staffedConstruction = new Set<BuildingId>();
   // Phase 2: research-and-population.
   endPhase = beginPhase('research-and-population');
+  const buildingsByOwner = new Map<PlayerId, Building[]>();
+  for (const building of Object.values(state.buildings)) {
+    const owned = buildingsByOwner.get(building.ownerId) ?? [];
+    owned.push(building);
+    buildingsByOwner.set(building.ownerId, owned);
+  }
+  const scoutsByOwner = new Map<PlayerId, Scout[]>();
+  for (const scout of Object.values(state.scouts ?? {})) {
+    const owned = scoutsByOwner.get(scout.ownerId) ?? [];
+    owned.push(scout);
+    scoutsByOwner.set(scout.ownerId, owned);
+  }
   for (const player of Object.values(state.players).sort((left, right) =>
     left.id.localeCompare(right.id),
   )) {
@@ -1019,9 +1705,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
     // Reuse the ownership scan for all population calculations. This is a hot
     // phase in dense worlds, and previously scanned every building three times
     // for each player.
-    const ownedBuildings = Object.values(state.buildings).filter(
-      (building) => building.ownerId === player.id,
-    );
+    const ownedBuildings = buildingsByOwner.get(player.id) ?? [];
     const completedBuildings = ownedBuildings.filter(
       (building) => building.constructionTicks === 0,
     );
@@ -1068,7 +1752,6 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
     );
     for (const producer of staffed) staffedSmelters.add(producer.id);
     for (const project of constructionWorkers) staffedConstruction.add(project.id);
-    player.visibleChunks = visibleChunksFor(state, player);
   }
   for (const scout of Object.values(state.scouts ?? {}).sort((left, right) =>
     left.id.localeCompare(right.id),
@@ -1103,7 +1786,11 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
     if (owner) owner.exploredChunks[chunkKey(scout.x, scout.y)] = true;
   }
   for (const player of Object.values(state.players))
-    player.visibleChunks = visibleChunksFor(state, player);
+    player.visibleChunks = visibleChunksFor(
+      player,
+      buildingsByOwner.get(player.id) ?? [],
+      scoutsByOwner.get(player.id) ?? [],
+    );
   endPhase();
   // Phase 3: construction-and-production.
   endPhase = beginPhase('construction-and-production');
@@ -1118,12 +1805,19 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
         building.constructionMaterials[nextMaterial] -= 1;
       }
       building.constructionTicks -= 1;
-      if (building.constructionTicks === 0)
+      if (building.constructionTicks === 0) {
+        const reservation = state.onboardingReservations[building.ownerId];
+        if (
+          reservation?.securedTick === null &&
+          building.kind === onboardingRules.securingBuildingKind
+        )
+          reservation.securedTick = state.tick;
         events.push({
           type: 'buildingCompleted',
           buildingId: building.id,
           playerId: building.ownerId,
         });
+      }
       continue;
     }
     const recipe = recipeFor(building);
@@ -1162,7 +1856,12 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
   const acidRain = environmentalEvents['acid-rain'];
   if (state.tick % acidRain.intervalTicks === 0) {
     const targets = Object.values(state.buildings)
-      .filter((building) => building.constructionTicks === 0 && building.health > 0)
+      .filter(
+        (building) =>
+          building.constructionTicks === 0 &&
+          building.health > 0 &&
+          isRaidEligible(state, building.ownerId),
+      )
       .sort((left, right) => left.id.localeCompare(right.id));
     const [nextRandomState, targetIndex] =
       targets.length > 0
@@ -1171,7 +1870,10 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
     state.randomState = nextRandomState;
     const target = targets[targetIndex];
     if (target) {
-      target.health = Math.max(0, target.health - acidRain.damage);
+      target.health = Math.max(
+        protectedHealthFloor(state, target),
+        target.health - acidRain.damage,
+      );
       events.push({
         type: 'hazard',
         buildingId: target.id,
@@ -1255,12 +1957,20 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
   endPhase = beginPhase('threat-spawning');
   const raider = threatDefinitions['raider-swarm'];
   if (!state.peaceful && state.tick % raider.spawnIntervalTicks === 0) {
+    const activeThreatsByOwner = new Map<string, number>();
+    for (const threat of Object.values(state.threats)) {
+      const ownerId = state.buildings[threat.targetBuildingId]?.ownerId;
+      if (ownerId) activeThreatsByOwner.set(ownerId, (activeThreatsByOwner.get(ownerId) ?? 0) + 1);
+    }
     const targets = Object.values(state.buildings)
       .filter(
         (building) =>
           building.kind !== 'settlement-center' &&
           building.constructionTicks === 0 &&
-          building.health > 0,
+          building.health > 0 &&
+          isRaidEligible(state, building.ownerId) &&
+          (!isInactive(state, building.ownerId) ||
+            (activeThreatsByOwner.get(building.ownerId) ?? 0) < raider.maxInactiveThreatsPerPlayer),
       )
       .sort((left, right) => left.id.localeCompare(right.id));
     const [nextRandomState, targetIndex] =
@@ -1272,16 +1982,18 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
     if (target) {
       const id = `raider-${state.tick}`;
       const spawn = threatSpawnPosition(state, target);
-      state.threats[id] = {
-        id,
-        targetBuildingId: target.id,
-        health: raider.health,
-        damage: raider.damage,
-        spawnedTick: state.tick,
-        x: spawn.x,
-        y: spawn.y,
-      };
-      events.push({ type: 'threatSpawned', buildingId: target.id, threatId: id });
+      if (spawn) {
+        state.threats[id] = {
+          id,
+          targetBuildingId: target.id,
+          health: raider.health,
+          damage: raider.damage,
+          spawnedTick: state.tick,
+          x: spawn.x,
+          y: spawn.y,
+        };
+        events.push({ type: 'threatSpawned', buildingId: target.id, threatId: id });
+      }
     }
   }
   endPhase();
@@ -1325,6 +2037,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
               isPassable: (tile) =>
                 (tile.x === target.x && tile.y === target.y) ||
                 (terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
+                  !isForeignSettlementProtectedAt(state, target.ownerId, tile.x, tile.y) &&
                   !occupiedBuildingTiles.has(tileKey(tile.x, tile.y))),
             })
           : findPath({
@@ -1340,6 +2053,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
               isPassable: (tile) =>
                 (tile.x === target.x && tile.y === target.y) ||
                 (terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
+                  !isForeignSettlementProtectedAt(state, target.ownerId, tile.x, tile.y) &&
                   !occupiedBuildingTiles.has(tileKey(tile.x, tile.y))),
             })
         : undefined;
@@ -1360,7 +2074,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
       continue;
     }
     if (manhattanDistance(threat, target) <= 1 && state.tick % 10 === 0) {
-      target.health = Math.max(0, target.health - threat.damage);
+      target.health = Math.max(protectedHealthFloor(state, target), target.health - threat.damage);
       events.push({ type: 'buildingDamaged', buildingId: target.id, threatId: threat.id });
     }
   }
@@ -1455,7 +2169,18 @@ interface Version9Player extends Omit<PlayerState, 'population'> {
 }
 type Version9Building = Omit<Building, 'jobPriority'>;
 type LegacyThreat = Omit<Threat, 'x' | 'y'>;
-type LegacyWorldBase = Omit<WorldState, 'schemaVersion' | 'randomState' | 'peaceful'>;
+type LegacyWorldBase = Omit<
+  WorldState,
+  | 'schemaVersion'
+  | 'randomState'
+  | 'peaceful'
+  | 'cooperativeObjectives'
+  | 'playerActivity'
+  | 'sharedConstructionProjects'
+  | 'social'
+  | 'deletedPlayers'
+  | 'onboardingReservations'
+>;
 interface Version14World extends LegacyWorldBase {
   schemaVersion: 14;
 }
@@ -1467,7 +2192,16 @@ type LegacyBuildingWithoutRecipe = Omit<
 >;
 interface Version16World extends Omit<
   WorldState,
-  'schemaVersion' | 'buildings' | 'logisticsLinks' | 'peaceful'
+  | 'schemaVersion'
+  | 'buildings'
+  | 'logisticsLinks'
+  | 'peaceful'
+  | 'cooperativeObjectives'
+  | 'playerActivity'
+  | 'sharedConstructionProjects'
+  | 'social'
+  | 'deletedPlayers'
+  | 'onboardingReservations'
 > {
   schemaVersion: 16;
   buildings: Record<string, LegacyBuildingWithoutRecipe>;
@@ -1479,18 +2213,96 @@ interface Version15World extends Omit<Version16World, 'schemaVersion' | 'logisti
 }
 interface Version17World extends Omit<
   WorldState,
-  'schemaVersion' | 'buildings' | 'logisticsLinks' | 'peaceful'
+  | 'schemaVersion'
+  | 'buildings'
+  | 'logisticsLinks'
+  | 'peaceful'
+  | 'cooperativeObjectives'
+  | 'playerActivity'
+  | 'sharedConstructionProjects'
+  | 'social'
+  | 'deletedPlayers'
+  | 'onboardingReservations'
 > {
   schemaVersion: 17;
   buildings: Record<string, Omit<Building, 'productionState' | 'constructionMaterials'>>;
   logisticsLinks: Record<string, PreFlowLogisticsLink>;
 }
-interface Version18World extends Omit<WorldState, 'schemaVersion' | 'buildings' | 'peaceful'> {
+interface Version18World extends Omit<
+  WorldState,
+  | 'schemaVersion'
+  | 'buildings'
+  | 'peaceful'
+  | 'cooperativeObjectives'
+  | 'playerActivity'
+  | 'sharedConstructionProjects'
+  | 'social'
+  | 'deletedPlayers'
+  | 'onboardingReservations'
+> {
   schemaVersion: 18;
   buildings: Record<string, Omit<Building, 'constructionMaterials'>>;
 }
-interface Version19World extends Omit<WorldState, 'schemaVersion' | 'peaceful'> {
+interface Version19World extends Omit<
+  WorldState,
+  | 'schemaVersion'
+  | 'peaceful'
+  | 'cooperativeObjectives'
+  | 'playerActivity'
+  | 'sharedConstructionProjects'
+  | 'social'
+  | 'deletedPlayers'
+  | 'onboardingReservations'
+> {
   schemaVersion: 19;
+}
+interface Version20World extends Omit<
+  WorldState,
+  | 'schemaVersion'
+  | 'cooperativeObjectives'
+  | 'playerActivity'
+  | 'sharedConstructionProjects'
+  | 'social'
+  | 'deletedPlayers'
+  | 'onboardingReservations'
+> {
+  schemaVersion: 20;
+}
+interface Version21World extends Omit<
+  WorldState,
+  | 'schemaVersion'
+  | 'playerActivity'
+  | 'sharedConstructionProjects'
+  | 'social'
+  | 'deletedPlayers'
+  | 'onboardingReservations'
+> {
+  schemaVersion: 21;
+}
+interface Version22World extends Omit<
+  WorldState,
+  | 'schemaVersion'
+  | 'sharedConstructionProjects'
+  | 'social'
+  | 'deletedPlayers'
+  | 'onboardingReservations'
+> {
+  schemaVersion: 22;
+}
+interface Version23World extends Omit<
+  WorldState,
+  'schemaVersion' | 'social' | 'deletedPlayers' | 'onboardingReservations'
+> {
+  schemaVersion: 23;
+}
+interface Version24World extends Omit<
+  WorldState,
+  'schemaVersion' | 'deletedPlayers' | 'onboardingReservations'
+> {
+  schemaVersion: 24;
+}
+interface Version25World extends Omit<WorldState, 'schemaVersion' | 'onboardingReservations'> {
+  schemaVersion: 25;
 }
 interface Version10World extends Omit<LegacyWorldBase, 'threats'> {
   schemaVersion: 10;
@@ -1630,24 +2442,112 @@ const withFlowControls = <T extends PreFlowLogisticsLink>(
       { ...link, throughputPerTick: logisticsThroughput, status: 'idle' },
     ]),
   ) as Record<string, LogisticsLink>;
-const migrateVersion17 = (state: Version17World): WorldState => ({
-  ...state,
-  schemaVersion: 20,
-  peaceful: true,
-  buildings: withEmptyConstructionMaterials(withProductionStates(state.buildings)),
-  logisticsLinks: withFlowControls(state.logisticsLinks),
+const socialStateForExistingWorld = (
+  players: WorldState['players'],
+  settlements: WorldState['settlements'],
+): SocialState => ({
+  ...initialSocialState(),
+  playerNames: Object.fromEntries(
+    Object.keys(players)
+      .sort((left, right) => left.localeCompare(right))
+      .map((id, index) => [id, `Settler ${index + 1}`]),
+  ),
+  settlementNames: Object.fromEntries(
+    Object.keys(settlements)
+      .sort((left, right) => left.localeCompare(right))
+      .map((id, index) => [id, `Settlement ${index + 1}`]),
+  ),
+  blockedPlayers: Object.fromEntries(Object.keys(players).map((id) => [id, {}])),
 });
-const migrateVersion18 = (state: Version18World): WorldState => ({
+const onboardingReservationsForExistingWorld = (
+  state: Pick<WorldState, 'tick' | 'players' | 'buildings' | 'settlements' | 'playerActivity'>,
+): WorldState['onboardingReservations'] =>
+  Object.fromEntries(
+    Object.values(state.players).map((player) => {
+      const memberships = Object.values(state.settlements).filter(
+        (settlement) => settlement.members[player.id],
+      );
+      const ownsSoloStarter =
+        memberships.length === 1 &&
+        memberships[0]?.ownerId === player.id &&
+        Object.keys(memberships[0].members).length === 1;
+      const completedSecuringBuilding = Object.values(state.buildings).some(
+        (building) =>
+          building.ownerId === player.id &&
+          building.kind === onboardingRules.securingBuildingKind &&
+          building.constructionTicks === 0,
+      );
+      const createdTick = state.playerActivity[player.id]?.lastActiveTick ?? state.tick;
+      return [
+        player.id,
+        {
+          createdTick,
+          expiresTick: state.tick + onboardingRules.abandonedReservationTicks,
+          securedTick: completedSecuringBuilding || !ownsSoloStarter ? state.tick : null,
+        },
+      ];
+    }),
+  );
+const migrateVersion25 = (state: Version25World): WorldState => ({
   ...state,
-  schemaVersion: 20,
-  peaceful: true,
-  buildings: withEmptyConstructionMaterials(state.buildings),
+  schemaVersion: 26,
+  onboardingReservations: onboardingReservationsForExistingWorld(state),
 });
-const migrateVersion19 = (state: Version19World): WorldState => ({
-  ...state,
-  schemaVersion: 20,
-  peaceful: true,
-});
+const migrateVersion24 = (state: Version24World): WorldState =>
+  migrateVersion25({
+    ...state,
+    schemaVersion: 25,
+    deletedPlayers: {},
+  });
+const migrateVersion23 = (state: Version23World): WorldState =>
+  migrateVersion24({
+    ...state,
+    schemaVersion: 24,
+    social: socialStateForExistingWorld(state.players, state.settlements),
+  });
+const migrateVersion22 = (state: Version22World): WorldState =>
+  migrateVersion23({
+    ...state,
+    schemaVersion: 23,
+    sharedConstructionProjects: {},
+  });
+const migrateVersion21 = (state: Version21World): WorldState =>
+  migrateVersion22({
+    ...state,
+    schemaVersion: 22,
+    playerActivity: Object.fromEntries(
+      Object.keys(state.players).map((id) => [
+        id,
+        {
+          lastActiveTick: state.tick,
+          raidEligibleTick: state.tick + threatDefinitions['raider-swarm'].newPlayerProtectionTicks,
+        },
+      ]),
+    ),
+  });
+const migrateVersion20 = (state: Version20World): WorldState =>
+  migrateVersion21({
+    ...state,
+    schemaVersion: 21,
+    cooperativeObjectives: initialCooperativeObjectives(),
+  });
+const migrateVersion17 = (state: Version17World): WorldState =>
+  migrateVersion20({
+    ...state,
+    schemaVersion: 20,
+    peaceful: true,
+    buildings: withEmptyConstructionMaterials(withProductionStates(state.buildings)),
+    logisticsLinks: withFlowControls(state.logisticsLinks),
+  });
+const migrateVersion18 = (state: Version18World): WorldState =>
+  migrateVersion20({
+    ...state,
+    schemaVersion: 20,
+    peaceful: true,
+    buildings: withEmptyConstructionMaterials(state.buildings),
+  });
+const migrateVersion19 = (state: Version19World): WorldState =>
+  migrateVersion20({ ...state, schemaVersion: 20, peaceful: true });
 const migrateVersion16 = (state: Version16World): Version17World => ({
   ...state,
   schemaVersion: 17,
@@ -1704,7 +2604,13 @@ const migrateToCurrentSchema = (state: unknown): WorldState => {
 /** Forward-only snapshot migration kept inside the platform-independent simulation. */
 export const deserializeWorld = (raw: unknown): WorldState => {
   const candidate = structuredClone(raw) as { schemaVersion?: number };
-  if (candidate.schemaVersion === 20) return candidate as WorldState;
+  if (candidate.schemaVersion === 26) return candidate as WorldState;
+  if (candidate.schemaVersion === 25) return migrateVersion25(candidate as Version25World);
+  if (candidate.schemaVersion === 24) return migrateVersion24(candidate as Version24World);
+  if (candidate.schemaVersion === 23) return migrateVersion23(candidate as Version23World);
+  if (candidate.schemaVersion === 22) return migrateVersion22(candidate as Version22World);
+  if (candidate.schemaVersion === 21) return migrateVersion21(candidate as Version21World);
+  if (candidate.schemaVersion === 20) return migrateVersion20(candidate as Version20World);
   if (candidate.schemaVersion === 19) return migrateVersion19(candidate as Version19World);
   if (candidate.schemaVersion === 18) return migrateVersion18(candidate as Version18World);
   if (candidate.schemaVersion === 17) return migrateVersion17(candidate as Version17World);
@@ -1915,6 +2821,19 @@ export const inspectWorld = (state: WorldState): string[] => {
     if (existing) errors.push(`entity id ${id} is shared by ${existing} and ${kind}`);
     else entityIds.set(id, kind);
   };
+  const hasKnownPlayer = (id: string) => Boolean(state.players[id] || state.deletedPlayers[id]);
+  for (const [id, deleted] of Object.entries(state.deletedPlayers)) {
+    if (
+      deleted.id !== id ||
+      state.players[id] ||
+      !isNonNegativeInteger(deleted.deletedTick) ||
+      deleted.deletedTick > state.tick ||
+      (deleted.reason !== undefined &&
+        deleted.reason !== 'account-deletion' &&
+        deleted.reason !== 'abandoned-onboarding')
+    )
+      errors.push(`deleted player ${id} has an invalid tombstone`);
+  }
   const occupied = new Set<string>();
   for (const [id, player] of Object.entries(state.players)) {
     registerEntity(player.id, 'player');
@@ -1951,7 +2870,30 @@ export const inspectWorld = (state: WorldState): string[] => {
       })
     )
       errors.push(`player ${id} has invalid visible chunks`);
+    const activity = state.playerActivity[id];
+    if (
+      !activity ||
+      !isNonNegativeInteger(activity.lastActiveTick) ||
+      !isNonNegativeInteger(activity.raidEligibleTick) ||
+      activity.lastActiveTick > state.tick
+    )
+      errors.push(`player ${id} has invalid activity protection state`);
+    const reservation = state.onboardingReservations[id];
+    if (
+      !reservation ||
+      !isNonNegativeInteger(reservation.createdTick) ||
+      !isNonNegativeInteger(reservation.expiresTick) ||
+      reservation.createdTick > state.tick ||
+      reservation.expiresTick < reservation.createdTick ||
+      (reservation.securedTick !== null &&
+        (!isNonNegativeInteger(reservation.securedTick) || reservation.securedTick > state.tick))
+    )
+      errors.push(`player ${id} has an invalid onboarding reservation`);
   }
+  for (const id of Object.keys(state.playerActivity))
+    if (!state.players[id]) errors.push(`activity state has unknown player ${id}`);
+  for (const id of Object.keys(state.onboardingReservations))
+    if (!state.players[id]) errors.push(`onboarding reservation has unknown player ${id}`);
   for (const [id, building] of Object.entries(state.buildings)) {
     registerEntity(building.id, 'building');
     if (building.id !== id) errors.push(`building key ${id} does not match its id`);
@@ -2025,7 +2967,7 @@ export const inspectWorld = (state: WorldState): string[] => {
   for (const transfer of state.transfers) {
     if (transferIds.has(transfer.id)) errors.push(`duplicate transfer ${transfer.id}`);
     transferIds.add(transfer.id);
-    if (!state.players[transfer.fromPlayerId] || !state.players[transfer.toPlayerId])
+    if (!hasKnownPlayer(transfer.fromPlayerId) || !hasKnownPlayer(transfer.toPlayerId))
       errors.push(`transfer ${transfer.id} has an unknown participant`);
     if (!Number.isSafeInteger(transfer.amount) || transfer.amount < 1)
       errors.push(`transfer ${transfer.id} has an invalid amount`);
@@ -2069,6 +3011,70 @@ export const inspectWorld = (state: WorldState): string[] => {
         errors.push(`settlement ${id} invites an existing member ${invitedPlayerId}`);
     }
   }
+  const activeProjectTiles = new Set<string>();
+  for (const [id, project] of Object.entries(state.sharedConstructionProjects)) {
+    if (project.id !== id) errors.push(`shared project key ${id} does not match its id`);
+    const settlement = state.settlements[project.settlementId];
+    const expected = constructionMaterialsFor(project.buildingKind);
+    const historyTotals = emptyInventory();
+    const contributionCommands = new Set<string>();
+    for (const contribution of project.contributionHistory) {
+      if (contributionCommands.has(contribution.commandId))
+        errors.push(`shared project ${id} has duplicate contribution commands`);
+      contributionCommands.add(contribution.commandId);
+      if (
+        !hasKnownPlayer(contribution.playerId) ||
+        !inventoryItems.includes(contribution.item) ||
+        !Number.isSafeInteger(contribution.amount) ||
+        contribution.amount < 1 ||
+        !isNonNegativeInteger(contribution.tick) ||
+        contribution.tick > state.tick
+      )
+        errors.push(`shared project ${id} has invalid contribution history`);
+      else historyTotals[contribution.item] += contribution.amount;
+    }
+    if (
+      !settlement ||
+      !hasKnownPlayer(project.createdBy) ||
+      !Number.isSafeInteger(project.x) ||
+      !Number.isSafeInteger(project.y) ||
+      !isNonNegativeInteger(project.createdTick) ||
+      project.createdTick > state.tick ||
+      inventoryItems.some(
+        (item) =>
+          project.required[item] !== expected[item] ||
+          project.contributed[item] !== historyTotals[item] ||
+          project.contributed[item] > project.required[item],
+      )
+    )
+      errors.push(`shared project ${id} has invalid project state`);
+    const completed = inventoryItems.every(
+      (item) => project.contributed[item] === project.required[item],
+    );
+    if (
+      completed !== (project.completedTick !== null) ||
+      completed !== (project.buildingId !== null) ||
+      (project.completedTick !== null &&
+        (!isNonNegativeInteger(project.completedTick) || project.completedTick > state.tick))
+    )
+      errors.push(`shared project ${id} has invalid completion state`);
+    if (project.completedTick === null) {
+      const position = tileKey(project.x, project.y);
+      if (activeProjectTiles.has(position) || occupied.has(position))
+        errors.push(`shared project ${id} has an occupied project tile`);
+      activeProjectTiles.add(position);
+    } else if (project.buildingId) {
+      const building = state.buildings[project.buildingId];
+      if (
+        building &&
+        (building.ownerId !== settlement?.ownerId ||
+          building.kind !== project.buildingKind ||
+          building.x !== project.x ||
+          building.y !== project.y)
+      )
+        errors.push(`shared project ${id} has an inconsistent completed building`);
+    }
+  }
   for (const [id, link] of Object.entries(state.logisticsLinks)) {
     if (link.id !== id) errors.push(`logistics link key ${id} does not match its id`);
     if (!state.players[link.ownerId]) errors.push(`logistics link ${id} has an unknown owner`);
@@ -2102,6 +3108,153 @@ export const inspectWorld = (state: WorldState): string[] => {
       ].includes(link.status)
     )
       errors.push(`logistics link ${id} has an invalid status`);
+  }
+  for (const definition of Object.values(cooperativeObjectiveDefinitions)) {
+    const objective = state.cooperativeObjectives[definition.id];
+    if (!objective) {
+      errors.push(`cooperative objective ${definition.id} is missing`);
+      continue;
+    }
+    const contributionTotal = objective.contributionHistory.reduce(
+      (total, contribution) => total + contribution.amount,
+      0,
+    );
+    const settlementTotal = Object.values(objective.contributionsBySettlement).reduce(
+      (total, amount) => total + amount,
+      0,
+    );
+    const playerTotal = Object.values(objective.contributionsByPlayer).reduce(
+      (total, amount) => total + amount,
+      0,
+    );
+    if (
+      objective.id !== definition.id ||
+      !isNonNegativeInteger(objective.totalContributed) ||
+      objective.totalContributed > definition.targetAmount ||
+      contributionTotal !== objective.totalContributed ||
+      settlementTotal !== objective.totalContributed ||
+      playerTotal !== objective.totalContributed
+    )
+      errors.push(`cooperative objective ${definition.id} has inconsistent contributions`);
+    if (
+      (objective.totalContributed === definition.targetAmount) !==
+        (objective.completedTick !== null) ||
+      (objective.completedTick !== null &&
+        (!isNonNegativeInteger(objective.completedTick) || objective.completedTick > state.tick))
+    )
+      errors.push(`cooperative objective ${definition.id} has an invalid completion tick`);
+    const contributionCommands = new Set<string>();
+    for (const contribution of objective.contributionHistory) {
+      if (contributionCommands.has(contribution.commandId))
+        errors.push(`cooperative objective ${definition.id} has duplicate contribution commands`);
+      contributionCommands.add(contribution.commandId);
+      if (
+        !hasKnownPlayer(contribution.playerId) ||
+        !state.settlements[contribution.settlementId] ||
+        contribution.item !== definition.contributionItem ||
+        !Number.isSafeInteger(contribution.amount) ||
+        contribution.amount < 1 ||
+        !isNonNegativeInteger(contribution.tick) ||
+        contribution.tick > state.tick
+      )
+        errors.push(`cooperative objective ${definition.id} has invalid contribution history`);
+    }
+    const rewardCommands = new Set<string>();
+    for (const reward of objective.rewardHistory) {
+      if (rewardCommands.has(reward.commandId))
+        errors.push(`cooperative objective ${definition.id} has duplicate reward commands`);
+      rewardCommands.add(reward.commandId);
+      if (
+        !hasKnownPlayer(reward.playerId) ||
+        objective.rewardClaims[reward.playerId] !== reward.commandId ||
+        !objective.contributionsByPlayer[reward.playerId] ||
+        JSON.stringify(reward.reward) !== JSON.stringify(definition.reward) ||
+        !isNonNegativeInteger(reward.tick) ||
+        reward.tick > state.tick
+      )
+        errors.push(`cooperative objective ${definition.id} has invalid reward history`);
+    }
+    if (Object.keys(objective.rewardClaims).length !== objective.rewardHistory.length)
+      errors.push(`cooperative objective ${definition.id} has inconsistent reward claims`);
+  }
+  const foldedPlayerNames = new Set<string>();
+  for (const id of Object.keys(state.players)) {
+    const name = state.social.playerNames[id];
+    if (
+      !name ||
+      name !== normalizeUserText(name) ||
+      !validDisplayName(name, socialRules.playerNameLength)
+    )
+      errors.push(`player ${id} has an invalid display name`);
+    else if (foldedPlayerNames.has(foldedUserText(name)))
+      errors.push(`player ${id} has a duplicate display name`);
+    else foldedPlayerNames.add(foldedUserText(name));
+    for (const blockedId of Object.keys(state.social.blockedPlayers[id] ?? {}))
+      if (!state.players[blockedId] || blockedId === id)
+        errors.push(`player ${id} has an invalid blocked player`);
+  }
+  for (const id of Object.keys(state.social.playerNames))
+    if (!state.players[id]) errors.push(`social state has an unknown named player ${id}`);
+  for (const id of Object.keys(state.social.blockedPlayers))
+    if (!state.players[id]) errors.push(`social state has unknown block owner ${id}`);
+  const foldedSettlementNames = new Set<string>();
+  for (const id of Object.keys(state.settlements)) {
+    const name = state.social.settlementNames[id];
+    if (
+      !name ||
+      name !== normalizeUserText(name) ||
+      !validDisplayName(name, socialRules.settlementNameLength)
+    )
+      errors.push(`settlement ${id} has an invalid display name`);
+    else if (foldedSettlementNames.has(foldedUserText(name)))
+      errors.push(`settlement ${id} has a duplicate display name`);
+    else foldedSettlementNames.add(foldedUserText(name));
+  }
+  for (const id of Object.keys(state.social.settlementNames))
+    if (!state.settlements[id]) errors.push(`social state has an unknown named settlement ${id}`);
+  for (const [id, lastTick] of Object.entries(state.social.lastChatTick))
+    if (!state.players[id] || !isNonNegativeInteger(lastTick) || lastTick > state.tick)
+      errors.push(`player ${id} has an invalid chat rate-limit tick`);
+  if (state.social.messages.length > socialRules.retainedMessages)
+    errors.push('social state retains too many chat messages');
+  const messageIds = new Set<string>();
+  for (const message of state.social.messages) {
+    if (messageIds.has(message.id)) errors.push(`duplicate chat message ${message.id}`);
+    messageIds.add(message.id);
+    if (
+      !hasKnownPlayer(message.senderId) ||
+      !message.id ||
+      message.text !== normalizeUserText(message.text) ||
+      !message.text ||
+      [...message.text].length > socialRules.chatMessageMaxLength ||
+      !isNonNegativeInteger(message.tick) ||
+      message.tick > state.tick ||
+      (message.channel === 'settlement' &&
+        (!message.settlementId || !state.settlements[message.settlementId])) ||
+      (message.channel === 'global' && message.settlementId !== undefined)
+    )
+      errors.push(`chat message ${message.id} is invalid`);
+  }
+  if (state.social.reports.length > socialRules.retainedReports)
+    errors.push('social state retains too many chat reports');
+  const reportIds = new Set<string>();
+  const reporterMessages = new Set<string>();
+  for (const report of state.social.reports) {
+    const reporterMessage = `${report.reporterId}:${report.reportedMessage.id}`;
+    if (reportIds.has(report.id) || reporterMessages.has(reporterMessage))
+      errors.push(`duplicate chat report ${report.id}`);
+    reportIds.add(report.id);
+    reporterMessages.add(reporterMessage);
+    if (
+      !hasKnownPlayer(report.reporterId) ||
+      !['open', 'resolved'].includes(report.status) ||
+      report.reason !== normalizeUserText(report.reason) ||
+      !report.reason ||
+      [...report.reason].length > socialRules.reportReasonMaxLength ||
+      !isNonNegativeInteger(report.tick) ||
+      report.tick > state.tick
+    )
+      errors.push(`chat report ${report.id} is invalid`);
   }
   return errors;
 };

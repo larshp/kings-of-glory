@@ -52,6 +52,14 @@ export interface LogisticsLinkDefinition {
   readonly acceptedTargetKinds: readonly string[];
   readonly throughputPerTick: number;
 }
+export interface CooperativeObjectiveDefinition {
+  readonly id: string;
+  readonly displayName: string;
+  readonly description: string;
+  readonly contributionItem: string;
+  readonly targetAmount: number;
+  readonly reward: Readonly<Record<string, number>>;
+}
 
 export const items = {
   ore: { id: 'ore', displayName: 'Ore', stackLimit: 100 },
@@ -207,6 +215,11 @@ export const threats = {
     damage: 2,
     spawnDistance: { min: 6, max: 12 },
     watchtowerRange: 8,
+    newPlayerProtectionTicks: 300,
+    inactiveAfterTicks: 300,
+    inactiveHealthFloorPercent: 50,
+    maxInactiveThreatsPerPlayer: 1,
+    settlementBufferTiles: 2,
   },
 } as const;
 
@@ -217,6 +230,41 @@ export const environmentalEvents = {
     intervalTicks: 100,
     damage: 1,
   },
+} as const;
+
+export const cooperativeObjectives = {
+  'frontier-beacon': {
+    id: 'frontier-beacon',
+    displayName: 'Frontier Beacon',
+    description: 'Settlements contribute tools to establish a shared warning beacon.',
+    contributionItem: 'tool',
+    targetAmount: 20,
+    reward: { ingot: 2 },
+  },
+} as const satisfies Readonly<Record<string, CooperativeObjectiveDefinition>>;
+
+export type CooperativeObjectiveId = keyof typeof cooperativeObjectives;
+
+/** Server-enforced social limits; terms are placeholders for a reviewed deployment list. */
+export const socialRules = {
+  playerNameLength: { min: 3, max: 24 },
+  settlementNameLength: { min: 3, max: 32 },
+  chatMessageMaxLength: 280,
+  reportReasonMaxLength: 200,
+  chatCooldownTicks: 5,
+  retainedMessages: 500,
+  retainedReports: 1_000,
+  moderatedTerms: ['admin', 'moderator', 'system'],
+} as const;
+
+/**
+ * An unfinished starter settlement keeps its reservation only while its owner
+ * is active. Completing the first smelter turns that temporary lease into a
+ * permanent settlement reservation.
+ */
+export const onboardingRules = {
+  abandonedReservationTicks: 36_000,
+  securingBuildingKind: 'smelter',
 } as const;
 
 export type TechnologyId = keyof typeof technologies;
@@ -309,6 +357,43 @@ export const validateContent = (): string[] => {
       !Object.values(recipes).some((recipe) => recipe.id === building.recipe)
     )
       errors.push(`${building.id} references unknown recipe ${building.recipe}`);
+  for (const threat of Object.values(threats)) {
+    if (
+      !Number.isInteger(threat.spawnIntervalTicks) ||
+      threat.spawnIntervalTicks < 1 ||
+      !Number.isInteger(threat.newPlayerProtectionTicks) ||
+      threat.newPlayerProtectionTicks < 0 ||
+      !Number.isInteger(threat.inactiveAfterTicks) ||
+      threat.inactiveAfterTicks < 1 ||
+      !Number.isInteger(threat.inactiveHealthFloorPercent) ||
+      threat.inactiveHealthFloorPercent < 1 ||
+      threat.inactiveHealthFloorPercent > 100 ||
+      !Number.isInteger(threat.maxInactiveThreatsPerPlayer) ||
+      threat.maxInactiveThreatsPerPlayer < 1 ||
+      !Number.isInteger(threat.settlementBufferTiles) ||
+      threat.settlementBufferTiles < 1
+    )
+      errors.push(`${threat.id} has invalid protection rules`);
+  }
+  if (
+    socialRules.playerNameLength.min < 1 ||
+    socialRules.playerNameLength.max < socialRules.playerNameLength.min ||
+    socialRules.settlementNameLength.min < 1 ||
+    socialRules.settlementNameLength.max < socialRules.settlementNameLength.min ||
+    socialRules.chatMessageMaxLength < 1 ||
+    socialRules.reportReasonMaxLength < 1 ||
+    socialRules.chatCooldownTicks < 1 ||
+    socialRules.retainedMessages < 1 ||
+    socialRules.retainedReports < 1 ||
+    socialRules.moderatedTerms.some((term) => term !== term.toLowerCase() || !term.trim())
+  )
+    errors.push('social rules are invalid');
+  if (
+    !Number.isInteger(onboardingRules.abandonedReservationTicks) ||
+    onboardingRules.abandonedReservationTicks < 1 ||
+    !buildings[onboardingRules.securingBuildingKind]
+  )
+    errors.push('onboarding rules are invalid');
   for (const producer of Object.values(producers)) {
     if (!buildings[producer.buildingId as keyof typeof buildings])
       errors.push(`producer references unknown building ${producer.buildingId}`);
@@ -352,6 +437,17 @@ export const validateContent = (): string[] => {
   for (const event of Object.values(environmentalEvents)) {
     if (event.intervalTicks < 1 || event.damage < 1)
       errors.push(`${event.id} has invalid environmental-event values`);
+  }
+  for (const objective of Object.values(cooperativeObjectives)) {
+    if (!(objective.contributionItem in items))
+      errors.push(`${objective.id} references unknown contribution item`);
+    if (!Number.isSafeInteger(objective.targetAmount) || objective.targetAmount < 1)
+      errors.push(`${objective.id} has an invalid target`);
+    for (const [item, amount] of Object.entries(objective.reward)) {
+      if (!(item in items)) errors.push(`${objective.id} references unknown reward item ${item}`);
+      if (!Number.isSafeInteger(amount) || amount < 1)
+        errors.push(`${objective.id} has an invalid reward for ${item}`);
+    }
   }
   return errors;
 };

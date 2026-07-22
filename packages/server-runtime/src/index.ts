@@ -2,8 +2,10 @@ import {
   PROTOCOL_VERSION,
   type ClientWorldDelta,
   type ClientWorldState,
+  type DirectoryPage,
   type ServerMessage,
   type TerrainTile,
+  type WorldMapPage,
 } from '@kings/protocol';
 import {
   advanceTick,
@@ -15,9 +17,17 @@ import {
   joinPlayer,
   snapshot,
   terrainAt,
+  TICK_PIPELINE,
+  type TickPhase,
   type WorldState,
 } from '@kings/simulation';
 import { MemoryWorldPersistence, type WorldPersistence } from './persistence.js';
+import {
+  applyAdministrativeMutation,
+  inspectAdministrativeWorld,
+  type AdministrativeInspectionRequest,
+  type AdministrativeMutationInput,
+} from './admin.js';
 
 export interface Connection {
   send(message: string): void;
@@ -38,14 +48,131 @@ export interface WorldHostMetrics {
   readonly deltaStateMessages: number;
   readonly deltaStateBytes: number;
   readonly lastStateBuildDurationMs: number;
+  readonly tickPhaseDurationsMs: Readonly<Record<TickPhase, number>>;
+  readonly pathQueueLength: number;
 }
 
 const deltaFrom = (previous: ClientWorldState, next: ClientWorldState): ClientWorldDelta => {
   const delta: ClientWorldDelta = {};
   for (const key of Object.keys(next) as Array<keyof ClientWorldState>)
-    if (JSON.stringify(previous[key]) !== JSON.stringify(next[key]))
+    if (previous[key] !== next[key] && JSON.stringify(previous[key]) !== JSON.stringify(next[key]))
       Object.assign(delta, { [key]: next[key] });
   return delta;
+};
+
+const parseChunkKey = (key: string) => {
+  const [xText, yText] = key.split(':');
+  return { x: Number(xText), y: Number(yText) };
+};
+
+/** Builds a bounded strategic view without exposing entities in historically explored fog. */
+export const worldMapPageFor = (
+  state: WorldState,
+  playerId: string,
+  after: string | undefined,
+  limit: number,
+): WorldMapPage => {
+  const player = state.players[playerId];
+  if (!player) return { ...(after ? { after } : {}), chunks: [], totalExploredChunks: 0 };
+  const explored = Object.keys(player.exploredChunks)
+    .map((key) => ({ key, ...parseChunkKey(key) }))
+    .sort((left, right) => left.x - right.x || left.y - right.y);
+  const afterIndex = after ? explored.findIndex(({ key }) => key === after) : -1;
+  const start = afterIndex >= 0 ? afterIndex + 1 : 0;
+  const selected = explored.slice(start, start + limit);
+  const territory = new Map<string, string>();
+  for (const owner of Object.values(state.players))
+    for (const sector of Object.keys(owner.territoryCells)) territory.set(sector, owner.id);
+  const chunks = selected.map(({ x: chunkX, y: chunkY }) => {
+    const currentlyVisible = Boolean(player.visibleChunks?.[`${chunkX}:${chunkY}`]);
+    const terrain: Record<TerrainTile, number> = { grass: 0, water: 0, ore: 0, wood: 0 };
+    for (let localX = 0; localX < 16; localX += 1)
+      for (let localY = 0; localY < 16; localY += 1)
+        terrain[terrainAt(state.seed, chunkX * 16 + localX, chunkY * 16 + localY)] += 1;
+    const buildings = Object.values(state.buildings).filter(
+      (building) => chunkKeyFor(building.x, building.y) === `${chunkX}:${chunkY}`,
+    );
+    const ownerCounts = new Map<string, number>();
+    for (let sectorX = chunkX * 2; sectorX < chunkX * 2 + 2; sectorX += 1)
+      for (let sectorY = chunkY * 2; sectorY < chunkY * 2 + 2; sectorY += 1) {
+        const ownerId = territory.get(`${sectorX}:${sectorY}`);
+        if (ownerId) ownerCounts.set(ownerId, (ownerCounts.get(ownerId) ?? 0) + 1);
+      }
+    return {
+      x: chunkX,
+      y: chunkY,
+      currentlyVisible,
+      terrain,
+      ownBuildingCount: buildings.filter((building) => building.ownerId === playerId).length,
+      visibleForeignBuildingCount: currentlyVisible
+        ? buildings.filter((building) => building.ownerId !== playerId).length
+        : 0,
+      visibleThreatCount: currentlyVisible
+        ? Object.values(state.threats).filter(
+            (threat) => chunkKeyFor(threat.x, threat.y) === `${chunkX}:${chunkY}`,
+          ).length
+        : 0,
+      claimedSectors: [...ownerCounts]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([ownerId, count]) => ({ ownerId, count })),
+    };
+  });
+  const nextCursor = start + selected.length < explored.length ? selected.at(-1)?.key : undefined;
+  return {
+    ...(after ? { after } : {}),
+    chunks,
+    ...(nextCursor ? { nextCursor } : {}),
+    totalExploredChunks: explored.length,
+  };
+};
+
+/** Public directory projection: identifiers and member counts only, never world position or state. */
+export const directoryPageFor = (
+  state: WorldState,
+  query: string,
+  after: string | undefined,
+  limit: number,
+): DirectoryPage => {
+  const normalized = query.trim().toLocaleLowerCase('en-US');
+  const entries = [
+    ...Object.keys(state.players).map((playerId) => ({
+      key: `player:${playerId}`,
+      searchable: `${playerId} ${state.social.playerNames[playerId] ?? ''}`.toLocaleLowerCase(
+        'en-US',
+      ),
+      entry: {
+        type: 'player' as const,
+        playerId,
+        displayName: state.social.playerNames[playerId] ?? playerId,
+      },
+    })),
+    ...Object.values(state.settlements).map((settlement) => ({
+      key: `settlement:${settlement.id}`,
+      searchable:
+        `${settlement.id} ${settlement.ownerId} ${state.social.settlementNames[settlement.id] ?? ''}`.toLocaleLowerCase(
+          'en-US',
+        ),
+      entry: {
+        type: 'settlement' as const,
+        settlementId: settlement.id,
+        displayName: state.social.settlementNames[settlement.id] ?? settlement.id,
+        ownerId: settlement.ownerId,
+        memberCount: Object.keys(settlement.members).length,
+      },
+    })),
+  ]
+    .filter(({ searchable }) => !normalized || searchable.includes(normalized))
+    .sort((left, right) => left.key.localeCompare(right.key));
+  const afterIndex = after ? entries.findIndex(({ key }) => key === after) : -1;
+  const start = afterIndex >= 0 ? afterIndex + 1 : 0;
+  const selected = entries.slice(start, start + limit);
+  const nextCursor = start + selected.length < entries.length ? selected.at(-1)?.key : undefined;
+  return {
+    query: normalized,
+    ...(after ? { after } : {}),
+    entries: selected.map(({ entry }) => entry),
+    ...(nextCursor ? { nextCursor } : {}),
+  };
 };
 
 export class GlobalWorldHost {
@@ -53,6 +180,7 @@ export class GlobalWorldHost {
   #checkpointBaseline: WorldState;
   #connections = new Map<Connection, { playerId: string; visibleChunks?: Set<string> }>();
   #clientStates = new Map<Connection, { version: number; state: ClientWorldState }>();
+  #stateFingerprints = new WeakMap<ClientWorldState, Map<keyof ClientWorldState, string>>();
   #version = 0;
   #checkpointInProgress = false;
   #acceptedCommands = 0;
@@ -68,6 +196,24 @@ export class GlobalWorldHost {
   #deltaStateMessages = 0;
   #deltaStateBytes = 0;
   #lastStateBuildDurationMs = 0;
+  #viewIndex:
+    | {
+        version: number;
+        world: WorldState;
+        buildingsByOwner: Map<
+          string,
+          Array<{ id: string; building: WorldState['buildings'][string]; order: number }>
+        >;
+        buildingsByChunk: Map<
+          string,
+          Array<{ id: string; building: WorldState['buildings'][string]; order: number }>
+        >;
+      }
+    | undefined;
+  #tickPhaseDurationsMs = Object.fromEntries(TICK_PIPELINE.map((phase) => [phase, 0])) as Record<
+    TickPhase,
+    number
+  >;
   // Serializes every mutation of #world. Commands snapshot the world, await
   // persistence, then commit the snapshot back; without a queue, commands (and
   // ticks) that overlap that await would each start from the same pre-commit
@@ -105,6 +251,8 @@ export class GlobalWorldHost {
       deltaStateMessages: this.#deltaStateMessages,
       deltaStateBytes: this.#deltaStateBytes,
       lastStateBuildDurationMs: this.#lastStateBuildDurationMs,
+      tickPhaseDurationsMs: { ...this.#tickPhaseDurationsMs },
+      pathQueueLength: Object.keys(this.#world.threats).length,
     };
   }
 
@@ -127,10 +275,12 @@ export class GlobalWorldHost {
   }
 
   async connect(connection: Connection, playerId: string): Promise<void> {
-    const candidate = snapshot(this.#world);
-    const joined = joinPlayer(candidate, playerId);
-    if (joined.length > 0) await this.saveCheckpoint(candidate);
-    this.#world = candidate;
+    await this.serialize(async () => {
+      const candidate = snapshot(this.#world);
+      const joined = joinPlayer(candidate, playerId);
+      if (joined.length > 0) await this.saveCheckpoint(candidate);
+      this.#world = candidate;
+    });
     this.#connections.set(connection, { playerId });
     this.send(connection, {
       type: 'welcome',
@@ -152,6 +302,66 @@ export class GlobalWorldHost {
     this.sendBootstrap(connection, playerId);
   }
 
+  worldMap(
+    connection: Connection,
+    requestId: string,
+    after: string | undefined,
+    limit: number,
+  ): void {
+    const playerId = this.#connections.get(connection)?.playerId;
+    if (!playerId) return;
+    this.send(connection, {
+      type: 'worldMapPage',
+      requestId,
+      page: worldMapPageFor(this.#world, playerId, after, limit),
+    });
+  }
+
+  directory(
+    connection: Connection,
+    requestId: string,
+    query: string,
+    after: string | undefined,
+    limit: number,
+  ): void {
+    if (!this.#connections.has(connection)) return;
+    this.send(connection, {
+      type: 'directoryPage',
+      requestId,
+      page: directoryPageFor(this.#world, query, after, limit),
+    });
+  }
+
+  inspectAdministrative(request: AdministrativeInspectionRequest): unknown {
+    return inspectAdministrativeWorld(snapshot(this.#world), request);
+  }
+
+  administrativeAuditEvents(limit = 100) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500)
+      throw new Error('Administrative audit limit must be between 1 and 500');
+    return this.persistence.loadAdministrativeAuditEvents(limit);
+  }
+
+  mutateAdministrative(input: AdministrativeMutationInput) {
+    return this.serialize(async () => {
+      const { state, audit } = applyAdministrativeMutation(this.#world, input);
+      const startedAt = performance.now();
+      try {
+        await this.persistence.commitAdministrativeMutation(state, audit);
+        this.#world = state;
+        this.#checkpointBaseline = snapshot(state);
+        this.#lastCheckpointTick = state.tick;
+        this.broadcastState();
+        return audit;
+      } catch (error) {
+        this.#checkpointFailures += 1;
+        throw error;
+      } finally {
+        this.#lastCheckpointDurationMs = performance.now() - startedAt;
+      }
+    });
+  }
+
   /** Replaces the viewport chunks a client is observing and immediately snapshots new chunks. */
   setInterest(connection: Connection, chunks: readonly { x: number; y: number }[]): void {
     const connectionState = this.#connections.get(connection);
@@ -161,6 +371,9 @@ export class GlobalWorldHost {
       (chunk) => !connectionState.visibleChunks?.has(chunkKeyFor(chunk.x * 16, chunk.y * 16)),
     );
     connectionState.visibleChunks = visibleChunks;
+    // Interest snapshots may be requested between broadcasts, after administrative
+    // or test-time world changes that do not advance the state version.
+    this.#viewIndex = undefined;
     if (addedChunks.length > 0)
       this.sendChunkSnapshot(connection, connectionState.playerId, addedChunks);
   }
@@ -228,7 +441,12 @@ export class GlobalWorldHost {
 
   async tick(): Promise<void> {
     await this.serialize(() => {
-      advanceTick(this.#world);
+      advanceTick(this.#world, {
+        now: () => performance.now(),
+        record: (phase, durationMs) => {
+          this.#tickPhaseDurationsMs[phase] = durationMs;
+        },
+      });
       this.broadcastState();
     });
     if (this.#world.tick % this.checkpointIntervalTicks === 0 && !this.#checkpointInProgress) {
@@ -298,13 +516,23 @@ export class GlobalWorldHost {
   private clientStateFor(connection: Connection, playerId: string): ClientWorldState {
     const startedAt = performance.now();
     try {
-      return this.stateFor(playerId, this.#connections.get(connection)?.visibleChunks);
+      return this.stateFor(
+        playerId,
+        this.#connections.get(connection)?.visibleChunks,
+        this.#clientStates.get(connection)?.state,
+      );
     } finally {
       this.#lastStateBuildDurationMs = performance.now() - startedAt;
     }
   }
 
-  private stateFor(playerId: string, requestedChunks?: ReadonlySet<string>): ClientWorldState {
+  private stateFor(
+    playerId: string,
+    requestedChunks?: ReadonlySet<string>,
+    previous?: ClientWorldState,
+  ): ClientWorldState {
+    const livePlayer = this.#world.players[playerId];
+    if (livePlayer) return this.filteredStateFor(playerId, livePlayer, requestedChunks, previous);
     const state = snapshot(this.#world);
     const territory: Record<string, string> = Object.fromEntries(
       Object.values(state.players).flatMap((owner) =>
@@ -313,16 +541,56 @@ export class GlobalWorldHost {
     );
     const player = state.players[playerId];
     if (!player) {
-      const { seed, randomState, ...visibleState } = state;
+      state.players = {};
+      state.playerActivity = {};
+      state.onboardingReservations = {};
+      state.processedCommands = [];
+      state.minedTiles = {};
+      state.transfers = [];
+      state.settlements = {};
+      state.buildings = {};
+      state.threats = {};
+      state.scouts = {};
+      state.logisticsLinks = {};
+      state.sharedConstructionProjects = {};
+      state.cooperativeObjectives = Object.fromEntries(
+        Object.entries(state.cooperativeObjectives).map(([id, objective]) => [
+          id,
+          {
+            ...objective,
+            contributionsBySettlement: {},
+            contributionsByPlayer: {},
+            rewardClaims: {},
+            contributionHistory: [],
+            rewardHistory: [],
+          },
+        ]),
+      ) as unknown as WorldState['cooperativeObjectives'];
+      state.social = {
+        playerNames: {},
+        settlementNames: {},
+        blockedPlayers: {},
+        lastChatTick: {},
+        messages: [],
+        reports: [],
+      };
+      const { seed, randomState, deletedPlayers, ...visibleState } = state;
       void seed;
       void randomState;
-      return { ...visibleState, terrain: {}, territory };
+      void deletedPlayers;
+      return { ...visibleState, terrain: {}, territory: {} };
     }
     const visibleChunks = requestedChunks ?? new Set(Object.keys(player.exploredChunks));
     const relevantChunks = new Set(
       [...visibleChunks].filter((chunk) => player.exploredChunks[chunk]),
     );
     state.players = { [playerId]: player };
+    state.playerActivity = state.playerActivity[playerId]
+      ? { [playerId]: state.playerActivity[playerId] }
+      : {};
+    state.onboardingReservations = state.onboardingReservations[playerId]
+      ? { [playerId]: state.onboardingReservations[playerId] }
+      : {};
     state.processedCommands = [];
     state.minedTiles = Object.fromEntries(
       Object.entries(state.minedTiles).filter(([tile]) => {
@@ -367,6 +635,58 @@ export class GlobalWorldHost {
           state.buildings[link.sourceBuildingId] && state.buildings[link.targetBuildingId],
       ),
     );
+    state.cooperativeObjectives = Object.fromEntries(
+      Object.entries(state.cooperativeObjectives).map(([id, objective]) => [
+        id,
+        {
+          ...objective,
+          contributionsBySettlement: Object.fromEntries(
+            Object.entries(objective.contributionsBySettlement).filter(([settlementId]) =>
+              Boolean(state.settlements[settlementId]),
+            ),
+          ),
+          contributionsByPlayer: objective.contributionsByPlayer[playerId]
+            ? { [playerId]: objective.contributionsByPlayer[playerId] }
+            : {},
+          rewardClaims: objective.rewardClaims[playerId]
+            ? { [playerId]: objective.rewardClaims[playerId] }
+            : {},
+          contributionHistory: objective.contributionHistory.filter(
+            (contribution) => contribution.playerId === playerId,
+          ),
+          rewardHistory: objective.rewardHistory.filter((reward) => reward.playerId === playerId),
+        },
+      ]),
+    ) as WorldState['cooperativeObjectives'];
+    state.sharedConstructionProjects = Object.fromEntries(
+      Object.entries(state.sharedConstructionProjects).filter(([, project]) => {
+        const settlement = state.settlements[project.settlementId];
+        return Boolean(settlement?.members[playerId]);
+      }),
+    );
+    const blocked = state.social.blockedPlayers[playerId] ?? {};
+    state.social.messages = state.social.messages.filter((message) => {
+      if (blocked[message.senderId]) return false;
+      if (message.channel === 'global') return true;
+      const settlement = message.settlementId ? state.settlements[message.settlementId] : undefined;
+      return Boolean(settlement?.members[playerId]);
+    });
+    const relevantPlayerNames = new Set<string>([playerId]);
+    for (const settlement of Object.values(state.settlements))
+      for (const memberId of Object.keys(settlement.members)) relevantPlayerNames.add(memberId);
+    for (const message of state.social.messages) relevantPlayerNames.add(message.senderId);
+    state.social.playerNames = Object.fromEntries(
+      Object.entries(state.social.playerNames).filter(([id]) => relevantPlayerNames.has(id)),
+    );
+    state.social.settlementNames = Object.fromEntries(
+      Object.entries(state.social.settlementNames).filter(([id]) => Boolean(state.settlements[id])),
+    );
+    state.social.blockedPlayers = { [playerId]: blocked };
+    state.social.lastChatTick =
+      state.social.lastChatTick[playerId] !== undefined
+        ? { [playerId]: state.social.lastChatTick[playerId] }
+        : {};
+    state.social.reports = [];
     const terrain: Record<string, TerrainTile> = {};
     for (const chunk of relevantChunks) {
       const [xText, yText] = chunk.split(':');
@@ -379,10 +699,250 @@ export class GlobalWorldHost {
           terrain[`${x}:${y}`] = terrainAt(this.#world.seed, x, y);
         }
     }
-    const { seed, randomState, ...visibleState } = state;
+    const { seed, randomState, deletedPlayers, ...visibleState } = state;
     void seed;
     void randomState;
+    void deletedPlayers;
     return { ...visibleState, terrain, territory };
+  }
+
+  /** Builds and clones only one player's authorized view instead of cloning the full world. */
+  private filteredStateFor(
+    playerId: string,
+    player: WorldState['players'][string],
+    requestedChunks?: ReadonlySet<string>,
+    previous?: ClientWorldState,
+  ): ClientWorldState {
+    const source = this.#world;
+    const visibleChunks = requestedChunks ?? new Set(Object.keys(player.exploredChunks));
+    const relevantChunks = new Set(
+      [...visibleChunks].filter((chunk) => player.exploredChunks[chunk]),
+    );
+    const settlements = Object.fromEntries(
+      Object.entries(source.settlements).filter(
+        ([, settlement]) => settlement.members[playerId] || settlement.invitations[playerId],
+      ),
+    );
+    const viewIndex = this.viewIndex();
+    const candidateBuildings = new Map<
+      string,
+      { id: string; building: WorldState['buildings'][string]; order: number }
+    >();
+    const includeCandidates = (
+      candidates: readonly {
+        id: string;
+        building: WorldState['buildings'][string];
+        order: number;
+      }[] = [],
+    ) => {
+      for (const candidate of candidates) candidateBuildings.set(candidate.id, candidate);
+    };
+    includeCandidates(viewIndex.buildingsByOwner.get(playerId));
+    for (const settlement of Object.values(settlements))
+      for (const memberId of Object.keys(settlement.members))
+        includeCandidates(viewIndex.buildingsByOwner.get(memberId));
+    for (const chunk of relevantChunks) includeCandidates(viewIndex.buildingsByChunk.get(chunk));
+    const buildings: WorldState['buildings'] = {};
+    for (const { id, building } of [...candidateBuildings.values()].sort(
+      (left, right) => left.order - right.order,
+    )) {
+      const sharedRoles = Object.values(settlements)
+        .filter((settlement) => settlement.members[building.ownerId])
+        .map((settlement) => settlement.members[playerId])
+        .filter((role): role is 'owner' | 'builder' | 'logistics' | 'member' => Boolean(role));
+      const isShared = sharedRoles.length > 0;
+      if (
+        building.ownerId !== playerId &&
+        !isShared &&
+        !relevantChunks.has(chunkKeyFor(building.x, building.y))
+      )
+        continue;
+      const canViewInventory = sharedRoles.some((role) => role === 'owner' || role === 'logistics');
+      buildings[id] =
+        building.ownerId !== playerId && !canViewInventory
+          ? { ...building, inventory: { ore: 0, wood: 0, ingot: 0, tool: 0 } }
+          : building;
+    }
+    const threats = Object.fromEntries(
+      Object.entries(source.threats).filter(([, threat]) => buildings[threat.targetBuildingId]),
+    );
+    const scouts = Object.fromEntries(
+      Object.entries(source.scouts ?? {}).filter(
+        ([, scout]) =>
+          scout.ownerId === playerId || relevantChunks.has(chunkKeyFor(scout.x, scout.y)),
+      ),
+    );
+    const logisticsLinks = Object.fromEntries(
+      Object.entries(source.logisticsLinks).filter(
+        ([, link]) => buildings[link.sourceBuildingId] && buildings[link.targetBuildingId],
+      ),
+    );
+    const cooperativeObjectives = Object.fromEntries(
+      Object.entries(source.cooperativeObjectives).map(([id, objective]) => [
+        id,
+        {
+          ...objective,
+          contributionsBySettlement: Object.fromEntries(
+            Object.entries(objective.contributionsBySettlement).filter(([settlementId]) =>
+              Boolean(settlements[settlementId]),
+            ),
+          ),
+          contributionsByPlayer: objective.contributionsByPlayer[playerId]
+            ? { [playerId]: objective.contributionsByPlayer[playerId] }
+            : {},
+          rewardClaims: objective.rewardClaims[playerId]
+            ? { [playerId]: objective.rewardClaims[playerId] }
+            : {},
+          contributionHistory: objective.contributionHistory.filter(
+            (contribution) => contribution.playerId === playerId,
+          ),
+          rewardHistory: objective.rewardHistory.filter((reward) => reward.playerId === playerId),
+        },
+      ]),
+    ) as WorldState['cooperativeObjectives'];
+    const sharedConstructionProjects = Object.fromEntries(
+      Object.entries(source.sharedConstructionProjects).filter(([, project]) =>
+        Boolean(settlements[project.settlementId]?.members[playerId]),
+      ),
+    );
+    const blocked = source.social.blockedPlayers[playerId] ?? {};
+    const messages = source.social.messages.filter((message) => {
+      if (blocked[message.senderId]) return false;
+      if (message.channel === 'global') return true;
+      const settlement = message.settlementId ? settlements[message.settlementId] : undefined;
+      return Boolean(settlement?.members[playerId]);
+    });
+    const relevantPlayerNames = new Set<string>([playerId]);
+    for (const settlement of Object.values(settlements))
+      for (const memberId of Object.keys(settlement.members)) relevantPlayerNames.add(memberId);
+    for (const message of messages) relevantPlayerNames.add(message.senderId);
+    const previousTerrain = previous?.terrain;
+    const canReuseTerrain =
+      previousTerrain !== undefined &&
+      Object.keys(previousTerrain).length === relevantChunks.size * 16 * 16 &&
+      [...relevantChunks].every((chunk) => {
+        const [xText, yText] = chunk.split(':');
+        return previousTerrain[`${Number(xText) * 16}:${Number(yText) * 16}`] !== undefined;
+      });
+    const terrain: Record<string, TerrainTile> = canReuseTerrain ? previousTerrain : {};
+    if (!canReuseTerrain)
+      for (const chunk of relevantChunks) {
+        const [xText, yText] = chunk.split(':');
+        const chunkX = Number(xText);
+        const chunkY = Number(yText);
+        for (let localX = 0; localX < 16; localX += 1)
+          for (let localY = 0; localY < 16; localY += 1) {
+            const x = chunkX * 16 + localX;
+            const y = chunkY * 16 + localY;
+            terrain[`${x}:${y}`] = terrainAt(source.seed, x, y);
+          }
+      }
+    const territory: Record<string, string> = Object.fromEntries(
+      Object.values(source.players).flatMap((owner) =>
+        Object.keys(owner.territoryCells).map((sector) => [sector, owner.id]),
+      ),
+    );
+    const visibleState = {
+      schemaVersion: source.schemaVersion,
+      peaceful: source.peaceful,
+      tick: source.tick,
+      players: { [playerId]: player },
+      buildings,
+      threats,
+      scouts,
+      transfers: source.transfers.filter(
+        (transfer) => transfer.fromPlayerId === playerId || transfer.toPlayerId === playerId,
+      ),
+      settlements,
+      logisticsLinks,
+      cooperativeObjectives,
+      playerActivity: source.playerActivity[playerId]
+        ? { [playerId]: source.playerActivity[playerId] }
+        : {},
+      onboardingReservations: source.onboardingReservations[playerId]
+        ? { [playerId]: source.onboardingReservations[playerId] }
+        : {},
+      sharedConstructionProjects,
+      social: {
+        playerNames: Object.fromEntries(
+          Object.entries(source.social.playerNames).filter(([id]) => relevantPlayerNames.has(id)),
+        ),
+        settlementNames: Object.fromEntries(
+          Object.entries(source.social.settlementNames).filter(([id]) => Boolean(settlements[id])),
+        ),
+        blockedPlayers: { [playerId]: blocked },
+        lastChatTick:
+          source.social.lastChatTick[playerId] !== undefined
+            ? { [playerId]: source.social.lastChatTick[playerId] }
+            : {},
+        messages,
+        reports: [],
+      },
+      processedCommands: [],
+      minedTiles: Object.fromEntries(
+        Object.entries(source.minedTiles).filter(([tile]) => {
+          const [xText, yText] = tile.split(':');
+          return relevantChunks.has(chunkKeyFor(Number(xText), Number(yText)));
+        }),
+      ),
+      territory,
+    } as Omit<ClientWorldState, 'terrain'>;
+    return this.stabilizedStateFor({ ...visibleState, terrain }, previous);
+  }
+
+  /** Retains immutable client subtrees when their serialized content is unchanged. */
+  private stabilizedStateFor(raw: ClientWorldState, previous?: ClientWorldState): ClientWorldState {
+    const state = {} as ClientWorldState;
+    const fingerprints = new Map<keyof ClientWorldState, string>();
+    const previousFingerprints = previous ? this.#stateFingerprints.get(previous) : undefined;
+    for (const key of Object.keys(raw) as Array<keyof ClientWorldState>) {
+      if (previous && previousFingerprints && raw[key] === previous[key]) {
+        const fingerprint = previousFingerprints.get(key);
+        if (fingerprint !== undefined) fingerprints.set(key, fingerprint);
+        Object.assign(state, { [key]: previous[key] });
+        continue;
+      }
+      const fingerprint = JSON.stringify(raw[key]);
+      fingerprints.set(key, fingerprint);
+      if (previous && previousFingerprints?.get(key) === fingerprint)
+        Object.assign(state, { [key]: previous[key] });
+      else Object.assign(state, { [key]: structuredClone(raw[key]) });
+    }
+    this.#stateFingerprints.set(state, fingerprints);
+    return state;
+  }
+
+  /** Reuses one world scan across every authorized client view in a broadcast. */
+  private viewIndex() {
+    if (this.#viewIndex?.version === this.#version && this.#viewIndex.world === this.#world)
+      return this.#viewIndex;
+    const buildingsByOwner = new Map<
+      string,
+      Array<{ id: string; building: WorldState['buildings'][string]; order: number }>
+    >();
+    const buildingsByChunk = new Map<
+      string,
+      Array<{ id: string; building: WorldState['buildings'][string]; order: number }>
+    >();
+    let order = 0;
+    for (const [id, building] of Object.entries(this.#world.buildings)) {
+      const entry = { id, building, order };
+      const owned = buildingsByOwner.get(building.ownerId) ?? [];
+      owned.push(entry);
+      buildingsByOwner.set(building.ownerId, owned);
+      const chunk = chunkKeyFor(building.x, building.y);
+      const local = buildingsByChunk.get(chunk) ?? [];
+      local.push(entry);
+      buildingsByChunk.set(chunk, local);
+      order += 1;
+    }
+    this.#viewIndex = {
+      version: this.#version,
+      world: this.#world,
+      buildingsByOwner,
+      buildingsByChunk,
+    };
+    return this.#viewIndex;
   }
 
   private send(connection: Connection, message: ServerMessage): void {
@@ -423,11 +983,23 @@ export class GlobalWorldHost {
 
 export { parseEnvironment, type ServerEnvironment } from './env.js';
 export {
+  applyAdministrativeMutation,
+  inspectAdministrativeWorld,
+  type AdministrativeAuditEvent,
+  type AdministrativeInspectionRequest,
+  type AdministrativeMutation,
+  type AdministrativeMutationInput,
+  type AdministrativeMutationResult,
+} from './admin.js';
+export {
   createPostgresWorldPersistence,
+  DATABASE_MIGRATIONS,
   INITIAL_MIGRATION_SQL,
   MemoryWorldPersistence,
   PostgresWorldPersistence,
+  readLatestCheckpointEvidence,
   snapshotDirtyChunk,
+  verifyAndRecordRestoredDatabase,
   type CompletedCheckpoint,
   type JournalEntry,
   type WorldPersistence,

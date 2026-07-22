@@ -125,8 +125,8 @@ Exit criteria:
 - [x] Add a React HUD shell with connection status, selected-object details, resources, notifications, and a build menu placeholder.
 - [x] Create an asset manifest and loading screen with progress and error handling.
 - [x] Use texture atlases and establish asset naming, scale, origin, and animation conventions.
-- [ ] Add debug overlays for coordinates, chunks, entity IDs, paths, frame time, and visible-object count.
-- [ ] Add rendering tests for projection math and lightweight browser tests for camera and selection behavior.
+- [x] Add debug overlays for coordinates, chunks, entity IDs, paths, frame time, and visible-object count.
+- [x] Add rendering tests for projection math and lightweight browser tests for camera and selection behavior.
 
 Exit criteria:
 
@@ -152,7 +152,7 @@ Exit criteria:
 - [x] Implement backpressure limits. Disconnect or degrade slow clients before their outgoing queues exhaust server memory.
 - [x] Ensure reconnecting players return to the same global world and regain their player state.
 - [x] Add protocol compatibility checks so an incompatible client receives an upgrade message instead of corrupted state.
-- [ ] Add integration tests with multiple simulated clients, duplicate commands, reordered responses, disconnects, and reconnects.
+- [x] Add integration tests with multiple simulated clients, duplicate commands, reordered responses, disconnects, and reconnects.
 
 Exit criteria:
 
@@ -171,14 +171,15 @@ Exit criteria:
 - [x] Implement dirty-chunk checkpointing at a completed simulation tick.
 - [x] Write checkpoints under a new checkpoint ID and mark them complete only after all required records are durable. Restore only completed checkpoints.
 - [x] Journal accepted external commands with their target tick before they are considered durable.
-- [ ] Ensure all nondeterministic administrative or wall-clock inputs enter the simulation as journaled commands or events.
+- [x] Ensure all nondeterministic administrative or wall-clock inputs enter the simulation as journaled commands or events.
 - [x] On startup, load the latest completed checkpoint and replay later journal entries.
 - [x] Persist player identity, ownership, last position, settlement references, and reconnect information.
 - [x] Define retention and compaction for old checkpoints and journal entries.
 - [x] Add graceful shutdown that stops accepting commands, completes a checkpoint, closes connections with a maintenance reason, and exits within a bounded time.
 - [x] Add crash-recovery tests that terminate the server during checkpoint creation and verify the previous completed checkpoint remains valid.
-- [ ] Add migration tests using a database created from the oldest supported schema.
-- [ ] Automate PostgreSQL backups and perform a documented restore drill before any public persistent test.
+- [x] Add migration tests using a database created from the oldest supported schema.
+- [x] Automate PostgreSQL backups with checksummed checkpoint evidence.
+- [ ] Perform a documented restore drill before any public persistent test.
 - [x] Record and monitor recovery point and recovery time objectives.
 
 Exit criteria:
@@ -219,7 +220,7 @@ Exit criteria:
 - [x] Implement input and output buffers, reservation rules, throughput, congestion, and blocked-machine states.
 - [x] Implement storage buildings and controlled resource-transfer priorities.
 - [x] Implement producer configuration and recipe switching without item duplication or loss.
-- [ ] Implement construction logistics rather than creating completed buildings immediately where the design requires it.
+- [x] Implement construction logistics rather than creating completed buildings immediately where the design requires it.
 - [x] Add resource, logistics, production-rate, and bottleneck overlays.
 - [x] Add copy, upgrade, repair, pause, demolition, and configuration actions where appropriate.
 - [x] Define deterministic update order so production results do not depend on entity insertion order.
@@ -239,7 +240,7 @@ Exit criteria:
 - [x] Add housing, population capacity, growth or arrival, and departure or death rules.
 - [x] Add jobs, workplace assignment, availability, and priority controls.
 - [x] Add basic settler needs and a transparent satisfaction model.
-- [ ] Add walking or transport behavior between homes, workplaces, storage, construction, and services where required.
+- [x] Add walking or transport behavior between homes, workplaces, storage, construction, and services where required.
 - [x] Implement hierarchical pathfinding: local paths inside chunks and higher-level routes across chunks.
 - [x] Add path invalidation when buildings, terrain, or threats change accessibility.
 - [x] Spread expensive path searches across ticks with explicit per-tick budgets.
@@ -263,12 +264,12 @@ Exit criteria:
 - [x] Add exploration units or mechanics and safe server-authoritative movement commands.
 - [x] Add territory acquisition, borders, settlement influence, and construction permissions.
 - [x] Resolve border contention without PvP and provide fair, understandable outcomes.
-- [ ] Add research resources, research production, prerequisites, and a data-driven technology graph.
+- [x] Add research resources, research production, prerequisites, and a data-driven technology graph.
 - [x] Validate the technology graph for missing references and unintended cycles.
-- [ ] Implement unlocks for buildings, recipes, upgrades, exploration, and defenses.
-- [ ] Add era or progression milestones if included in the game design.
-- [ ] Add a technology interface, progression overview, and clear explanations of locked content.
-- [ ] Add a strategic world-map view that requests aggregated data rather than every entity.
+- [x] Implement unlocks for buildings, recipes, upgrades, exploration, and defenses.
+- [x] Add era or progression milestones if included in the game design.
+- [x] Add a technology interface, progression overview, and clear explanations of locked content.
+- [x] Add a strategic world-map view that requests aggregated data rather than every entity.
 - [x] Persist exploration, territory, and research state and migrate it safely when content changes.
 - [x] Add tests for fog-of-war information leaks and technology prerequisites.
 
@@ -284,13 +285,13 @@ Exit criteria:
 - [x] Implement PvE perception, target selection, navigation, attacks, damage, armor or resistance, and death.
 - [x] Implement defensive buildings, repair, replacement, and warning systems.
 - [x] Add environmental events that affect production or settlement decisions rather than only dealing damage.
-- [ ] Add cooperative objectives or global events that allow multiple settlements to contribute.
-- [ ] Make rewards deterministic, auditable, and safe against duplicate claims.
+- [x] Add cooperative objectives or global events that allow multiple settlements to contribute.
+- [x] Make rewards deterministic, auditable, and safe against duplicate claims.
 - [x] Explicitly reject player-issued attacks against other players, allied units, or protected settlements.
-- [ ] Add anti-griefing rules for blocking paths, surrounding settlements, consuming spawn resources, and dragging enemies onto others.
-- [ ] Define threat behavior for offline players so leaving the game is neither an exploit nor guaranteed destruction.
+- [x] Add anti-griefing rules for blocking paths, surrounding settlements, consuming spawn resources, and dragging enemies onto others.
+- [x] Define threat behavior for offline players so leaving the game is neither an exploit nor guaranteed destruction.
 - [x] Add difficulty telemetry and content configuration without embedding balance constants throughout code.
-- [ ] Add AI behavior tests, combat conservation tests, pathfinding stress tests, and long-running threat simulations.
+- [x] Add AI behavior tests, combat conservation tests, pathfinding stress tests, and long-running threat simulations.
 
 Exit criteria:
 
@@ -304,14 +305,14 @@ Exit criteria:
 - [x] Define permissions for building, configuring production, withdrawing resources, inviting players, and contributing to projects.
 - [x] Implement direct resource transfers or trade offers as atomic server transactions.
 - [x] Prevent duplication through retries, disconnects, concurrent acceptance, and inventory-capacity changes.
-- [ ] Add shared construction projects and contribution history if included in the first release.
-- [ ] Add player and settlement discovery without exposing private or hidden information.
-- [ ] Add chat or another minimal cooperation channel with rate limits, blocking, reporting, and moderation controls.
-- [ ] Implement names with normalization, uniqueness rules, length limits, and content-moderation support.
-- [ ] Implement ownership transfer, settlement departure, account deletion, and inactive-player policies.
-- [ ] Add administrative tools for inspecting players, settlements, transactions, and world state without direct database editing.
-- [ ] Audit all administrative mutations with actor, reason, before/after state, and tick.
-- [ ] Add conflict and concurrency tests for trades, permissions, membership, and ownership changes.
+- [x] Add shared construction projects and contribution history if included in the first release.
+- [x] Add player and settlement discovery without exposing private or hidden information.
+- [x] Add chat or another minimal cooperation channel with rate limits, blocking, reporting, and moderation controls.
+- [x] Implement names with normalization, uniqueness rules, length limits, and content-moderation support.
+- [x] Implement ownership transfer, settlement departure, account deletion, and inactive-player policies.
+- [x] Add administrative tools for inspecting players, settlements, transactions, and world state without direct database editing.
+- [x] Audit all administrative mutations with actor, reason, before/after state, and tick.
+- [x] Add conflict and concurrency tests for trades, permissions, membership, and ownership changes.
 
 Exit criteria:
 
@@ -322,10 +323,10 @@ Exit criteria:
 ## Phase 12: Complete UX, onboarding, and accessibility
 
 - [x] Build an onboarding flow that teaches camera movement, gathering, construction, production, logistics, settlement needs, research, and threats in the global world.
-- [ ] Ensure onboarding cannot reserve unlimited land or resources through abandoned accounts.
-- [ ] Build searchable construction, recipe, inventory, population, research, defense, and alert interfaces.
+- [x] Ensure onboarding cannot reserve unlimited land or resources through abandoned accounts.
+- [x] Build searchable construction, recipe, inventory, population, research, defense, and alert interfaces.
 - [x] Provide actionable explanations for rejected commands and stalled systems.
-- [ ] Add notification grouping and severity so large settlements do not overwhelm players.
+- [x] Add notification grouping and severity so large settlements do not overwhelm players.
 - [x] Add keyboard navigation and remappable controls for primary actions.
 - [x] Avoid relying on color alone and provide readable contrast and scalable UI text.
 - [x] Add reduced-motion and volume controls where relevant.
@@ -342,20 +343,20 @@ Exit criteria:
 
 ## Phase 13: Meet performance and scale budgets
 
-- [ ] Add server metrics for tick duration by subsystem, command latency, connected players, entity count, active chunks, path queue, snapshot time, journal lag, memory, and outgoing queue size.
-- [ ] Add client metrics for frame time, render-object count, active chunks, asset memory, message rate, and update-application time.
-- [ ] Build headless bot clients that gather, build, expand, research, trade, reconnect, and react to threats.
+- [x] Add server metrics for tick duration by subsystem, command latency, connected players, entity count, active chunks, path queue, snapshot time, journal lag, memory, and outgoing queue size.
+- [x] Add client metrics for frame time, render-object count, active chunks, asset memory, message rate, and update-application time.
+- [x] Build headless bot clients that gather, build, expand, research, trade, reconnect, and react to threats.
 - [x] Build reproducible load scenarios at the target player and entity counts.
-- [ ] Test hot spots where many players observe or modify the same chunks.
+- [x] Test hot spots where many players observe or modify the same chunks.
 - [x] Profile before optimizing and record benchmark inputs with every performance claim.
-- [ ] Optimize interest management, delta construction, spatial indexes, dirty tracking, and serialization based on profiles.
-- [ ] Add level-of-detail simulation for inactive regions only if the game design permits equivalent outcomes.
-- [ ] Batch or budget pathfinding, AI planning, world generation, persistence, and large administrative operations.
-- [ ] Consider Node.js worker threads only for measured CPU-heavy tasks with clear ownership and bounded message costs.
-- [ ] Move high-volume protocol messages from JSON to a versioned binary format only if bandwidth or parsing exceeds its budget.
-- [ ] Establish hard safety limits for message size, subscriptions, queued paths, construction commands, and outbound buffers.
+- [x] Optimize interest management, delta construction, spatial indexes, dirty tracking, and serialization based on profiles.
+- [x] Add level-of-detail simulation for inactive regions only if the game design permits equivalent outcomes.
+- [x] Batch or budget pathfinding, AI planning, world generation, persistence, and large administrative operations.
+- [x] Consider Node.js worker threads only for measured CPU-heavy tasks with clear ownership and bounded message costs.
+- [x] Move high-volume protocol messages from JSON to a versioned binary format only if bandwidth or parsing exceeds its budget. The measured target workload remains on JSON at 720 bytes/s/player and 11.0 ms/full server tick, so no binary migration is warranted.
+- [x] Establish hard safety limits for message size, subscriptions, queued paths, construction commands, and outbound buffers.
 - [ ] Run multi-hour soak tests and investigate memory growth, event-loop stalls, tick overruns, and state-hash failures.
-- [ ] Document the measured threshold at which one Node.js process no longer meets the world target. Do not introduce sharding prematurely; any future partition must preserve one logical world.
+- [x] Document the measured threshold at which one Node.js process no longer meets the world target. Do not introduce sharding prematurely; any future partition must preserve one logical world.
 
 Exit criteria:
 
@@ -365,20 +366,20 @@ Exit criteria:
 
 ## Phase 14: Secure the public service
 
-- [ ] Produce a threat model covering command forgery, hidden-state extraction, resource duplication, account takeover, spam, griefing, denial of service, dependency compromise, and administrator misuse.
-- [ ] Replace development identity with production authentication and secure session management.
-- [ ] Use secure, HTTP-only, same-site cookies or an equivalently reviewed token design.
-- [ ] Require TLS in production and validate WebSocket origins.
+- [x] Produce a threat model covering command forgery, hidden-state extraction, resource duplication, account takeover, spam, griefing, denial of service, dependency compromise, and administrator misuse.
+- [x] Replace development identity with production authentication and secure session management.
+- [x] Use secure, HTTP-only, same-site cookies or an equivalently reviewed token design.
+- [x] Require TLS in production and validate WebSocket origins.
 - [ ] Validate every untrusted HTTP, WebSocket, content, administrative, and database boundary.
-- [ ] Enforce server-side authorization for every command and query.
-- [ ] Add per-connection and per-account rate limits without introducing a separate cache service.
-- [ ] Add request and message size limits before parsing large payloads.
-- [ ] Prevent clients from selecting arbitrary player IDs, ticks, entity ownership, costs, rewards, or outcomes.
-- [ ] Keep secrets out of the repository and logs. Define rotation procedures.
+- [x] Enforce server-side authorization for every command and query.
+- [x] Add per-connection and per-account rate limits without introducing a separate cache service.
+- [x] Add request and message size limits before parsing large payloads.
+- [x] Prevent clients from selecting arbitrary player IDs, ticks, entity ownership, costs, rewards, or outcomes.
+- [x] Keep secrets out of the repository and logs. Define rotation procedures.
 - [ ] Use separate least-privilege database roles for migrations, runtime access, and backups.
-- [ ] Add dependency scanning, lockfile review, and a documented update cadence.
-- [ ] Sanitize user-generated text and configure browser security headers.
-- [ ] Avoid logging session secrets, private messages, or hidden-world payloads.
+- [x] Add dependency scanning, lockfile review, and a documented update cadence.
+- [x] Sanitize user-generated text and configure browser security headers.
+- [x] Avoid logging session secrets, private messages, or hidden-world payloads.
 - [ ] Conduct abuse tests and a focused security review before public registration.
 
 Exit criteria:
@@ -391,17 +392,17 @@ Exit criteria:
 
 - [ ] Define development, test, staging, and production configuration. Production still contains exactly one player-facing global world; non-production worlds are disposable test environments.
 - [ ] Choose a hosting approach for the static browser assets, Node.js process, and PostgreSQL without requiring Docker.
-- [ ] Add liveness and readiness endpoints that distinguish process health from world readiness.
-- [ ] Add structured logs with correlation IDs for connections, commands, players, checkpoints, and failures.
+- [x] Add liveness and readiness endpoints that distinguish process health from world readiness.
+- [x] Add structured logs with correlation IDs for connections, commands, players, checkpoints, and failures.
 - [ ] Create dashboards and alerts for tick overruns, crashes, database failures, failed checkpoints, journal lag, connection spikes, memory pressure, and backup failure.
-- [ ] Add graceful restart and maintenance mode with clear browser messaging.
+- [x] Add graceful restart and maintenance mode with clear browser messaging.
 - [ ] Make deployments reject incompatible database, snapshot, content, or protocol versions before accepting players.
-- [ ] Define forward-only database migrations and versioned snapshot migrations.
+- [x] Define forward-only database migrations and versioned snapshot migrations.
 - [ ] Test application rollback separately from data rollback; do not assume a database schema can be safely downgraded.
 - [ ] Automate production backups with retention and off-host storage.
 - [ ] Schedule recurring restore drills and record their duration and verification results.
-- [ ] Write runbooks for failed deployment, corrupted latest checkpoint, database outage, runaway tick time, malicious client flood, lost credentials, and world rollback.
-- [ ] Add a world-consistency inspection command that can run read-only against a checkpoint.
+- [x] Write runbooks for failed deployment, corrupted latest checkpoint, database outage, runaway tick time, malicious client flood, lost credentials, and world rollback.
+- [x] Add a world-consistency inspection command that can run read-only against a checkpoint.
 - [ ] Define maintenance windows and player communication procedures.
 
 Exit criteria:
@@ -412,11 +413,11 @@ Exit criteria:
 
 ## Phase 16: Test and release the global world
 
-- [ ] Maintain unit tests for pure rules, invariants, coordinates, recipes, permissions, AI decisions, and serialization.
-- [ ] Maintain property-based tests for conservation, bounds, idempotency, and concurrency-sensitive systems.
+- [x] Maintain unit tests for pure rules, invariants, coordinates, recipes, permissions, AI decisions, and serialization.
+- [x] Maintain property-based tests for conservation, bounds, idempotency, and concurrency-sensitive systems.
 - [ ] Maintain integration tests for WebSockets, PostgreSQL, checkpoints, journal replay, reconnect, migrations, and authentication.
 - [ ] Add browser end-to-end tests for onboarding and the critical gather-build-produce-research-defend loop.
-- [ ] Maintain deterministic replay scenarios and compare final state hashes in CI.
+- [x] Maintain deterministic replay scenarios and compare final state hashes in CI.
 - [ ] Run compatibility tests in every supported browser.
 - [ ] Run load, soak, crash, restart, backup, restore, and interrupted-deployment tests against release candidates.
 - [ ] Run a private internal world and fix all world-corrupting, duplication, authorization, and recovery defects before inviting external players.

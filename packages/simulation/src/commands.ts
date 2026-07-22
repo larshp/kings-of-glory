@@ -5,6 +5,8 @@ export type Tick = number & { readonly __brand: 'Tick' };
 export type ChunkCoordinate = readonly [number, number] & { readonly __brand: 'ChunkCoordinate' };
 export type TileCoordinate = readonly [number, number] & { readonly __brand: 'TileCoordinate' };
 export type SettlementRole = 'owner' | 'builder' | 'logistics' | 'member';
+export type SharedProjectBuildingKind =
+  'smelter' | 'workshop' | 'storage' | 'housing' | 'hearth' | 'watchtower';
 
 export const playerId = (value: string): PlayerId => value as PlayerId;
 export const buildingId = (value: string): BuildingId => value as BuildingId;
@@ -145,6 +147,54 @@ export type Command =
       readonly id: string;
       readonly playerId: PlayerId;
       readonly sequence: number;
+      readonly type: 'setPlayerName';
+      readonly name: string;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'setSettlementName';
+      readonly settlementId: string;
+      readonly name: string;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'sendChatMessage';
+      readonly channel: 'global';
+      readonly text: string;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'sendChatMessage';
+      readonly channel: 'settlement';
+      readonly settlementId: string;
+      readonly text: string;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'setPlayerBlocked';
+      readonly targetPlayerId: PlayerId;
+      readonly blocked: boolean;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'reportChatMessage';
+      readonly messageId: string;
+      readonly reason: string;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
       readonly type: 'inviteToSettlement';
       readonly settlementId: string;
       readonly targetPlayerId: PlayerId;
@@ -187,6 +237,13 @@ export type Command =
       readonly type: 'removeSettlementMember';
       readonly settlementId: string;
       readonly targetPlayerId: PlayerId;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'deleteAccount';
+      readonly confirmation: string;
     }
   | {
       readonly id: string;
@@ -240,6 +297,41 @@ export type Command =
       readonly id: string;
       readonly playerId: PlayerId;
       readonly sequence: number;
+      readonly type: 'contributeToObjective';
+      readonly objectiveId: 'frontier-beacon';
+      readonly settlementId: string;
+      readonly amount: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'claimObjectiveReward';
+      readonly objectiveId: 'frontier-beacon';
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'createSharedConstructionProject';
+      readonly settlementId: string;
+      readonly buildingKind: SharedProjectBuildingKind;
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'contributeToSharedConstructionProject';
+      readonly projectId: string;
+      readonly item: 'ore' | 'wood' | 'ingot' | 'tool';
+      readonly amount: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
       readonly type: 'repair';
       readonly buildingId: BuildingId;
     }
@@ -288,6 +380,8 @@ export type RejectionCode =
   | 'not-explored'
   | 'not-adjacent'
   | 'territory-claimed'
+  | 'protected-area'
+  | 'reserved-resource'
   | 'technology-locked'
   | 'research-in-progress'
   | 'already-researched'
@@ -300,9 +394,29 @@ export type RejectionCode =
   | 'cannot-leave-settlement-owner'
   | 'cannot-remove-settlement-owner'
   | 'cannot-transfer-settlement-ownership-to-self'
+  | 'cannot-delete-settlement-owner'
+  | 'account-deletion-confirmation-required'
+  | 'account-deleted'
   | 'invalid-logistics-link'
   | 'logistics-link-exists'
-  | 'unknown-logistics-link';
+  | 'unknown-logistics-link'
+  | 'unknown-objective'
+  | 'objective-complete'
+  | 'objective-incomplete'
+  | 'objective-contribution-required'
+  | 'reward-already-claimed'
+  | 'unknown-project'
+  | 'project-complete'
+  | 'project-limit-reached'
+  | 'construction-limit-reached'
+  | 'invalid-name'
+  | 'name-taken'
+  | 'content-rejected'
+  | 'chat-rate-limited'
+  | 'invalid-message'
+  | 'unknown-message'
+  | 'already-reported'
+  | 'cannot-block-self';
 
 export type CommandResult =
   | { readonly accepted: true; readonly commandId: string }

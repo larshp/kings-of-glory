@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  cooperativeObjectives,
   logisticsLinks,
+  onboardingRules,
   producers,
   resources,
+  socialRules,
   storage,
+  threats,
   validateContent,
   validateRecipeGraph,
   validateTechnologyGraph,
@@ -21,6 +25,28 @@ describe('content definitions', () => {
     expect(producers.workshop.recipeIds).toContain('forge-tool-without-wood');
     expect(storage.storage).toMatchObject({ buildingId: 'storage', capacity: 200 });
     expect(logisticsLinks.internalInventory.throughputPerTick).toBe(1);
+    expect(cooperativeObjectives['frontier-beacon']).toMatchObject({
+      contributionItem: 'tool',
+      targetAmount: 20,
+      reward: { ingot: 2 },
+    });
+    expect(threats['raider-swarm']).toMatchObject({
+      newPlayerProtectionTicks: 300,
+      inactiveAfterTicks: 300,
+      inactiveHealthFloorPercent: 50,
+      maxInactiveThreatsPerPlayer: 1,
+      settlementBufferTiles: 2,
+    });
+    expect(socialRules).toMatchObject({
+      playerNameLength: { min: 3, max: 24 },
+      chatMessageMaxLength: 280,
+      chatCooldownTicks: 5,
+      retainedMessages: 500,
+    });
+    expect(onboardingRules).toEqual({
+      abandonedReservationTicks: 36_000,
+      securingBuildingKind: 'smelter',
+    });
   });
   it('rejects cyclic technology prerequisites', () =>
     expect(

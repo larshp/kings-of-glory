@@ -4,9 +4,12 @@ export interface ServerEnvironment {
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   persistence: 'memory' | 'postgres';
   production: boolean;
+  trustProxy: boolean;
   peaceful: boolean;
   allowedOrigins: readonly string[];
   databaseUrl?: string;
+  sessionSecret?: string;
+  previousSessionSecret?: string;
 }
 export const parseEnvironment = (env: Record<string, string | undefined>): ServerEnvironment => {
   const port = Number(env.PORT ?? '3001');
@@ -14,6 +17,7 @@ export const parseEnvironment = (env: Record<string, string | undefined>): Serve
   const logLevel = env.LOG_LEVEL ?? 'info';
   const persistence = env.PERSISTENCE ?? 'memory';
   const production = env.NODE_ENV === 'production';
+  const trustProxy = env.TRUST_PROXY === 'true';
   const peaceful = env.PEACEFUL !== 'false';
   const allowedOrigins = (env.ALLOWED_ORIGINS ?? '')
     .split(',')
@@ -30,14 +34,23 @@ export const parseEnvironment = (env: Record<string, string | undefined>): Serve
     throw new Error('DATABASE_URL is required when PERSISTENCE=postgres.');
   if (production && allowedOrigins.length === 0)
     throw new Error('ALLOWED_ORIGINS is required in production.');
+  if (production && (!env.SESSION_SECRET || env.SESSION_SECRET.length < 32))
+    throw new Error('SESSION_SECRET of at least 32 characters is required in production.');
+  if (env.SESSION_SECRET_PREVIOUS && env.SESSION_SECRET_PREVIOUS.length < 32)
+    throw new Error('SESSION_SECRET_PREVIOUS must be at least 32 characters when set.');
+  if (production && !trustProxy)
+    throw new Error('TRUST_PROXY=true is required for production TLS enforcement.');
   return {
     port,
     worldSeed,
     logLevel: logLevel as ServerEnvironment['logLevel'],
     persistence,
     production,
+    trustProxy,
     peaceful,
     allowedOrigins,
     ...(env.DATABASE_URL ? { databaseUrl: env.DATABASE_URL } : {}),
+    ...(env.SESSION_SECRET ? { sessionSecret: env.SESSION_SECRET } : {}),
+    ...(env.SESSION_SECRET_PREVIOUS ? { previousSessionSecret: env.SESSION_SECRET_PREVIOUS } : {}),
   };
 };

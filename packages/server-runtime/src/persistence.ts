@@ -1,7 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
 import type { Building, Command, Threat, WorldState } from '@kings/simulation';
-import { chunkKeyFor, snapshot, stateHash } from '@kings/simulation';
+import {
+  chunkKeyFor,
+  deserializeWorld,
+  inspectWorld,
+  snapshot,
+  stateHash,
+} from '@kings/simulation';
+import type { AdministrativeAuditEvent } from './admin.js';
 
 export const WORLD_ID = 'global';
 const CHECKPOINT_RETENTION = 3;
@@ -17,6 +24,11 @@ export interface CompletedCheckpoint {
   /** Dirty chunks written alongside this checkpoint, when available. */
   readonly dirtyChunks?: readonly string[];
 }
+export interface CheckpointEvidence {
+  readonly id: string;
+  readonly tick: number;
+  readonly stateHash: string;
+}
 export interface PersistedChunkSnapshot {
   readonly chunk: { readonly x: number; readonly y: number };
   readonly tick: number;
@@ -30,6 +42,11 @@ export interface WorldPersistence {
   loadJournalAfter(tick: number): Promise<readonly JournalEntry[]>;
   appendAcceptedCommand(entry: JournalEntry): Promise<void>;
   saveCheckpoint(state: WorldState, dirtyChunks?: readonly string[]): Promise<CompletedCheckpoint>;
+  commitAdministrativeMutation(
+    state: WorldState,
+    audit: AdministrativeAuditEvent,
+  ): Promise<CompletedCheckpoint>;
+  loadAdministrativeAuditEvents(limit: number): Promise<readonly AdministrativeAuditEvent[]>;
   close(): Promise<void>;
 }
 
@@ -37,6 +54,7 @@ export interface WorldPersistence {
 export class MemoryWorldPersistence implements WorldPersistence {
   #checkpoints: CompletedCheckpoint[] = [];
   #journal: JournalEntry[] = [];
+  #administrativeAuditEvents: AdministrativeAuditEvent[] = [];
   async migrate(): Promise<void> {}
   async loadLatestCheckpoint(): Promise<CompletedCheckpoint | undefined> {
     return this.#checkpoints.at(-1);
@@ -65,6 +83,20 @@ export class MemoryWorldPersistence implements WorldPersistence {
     const oldestRetainedTick = this.#checkpoints[0]?.tick ?? checkpoint.tick;
     this.#journal = this.#journal.filter((entry) => entry.targetTick > oldestRetainedTick);
     return checkpoint;
+  }
+  async commitAdministrativeMutation(
+    state: WorldState,
+    audit: AdministrativeAuditEvent,
+  ): Promise<CompletedCheckpoint> {
+    const checkpoint = await this.saveCheckpoint(state);
+    this.#administrativeAuditEvents.push(structuredClone(audit));
+    return checkpoint;
+  }
+  administrativeAuditEvents(): readonly AdministrativeAuditEvent[] {
+    return structuredClone(this.#administrativeAuditEvents);
+  }
+  async loadAdministrativeAuditEvents(limit: number): Promise<readonly AdministrativeAuditEvent[]> {
+    return structuredClone(this.#administrativeAuditEvents.slice(-limit).reverse());
   }
   async close(): Promise<void> {}
 }
@@ -127,16 +159,79 @@ export const INITIAL_MIGRATION_SQL = [
   `CREATE TABLE IF NOT EXISTS administrative_audit_events (id uuid PRIMARY KEY, world_id text NOT NULL REFERENCES worlds(id), actor_id text NOT NULL, reason text NOT NULL, before_state jsonb NULL, after_state jsonb NULL, tick bigint NULL, created_at timestamptz NOT NULL DEFAULT now());`,
 ];
 
+export interface DatabaseMigration {
+  readonly version: number;
+  readonly name: string;
+  readonly statements: readonly string[];
+}
+
+/** Ordered, forward-only migrations. Never edit a released entry; append a new version. */
+export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
+  { version: 1, name: 'initial', statements: INITIAL_MIGRATION_SQL },
+  {
+    version: 2,
+    name: 'backup-restore-drills',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS backup_restore_drills (id uuid PRIMARY KEY, backup_created_at timestamptz NOT NULL, restored_at timestamptz NOT NULL DEFAULT now(), source_database text NOT NULL, target_database text NOT NULL, checkpoint_id uuid NULL, checkpoint_tick bigint NULL, state_hash text NULL, backup_sha256 text NOT NULL, verified boolean NOT NULL, operator text NOT NULL, notes text NULL);`,
+    ],
+  },
+  {
+    version: 3,
+    name: 'administrative-audit-details',
+    statements: [
+      `ALTER TABLE administrative_audit_events ADD COLUMN IF NOT EXISTS operation text NOT NULL DEFAULT 'legacy';`,
+      `ALTER TABLE administrative_audit_events ADD COLUMN IF NOT EXISTS target_id text NOT NULL DEFAULT 'world';`,
+      `CREATE INDEX IF NOT EXISTS administrative_audit_events_world_tick_idx ON administrative_audit_events(world_id, tick DESC, created_at DESC);`,
+    ],
+  },
+] as const;
+
+const assertMigrationRegistry = () => {
+  for (const [index, migration] of DATABASE_MIGRATIONS.entries()) {
+    const expectedVersion = index + 1;
+    if (migration.version !== expectedVersion)
+      throw new Error(
+        `Database migration versions must be contiguous: expected ${expectedVersion}, got ${migration.version}`,
+      );
+    if (migration.statements.length === 0)
+      throw new Error(`Database migration ${migration.version} has no statements`);
+  }
+};
+
 export class PostgresWorldPersistence implements WorldPersistence {
   constructor(private readonly pool: Pool) {}
   async migrate(): Promise<void> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      for (const sql of INITIAL_MIGRATION_SQL) await client.query(sql);
+      assertMigrationRegistry();
+      await client.query('SELECT pg_advisory_xact_lock($1)', [0x4b4f47]);
       await client.query(
-        'INSERT INTO schema_migrations(version) VALUES (1) ON CONFLICT DO NOTHING',
+        'CREATE TABLE IF NOT EXISTS schema_migrations (version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())',
       );
+      const applied = await client.query<{ version: number }>(
+        'SELECT version FROM schema_migrations ORDER BY version',
+      );
+      const appliedVersions = new Set(applied.rows.map((row) => Number(row.version)));
+      const newestKnownVersion = DATABASE_MIGRATIONS.at(-1)?.version ?? 0;
+      const unknownVersion = [...appliedVersions].find((version) => version > newestKnownVersion);
+      if (unknownVersion !== undefined)
+        throw new Error(
+          `Database schema version ${unknownVersion} is newer than supported version ${newestKnownVersion}`,
+        );
+      const appliedInOrder = [...appliedVersions].sort((left, right) => left - right);
+      const invalidHistory = appliedInOrder.find((version, index) => version !== index + 1);
+      if (invalidHistory !== undefined)
+        throw new Error(
+          `Database migration history is not contiguous at version ${invalidHistory}`,
+        );
+      for (const migration of DATABASE_MIGRATIONS) {
+        if (appliedVersions.has(migration.version)) continue;
+        for (const sql of migration.statements) await client.query(sql);
+        await client.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+          migration.version,
+        ]);
+      }
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK');
@@ -185,6 +280,44 @@ export class PostgresWorldPersistence implements WorldPersistence {
     state: WorldState,
     dirtyChunks: readonly string[] = [],
   ): Promise<CompletedCheckpoint> {
+    return this.persistCheckpoint(state, dirtyChunks);
+  }
+  async loadAdministrativeAuditEvents(limit: number): Promise<readonly AdministrativeAuditEvent[]> {
+    const result = await this.pool.query<{
+      id: string;
+      actor_id: string;
+      reason: string;
+      operation: AdministrativeAuditEvent['operation'];
+      target_id: string;
+      before_state: unknown;
+      after_state: unknown;
+      tick: string;
+    }>(
+      'SELECT id, actor_id, reason, operation, target_id, before_state, after_state, tick FROM administrative_audit_events WHERE world_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2',
+      [WORLD_ID, limit],
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      actorId: row.actor_id,
+      reason: row.reason,
+      operation: row.operation,
+      targetId: row.target_id,
+      beforeState: row.before_state,
+      afterState: row.after_state,
+      tick: Number(row.tick),
+    }));
+  }
+  async commitAdministrativeMutation(
+    state: WorldState,
+    audit: AdministrativeAuditEvent,
+  ): Promise<CompletedCheckpoint> {
+    return this.persistCheckpoint(state, [], audit);
+  }
+  private async persistCheckpoint(
+    state: WorldState,
+    dirtyChunks: readonly string[],
+    audit?: AdministrativeAuditEvent,
+  ): Promise<CompletedCheckpoint> {
     const checkpoint: CompletedCheckpoint = {
       checkpointId: randomUUID(),
       tick: state.tick,
@@ -218,6 +351,21 @@ export class PostgresWorldPersistence implements WorldPersistence {
         'UPDATE world_checkpoints SET completed = true, completed_at = now() WHERE id = $1',
         [checkpoint.checkpointId],
       );
+      if (audit)
+        await client.query(
+          'INSERT INTO administrative_audit_events(id, world_id, actor_id, reason, operation, target_id, before_state, after_state, tick) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+          [
+            audit.id,
+            WORLD_ID,
+            audit.actorId,
+            audit.reason,
+            audit.operation,
+            audit.targetId,
+            audit.beforeState,
+            audit.afterState,
+            audit.tick,
+          ],
+        );
       await client.query(
         `DELETE FROM chunk_snapshots
          WHERE checkpoint_id IN (
@@ -271,3 +419,72 @@ export class PostgresWorldPersistence implements WorldPersistence {
 export const createPostgresWorldPersistence = (
   connectionString: string,
 ): PostgresWorldPersistence => new PostgresWorldPersistence(new Pool({ connectionString }));
+
+export const readLatestCheckpointEvidence = async (
+  connectionString: string,
+): Promise<CheckpointEvidence | undefined> => {
+  const pool = new Pool({ connectionString });
+  try {
+    const row = (
+      await pool.query<{ id: string; tick: string; state_hash: string }>(
+        'SELECT id, tick, state_hash FROM world_checkpoints WHERE world_id = $1 AND completed = true ORDER BY tick DESC LIMIT 1',
+        [WORLD_ID],
+      )
+    ).rows[0];
+    return row ? { id: row.id, tick: Number(row.tick), stateHash: row.state_hash } : undefined;
+  } finally {
+    await pool.end();
+  }
+};
+
+export interface RestoreVerificationInput {
+  readonly connectionString: string;
+  readonly expected: CheckpointEvidence;
+  readonly backupCreatedAt: string;
+  readonly backupSha256: string;
+  readonly sourceDatabase: string;
+  readonly targetDatabase: string;
+  readonly operator: string;
+}
+
+export const verifyAndRecordRestoredDatabase = async (
+  input: RestoreVerificationInput,
+): Promise<CheckpointEvidence> => {
+  const pool = new Pool({ connectionString: input.connectionString });
+  const persistence = new PostgresWorldPersistence(pool);
+  try {
+    await persistence.migrate();
+    const row = (
+      await pool.query<{ id: string; tick: string; state: unknown; state_hash: string }>(
+        'SELECT id, tick, state, state_hash FROM world_checkpoints WHERE world_id = $1 AND id = $2 AND completed = true',
+        [WORLD_ID, input.expected.id],
+      )
+    ).rows[0];
+    if (!row) throw new Error('Restored database does not contain the manifest checkpoint');
+    const world = deserializeWorld(row.state);
+    const errors = inspectWorld(world);
+    if (errors.length > 0) throw new Error(`Restored world is invalid: ${errors.join('; ')}`);
+    const restored = { id: row.id, tick: Number(row.tick), stateHash: stateHash(world) };
+    if (restored.stateHash !== row.state_hash || restored.stateHash !== input.expected.stateHash)
+      throw new Error('Restored checkpoint state hash does not match backup evidence');
+    if (restored.id !== input.expected.id || restored.tick !== input.expected.tick)
+      throw new Error('Restored checkpoint identity does not match backup evidence');
+    await pool.query(
+      'INSERT INTO backup_restore_drills(id, backup_created_at, source_database, target_database, checkpoint_id, checkpoint_tick, state_hash, backup_sha256, verified, operator) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9)',
+      [
+        randomUUID(),
+        input.backupCreatedAt,
+        input.sourceDatabase,
+        input.targetDatabase,
+        restored.id,
+        restored.tick,
+        restored.stateHash,
+        input.backupSha256,
+        input.operator,
+      ],
+    );
+    return restored;
+  } finally {
+    await pool.end();
+  }
+};

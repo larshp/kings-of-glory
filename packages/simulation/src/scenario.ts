@@ -3,6 +3,7 @@ import {
   advanceTick,
   applyCommand,
   createWorld,
+  deserializeWorld,
   inspectWorld,
   joinPlayer,
   nearestOreTile,
@@ -14,11 +15,15 @@ import {
   type WorldState,
 } from './world.js';
 
+export type BotActionKind =
+  'gather' | 'build' | 'research' | 'trade' | 'expand' | 'reconnect' | 'defend';
+
 export interface ScenarioResult {
   state: WorldState;
   hash: string;
   commandCount: number;
   invariantErrors: readonly string[];
+  botActions: Readonly<Record<BotActionKind, number>>;
 }
 
 export interface PhaseProfile {
@@ -35,21 +40,40 @@ export const runBotScenario = (
 ): ScenarioResult => {
   if (!Number.isInteger(targetBuildingsPerPlayer) || targetBuildingsPerPlayer < 5)
     throw new Error('Bot scenarios require at least five buildings per player.');
-  const state = createWorld(20260719);
+  let state = createWorld(20260719, false);
   const sequence = new Map<string, number>();
   const towerTiles = new Map<string, { x: number; y: number }>();
   const oreTiles = new Map<string, { x: number; y: number }>();
   let commandCount = 0;
+  const botActions: Record<BotActionKind, number> = {
+    gather: 0,
+    build: 0,
+    research: 0,
+    trade: 0,
+    expand: 0,
+    reconnect: 0,
+    defend: 0,
+  };
   const issue = (player: string, command: Record<string, unknown>) => {
     const next = (sequence.get(player) ?? 0) + 1;
     sequence.set(player, next);
     commandCount += 1;
-    return applyCommand(state, {
+    const outcome = applyCommand(state, {
       id: `${player}-${next}`,
       playerId: playerId(player),
       sequence: next,
       ...command,
     } as never);
+    if (outcome.result.accepted) {
+      const type = String(command.type);
+      if (type === 'gather') botActions.gather += 1;
+      else if (type.startsWith('place')) botActions.build += 1;
+      else if (type === 'research') botActions.research += 1;
+      else if (type === 'transferToPlayer') botActions.trade += 1;
+      else if (type === 'claimTerritory') botActions.expand += 1;
+      else if (type === 'repair') botActions.defend += 1;
+    }
+    return outcome;
   };
   const requireIssue = (player: string, command: Record<string, unknown>) => {
     const outcome = issue(player, command);
@@ -63,7 +87,7 @@ export const runBotScenario = (
     joinPlayer(state, player);
     const playerState = state.players[player]!;
     // Covers the whole ore -> ingot -> tool chain after constructing the basic settlement.
-    playerState.inventory.wood = 14 + (targetBuildingsPerPlayer - 5) * 2;
+    playerState.inventory.wood = 15 + (targetBuildingsPerPlayer - 5) * 2;
     playerState.inventory.ingot = 1;
     // This is a density fixture rather than a starter-settlement scenario: give
     // it enough abstract construction labor to exercise production and combat
@@ -79,6 +103,10 @@ export const runBotScenario = (
       .filter(
         (tile) =>
           terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
+          !(
+            tile.y === playerState.plot.y + playerState.plot.size - 2 &&
+            tile.x < playerState.plot.x + playerState.plot.size - 2
+          ) &&
           (tile.x !== playerState.plot.x + playerState.plot.size - 2 ||
             tile.y !== playerState.plot.y + playerState.plot.size - 2),
       );
@@ -102,6 +130,13 @@ export const runBotScenario = (
     oreTiles.set(player, oreTile);
   }
   for (let tick = 0; tick < ticks; tick += 1) {
+    if (tick === 1 && playerCount > 1)
+      requireIssue('bot-0', {
+        type: 'transferToPlayer',
+        targetPlayerId: playerId('bot-1'),
+        item: 'wood',
+        amount: 1,
+      });
     if (tick === 20) for (const player of Object.values(state.players)) player.population.total = 2;
     if (tick === 20)
       for (const player of Object.keys(state.players)) {
@@ -185,9 +220,72 @@ export const runBotScenario = (
             direction: 'toBuilding',
           });
       }
+    for (const player of Object.keys(state.players)) {
+      const playerState = state.players[player]!;
+      if (
+        playerState.research.unlocked.metallurgy &&
+        !playerState.research.unlocked['territorial-charter'] &&
+        playerState.research.activeTechnology === null
+      ) {
+        const workshop = Object.values(state.buildings).find(
+          (building) => building.ownerId === player && building.kind === 'workshop',
+        );
+        const neededTools = 2 - playerState.inventory.tool;
+        if (workshop && neededTools > 0 && workshop.inventory.tool > 0)
+          issue(player, {
+            type: 'transfer',
+            buildingId: workshop.id,
+            item: 'tool',
+            amount: Math.min(neededTools, workshop.inventory.tool),
+            direction: 'toPlayer',
+          });
+        if (playerState.inventory.tool >= 2)
+          requireIssue(player, { type: 'research', technologyId: 'territorial-charter' });
+      }
+    }
+    const firstBot = state.players['bot-0'];
+    if (firstBot?.research.unlocked['territorial-charter'] && botActions.expand === 0) {
+      const candidates = new Set<string>();
+      for (const key of Object.keys(firstBot.territoryCells)) {
+        const [xText, yText] = key.split(':');
+        const cellX = Number(xText);
+        const cellY = Number(yText);
+        for (const [offsetX, offsetY] of [
+          [1, 0],
+          [0, 1],
+          [-1, 0],
+          [0, -1],
+        ] as const)
+          candidates.add(`${cellX + offsetX}:${cellY + offsetY}`);
+      }
+      for (const key of [...candidates].sort((left, right) => right.localeCompare(left))) {
+        if (Object.values(state.players).some((candidate) => candidate.territoryCells[key]))
+          continue;
+        const [xText, yText] = key.split(':');
+        const x = Number(xText) * 8;
+        const y = Number(yText) * 8;
+        issue('bot-0', { type: 'explore', x, y });
+        if (issue('bot-0', { type: 'claimTerritory', x, y }).result.accepted) break;
+      }
+    }
+    for (const threat of Object.values(state.threats)) {
+      const target = state.buildings[threat.targetBuildingId];
+      if (target && target.health < target.maxHealth)
+        issue(target.ownerId, { type: 'repair', buildingId: target.id });
+    }
     advanceTick(state);
+    if (ticks > 1 && tick === Math.floor(ticks / 2)) {
+      state = deserializeWorld(state);
+      botActions.reconnect += Object.keys(state.players).length;
+    }
   }
-  return { state, hash: stateHash(state), commandCount, invariantErrors: inspectWorld(state) };
+  return {
+    state,
+    hash: stateHash(state),
+    commandCount,
+    invariantErrors: inspectWorld(state),
+    botActions,
+  };
 };
 
 /**
@@ -263,6 +361,15 @@ export const runInfrastructureStressScenario = (pairCount = 1_000, ticks = 4): S
     hash: stateHash(state),
     commandCount: 0,
     invariantErrors: inspectWorld(state),
+    botActions: {
+      gather: 0,
+      build: 0,
+      research: 0,
+      trade: 0,
+      expand: 0,
+      reconnect: 0,
+      defend: 0,
+    },
   };
 };
 
@@ -299,6 +406,15 @@ export const profileInfrastructureStressScenario = (
       hash: stateHash(state),
       commandCount: 0,
       invariantErrors: inspectWorld(state),
+      botActions: {
+        gather: 0,
+        build: 0,
+        research: 0,
+        trade: 0,
+        expand: 0,
+        reconnect: 0,
+        defend: 0,
+      },
     },
   };
 };

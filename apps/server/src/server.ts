@@ -12,8 +12,12 @@ import {
   type WorldPersistence,
 } from '@kings/server-runtime';
 import { WebSocketServer } from 'ws';
+import { issueSession, sessionCookie, sessionTokenFromCookie, verifySession } from './auth.js';
 
 const HEARTBEAT_TIMEOUT_MS = 45_000;
+export const MAX_PENDING_COMMANDS = 256;
+export const MAX_OUTBOUND_BUFFERED_BYTES = 1_000_000;
+export const MAX_ACCOUNT_MESSAGES_PER_SECOND = 60;
 
 export interface GameServer {
   readonly host: GlobalWorldHost;
@@ -47,6 +51,14 @@ export const createGameServer = async (
   let tickFailures = 0;
   const pendingCommands = new Set<Promise<void>>();
   let pendingTick: Promise<void> | undefined;
+  const sessionSecret =
+    environment.sessionSecret ?? 'development-only-session-secret-do-not-deploy';
+  const verifyConfiguredSession = (token: string | undefined) =>
+    verifySession(token, sessionSecret) ??
+    (environment.previousSessionSecret
+      ? verifySession(token, environment.previousSessionSecret)
+      : undefined);
+  const accountMessageWindows = new Map<string, { startedAt: number; count: number }>();
   const log = (event: string, fields: Record<string, unknown> = {}) =>
     console.log(JSON.stringify({ level: environment.logLevel, event, ...fields }));
   const httpServer: Server = createServer((request, response) => {
@@ -56,6 +68,54 @@ export const createGameServer = async (
     response.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
     if (environment.production)
       response.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    if (request.url === '/session') {
+      const origin = request.headers.origin;
+      const originAllowed =
+        !origin ||
+        (!environment.production && environment.allowedOrigins.length === 0) ||
+        environment.allowedOrigins.includes(origin);
+      if (!originAllowed) {
+        response.writeHead(403);
+        response.end();
+        return;
+      }
+      if (
+        environment.production &&
+        (!environment.trustProxy || request.headers['x-forwarded-proto'] !== 'https')
+      ) {
+        response.writeHead(426, { Upgrade: 'TLS/1.2' });
+        response.end();
+        return;
+      }
+      if (origin) {
+        response.setHeader('Access-Control-Allow-Origin', origin);
+        response.setHeader('Access-Control-Allow-Credentials', 'true');
+        response.setHeader('Vary', 'Origin');
+      }
+      if (request.method === 'OPTIONS') {
+        response.setHeader('Access-Control-Allow-Methods', 'POST');
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+      if (request.method !== 'POST') {
+        response.writeHead(405, { Allow: 'POST' });
+        response.end();
+        return;
+      }
+      const existingToken = sessionTokenFromCookie(request.headers.cookie);
+      const current = verifySession(existingToken, sessionSecret);
+      const existing = current ?? verifyConfiguredSession(existingToken);
+      const token = current
+        ? existingToken!
+        : issueSession(sessionSecret, Date.now(), existing?.playerId);
+      const session = existing ?? verifySession(token, sessionSecret)!;
+      if (!current) response.setHeader('Set-Cookie', sessionCookie(token, environment.production));
+      response.setHeader('Cache-Control', 'no-store');
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ playerId: session.playerId }));
+      return;
+    }
     if (request.url === '/' && !environment.production) {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end(
@@ -93,9 +153,12 @@ export const createGameServer = async (
         (total, socket) => total + socket.bufferedAmount,
         0,
       );
+      const tickPhaseMetrics = Object.entries(metrics.tickPhaseDurationsMs)
+        .map(([phase, duration]) => `kings_tick_phase_duration_ms{phase="${phase}"} ${duration}`)
+        .join('\n');
       response.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' });
       response.end(
-        `kings_world_tick ${host.world.tick}\nkings_connected_players ${host.connectedPlayerCount}\nkings_tick_duration_ms ${lastTickDurationMs}\nkings_tick_failures_total ${tickFailures}\nkings_entities ${Object.keys(host.world.buildings).length}\nkings_active_chunks ${activeChunks}\nkings_active_threats ${Object.keys(host.world.threats).length}\nkings_commands_pending ${pendingCommands.size}\nkings_outbound_buffered_bytes ${outboundBufferedBytes}\nkings_commands_accepted_total ${metrics.acceptedCommands}\nkings_commands_rejected_total ${metrics.rejectedCommands}\nkings_command_persistence_failures_total ${metrics.persistenceFailures}\nkings_command_duration_ms ${metrics.lastCommandDurationMs}\nkings_checkpoint_failures_total ${metrics.checkpointFailures}\nkings_checkpoint_duration_ms ${metrics.lastCheckpointDurationMs}\nkings_checkpoint_tick ${metrics.lastCheckpointTick}\nkings_recovery_duration_ms ${metrics.lastRecoveryDurationMs}\nkings_journal_lag_ticks ${Math.max(0, host.world.tick - metrics.lastCheckpointTick)}\nkings_state_full_messages_total ${metrics.fullStateMessages}\nkings_state_full_bytes_total ${metrics.fullStateBytes}\nkings_state_delta_messages_total ${metrics.deltaStateMessages}\nkings_state_delta_bytes_total ${metrics.deltaStateBytes}\nkings_state_build_duration_ms ${metrics.lastStateBuildDurationMs}\nkings_process_resident_memory_bytes ${memory.rss}\nkings_process_heap_used_bytes ${memory.heapUsed}\n`,
+        `kings_world_tick ${host.world.tick}\nkings_connected_players ${host.connectedPlayerCount}\nkings_tick_duration_ms ${lastTickDurationMs}\n${tickPhaseMetrics}\nkings_tick_failures_total ${tickFailures}\nkings_entities ${Object.keys(host.world.buildings).length}\nkings_active_chunks ${activeChunks}\nkings_active_threats ${Object.keys(host.world.threats).length}\nkings_path_queue_length ${metrics.pathQueueLength}\nkings_commands_pending ${pendingCommands.size}\nkings_outbound_buffered_bytes ${outboundBufferedBytes}\nkings_commands_accepted_total ${metrics.acceptedCommands}\nkings_commands_rejected_total ${metrics.rejectedCommands}\nkings_command_persistence_failures_total ${metrics.persistenceFailures}\nkings_command_duration_ms ${metrics.lastCommandDurationMs}\nkings_checkpoint_failures_total ${metrics.checkpointFailures}\nkings_checkpoint_duration_ms ${metrics.lastCheckpointDurationMs}\nkings_checkpoint_tick ${metrics.lastCheckpointTick}\nkings_recovery_duration_ms ${metrics.lastRecoveryDurationMs}\nkings_journal_lag_ticks ${Math.max(0, host.world.tick - metrics.lastCheckpointTick)}\nkings_state_full_messages_total ${metrics.fullStateMessages}\nkings_state_full_bytes_total ${metrics.fullStateBytes}\nkings_state_delta_messages_total ${metrics.deltaStateMessages}\nkings_state_delta_bytes_total ${metrics.deltaStateBytes}\nkings_state_build_duration_ms ${metrics.lastStateBuildDurationMs}\nkings_process_resident_memory_bytes ${memory.rss}\nkings_process_heap_used_bytes ${memory.heapUsed}\n`,
       );
       return;
     }
@@ -114,9 +177,24 @@ export const createGameServer = async (
       socket.close(1008, 'Origin not allowed');
       return;
     }
+    if (
+      environment.production &&
+      (!environment.trustProxy || request.headers['x-forwarded-proto'] !== 'https')
+    ) {
+      socket.close(1008, 'TLS required');
+      return;
+    }
+    const authenticatedPlayerId = verifyConfiguredSession(
+      sessionTokenFromCookie(request.headers.cookie),
+    )?.playerId;
+    if (environment.production && !authenticatedPlayerId) {
+      socket.close(1008, 'Authentication required');
+      return;
+    }
     const connection: Connection = {
       send(message) {
-        if (socket.bufferedAmount > 1_000_000) socket.close(1013, 'Client too slow');
+        if (socket.bufferedAmount > MAX_OUTBOUND_BUFFERED_BYTES)
+          socket.close(1013, 'Client too slow');
         else socket.send(message);
       },
       close(code, reason) {
@@ -124,6 +202,7 @@ export const createGameServer = async (
       },
     };
     let connected = false;
+    let handshakeStarted = false;
     let connectedPlayerId: string | undefined;
     let windowStartedAt = Date.now();
     let messagesInWindow = 0;
@@ -176,6 +255,11 @@ export const createGameServer = async (
         return;
       }
       if (message.type === 'hello') {
+        if (handshakeStarted) {
+          socket.close(1008, 'Handshake already started');
+          return;
+        }
+        handshakeStarted = true;
         if (message.version !== PROTOCOL_VERSION) {
           socket.send(
             JSON.stringify({
@@ -187,12 +271,17 @@ export const createGameServer = async (
           socket.close(1002, 'Client upgrade required');
           return;
         }
+        if (authenticatedPlayerId && message.playerId !== authenticatedPlayerId) {
+          socket.close(1008, 'Authenticated identity mismatch');
+          return;
+        }
+        const playerId = authenticatedPlayerId ?? message.playerId;
         void host
-          .connect(connection, message.playerId)
+          .connect(connection, playerId)
           .then(() => {
             connected = true;
-            connectedPlayerId = message.playerId;
-            log('player.connected', { connectionId, playerId: message.playerId });
+            connectedPlayerId = playerId;
+            log('player.connected', { connectionId, playerId });
           })
           .catch((error: unknown) => {
             socket.send(
@@ -210,7 +299,31 @@ export const createGameServer = async (
         socket.close(1008, 'Handshake required');
         return;
       }
+      const accountWindow = accountMessageWindows.get(connectedPlayerId!);
+      if (!accountWindow || now - accountWindow.startedAt >= 1_000) {
+        accountMessageWindows.set(connectedPlayerId!, { startedAt: now, count: 1 });
+        if (accountMessageWindows.size > 10_000)
+          for (const [playerId, window] of accountMessageWindows)
+            if (now - window.startedAt >= 1_000) accountMessageWindows.delete(playerId);
+      } else {
+        accountWindow.count += 1;
+        if (accountWindow.count > MAX_ACCOUNT_MESSAGES_PER_SECOND) {
+          socket.close(1008, 'Account message rate exceeded');
+          return;
+        }
+      }
       if (message.type === 'command') {
+        if (pendingCommands.size >= MAX_PENDING_COMMANDS) {
+          socket.send(
+            JSON.stringify({
+              type: 'error',
+              code: 'server-busy',
+              message: 'The command queue is full. Reconnect and try again.',
+            }),
+          );
+          socket.close(1013, 'Command queue full');
+          return;
+        }
         const pending = host.command(connection, message.command);
         pendingCommands.add(pending);
         void pending
@@ -226,6 +339,10 @@ export const createGameServer = async (
           .finally(() => pendingCommands.delete(pending));
       }
       if (message.type === 'interest') host.setInterest(connection, message.chunks);
+      if (message.type === 'worldMap')
+        host.worldMap(connection, message.requestId, message.after, message.limit);
+      if (message.type === 'directorySearch')
+        host.directory(connection, message.requestId, message.query, message.after, message.limit);
       if (message.type === 'resync') host.resync(connection);
       if (message.type === 'ping')
         socket.send(JSON.stringify({ type: 'pong', nonce: message.nonce }));

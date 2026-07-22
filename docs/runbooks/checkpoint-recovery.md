@@ -17,6 +17,9 @@
 6. Verify `/ready`, `/metrics`, player inventory samples, and the restored state hash before ending maintenance.
 7. If inspection or replay fails, restore the previous completed checkpoint or the most recent tested database backup. Do not edit serialized game state directly.
 
+Database backup creation and isolated restore verification are documented in the
+[backup and restore drill](backup-restore-drill.md) runbook.
+
 ## Evidence to retain
 
 Record checkpoint ID, tick, state hash, journal range, restore duration, database backup identifier, operator, and the reason for recovery.

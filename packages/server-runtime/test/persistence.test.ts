@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   type Connection,
+  directoryPageFor,
   GlobalWorldHost,
   INITIAL_MIGRATION_SQL,
   MemoryWorldPersistence,
+  PostgresWorldPersistence,
   snapshotDirtyChunk,
+  worldMapPageFor,
   type WorldPersistence,
 } from '../src/index.js';
 import {
@@ -13,6 +16,7 @@ import {
   createWorld,
   joinPlayer,
   nearestOreTile,
+  terrainAt,
 } from '@kings/simulation';
 import { parseEnvironment } from '../src/env.js';
 
@@ -50,6 +54,58 @@ class InterruptedCheckpointPersistence extends MemoryWorldPersistence {
 describe('durable world recovery', () => {
   it('defines the full initial durable-world schema, including sessions', () => {
     expect(INITIAL_MIGRATION_SQL.join('\n')).toContain('CREATE TABLE IF NOT EXISTS sessions');
+  });
+
+  it('upgrades the oldest supported database schema with only later forward migrations', async () => {
+    const statements: Array<{ sql: string; parameters?: readonly unknown[] }> = [];
+    const client = {
+      async query(sql: string, parameters?: readonly unknown[]) {
+        statements.push({ sql, parameters });
+        return sql === 'SELECT version FROM schema_migrations ORDER BY version'
+          ? { rows: [{ version: 1 }] }
+          : { rows: [] };
+      },
+      release() {},
+    };
+    const persistence = new PostgresWorldPersistence({
+      async connect() {
+        return client;
+      },
+    } as never);
+    await persistence.migrate();
+    expect(statements.some(({ sql }) => sql.includes('backup_restore_drills'))).toBe(true);
+    expect(statements.some(({ sql }) => sql.includes('CREATE TABLE IF NOT EXISTS sessions'))).toBe(
+      false,
+    );
+    expect(statements).toContainEqual({
+      sql: 'INSERT INTO schema_migrations(version) VALUES ($1)',
+      parameters: [2],
+    });
+    expect(statements).toContainEqual({
+      sql: 'INSERT INTO schema_migrations(version) VALUES ($1)',
+      parameters: [3],
+    });
+    expect(statements.at(-1)?.sql).toBe('COMMIT');
+  });
+
+  it('rejects a database schema newer than this server before accepting the world', async () => {
+    const statements: string[] = [];
+    const client = {
+      async query(sql: string) {
+        statements.push(sql);
+        return sql === 'SELECT version FROM schema_migrations ORDER BY version'
+          ? { rows: [{ version: 99 }] }
+          : { rows: [] };
+      },
+      release() {},
+    };
+    const persistence = new PostgresWorldPersistence({
+      async connect() {
+        return client;
+      },
+    } as never);
+    await expect(persistence.migrate()).rejects.toThrow('newer than supported');
+    expect(statements.at(-1)).toBe('ROLLBACK');
   });
 
   it('serializes only entities and mined tiles that belong to a dirty chunk', () => {
@@ -201,14 +257,306 @@ describe('durable world recovery', () => {
         >;
         territory: Record<string, string>;
         processedCommands: string[];
+        playerActivity: Record<string, unknown>;
+        onboardingReservations: Record<string, unknown>;
       };
     };
     expect(Object.keys(message.state.players)).toEqual(['player-a']);
+    expect(Object.keys(message.state.playerActivity)).toEqual(['player-a']);
+    expect(Object.keys(message.state.onboardingReservations)).toEqual(['player-a']);
     for (const building of Object.values(message.state.buildings))
       if (building.ownerId === 'player-b')
         expect(building.inventory).toEqual({ ore: 0, wood: 0, ingot: 0, tool: 0 });
     expect(Object.values(message.state.territory)).toContain('player-b');
     expect(message.state.processedCommands).toEqual([]);
+  });
+
+  it('exposes a paginated public directory without world or private player state', () => {
+    const world = createWorld(17);
+    joinPlayer(world, 'player-a');
+    joinPlayer(world, 'player-b');
+    world.players['player-b']!.inventory.ingot = 91;
+    world.social.playerNames['player-a'] = 'River Warden';
+    world.social.settlementNames['settlement-player-a'] = 'Iron Vale';
+    const named = directoryPageFor(world, 'iron vale', undefined, 2);
+    expect(named.entries).toEqual([
+      expect.objectContaining({
+        type: 'settlement',
+        settlementId: 'settlement-player-a',
+        displayName: 'Iron Vale',
+      }),
+    ]);
+    const first = directoryPageFor(world, 'PLAYER', undefined, 2);
+    expect(first.query).toBe('player');
+    expect(first.entries).toHaveLength(2);
+    expect(first.nextCursor).toBeDefined();
+    const second = directoryPageFor(world, 'player', first.nextCursor, 2);
+    expect(second.after).toBe(first.nextCursor);
+    const encoded = JSON.stringify([...first.entries, ...second.entries]);
+    expect(encoded).toContain('player-a');
+    expect(encoded).toContain('settlement-player-a');
+    expect(encoded).not.toContain('inventory');
+    expect(encoded).not.toContain('territory');
+    expect(encoded).not.toContain('plot');
+    expect(encoded).not.toContain('91');
+  });
+
+  it('filters blocked and settlement chat while withholding reports and rate-limit metadata', async () => {
+    const host = new GlobalWorldHost(21);
+    const alice = connection();
+    const bob = connection();
+    const carol = connection();
+    await host.connect(alice, 'player-a');
+    await host.connect(bob, 'player-b');
+    await host.connect(carol, 'player-c');
+    await host.command(alice, {
+      id: 'name-chat-a',
+      playerId: 'player-a' as never,
+      sequence: 1,
+      type: 'setPlayerName',
+      name: 'River Warden',
+    });
+    await host.command(alice, {
+      id: 'global-chat-a',
+      playerId: 'player-a' as never,
+      sequence: 2,
+      type: 'sendChatMessage',
+      channel: 'global',
+      text: 'Need wood',
+    });
+    host.resync(bob);
+    const visibleGlobal = JSON.parse(bob.messages.at(-1)!) as {
+      state: { social: { messages: Array<{ id: string; senderName: string }> } };
+    };
+    expect(visibleGlobal.state.social.messages).toContainEqual(
+      expect.objectContaining({ id: 'global-chat-a', senderName: 'River Warden' }),
+    );
+    await host.command(bob, {
+      id: 'report-global-chat',
+      playerId: 'player-b' as never,
+      sequence: 1,
+      type: 'reportChatMessage',
+      messageId: 'global-chat-a',
+      reason: 'Harassment',
+    });
+    await host.command(bob, {
+      id: 'block-global-chat',
+      playerId: 'player-b' as never,
+      sequence: 2,
+      type: 'setPlayerBlocked',
+      targetPlayerId: 'player-a' as never,
+      blocked: true,
+    });
+    host.resync(bob);
+    const blocked = JSON.parse(bob.messages.at(-1)!) as {
+      state: {
+        social: {
+          messages: Array<{ id: string }>;
+          reports: unknown[];
+          lastChatTick: Record<string, number>;
+          blockedPlayers: Record<string, Record<string, true>>;
+        };
+      };
+    };
+    expect(blocked.state.social.messages.map(({ id }) => id)).not.toContain('global-chat-a');
+    expect(blocked.state.social.reports).toEqual([]);
+    expect(blocked.state.social.lastChatTick).toEqual({});
+    expect(blocked.state.social.blockedPlayers).toEqual({
+      'player-b': { 'player-a': true },
+    });
+    expect(host.world.social.reports).toHaveLength(1);
+    await host.command(bob, {
+      id: 'unblock-global-chat',
+      playerId: 'player-b' as never,
+      sequence: 3,
+      type: 'setPlayerBlocked',
+      targetPlayerId: 'player-a' as never,
+      blocked: false,
+    });
+    for (let index = 0; index < 5; index += 1) await host.tick();
+    await host.command(alice, {
+      id: 'private-before-membership',
+      playerId: 'player-a' as never,
+      sequence: 3,
+      type: 'sendChatMessage',
+      channel: 'settlement',
+      settlementId: 'settlement-player-a',
+      text: 'Private plans',
+    });
+    host.resync(bob);
+    expect(bob.messages.at(-1)).not.toContain('private-before-membership');
+    await host.command(alice, {
+      id: 'invite-chat-b',
+      playerId: 'player-a' as never,
+      sequence: 4,
+      type: 'inviteToSettlement',
+      settlementId: 'settlement-player-a',
+      targetPlayerId: 'player-b' as never,
+    });
+    await host.command(bob, {
+      id: 'accept-chat-b',
+      playerId: 'player-b' as never,
+      sequence: 4,
+      type: 'acceptSettlementInvite',
+      settlementId: 'settlement-player-a',
+    });
+    for (let index = 0; index < 5; index += 1) await host.tick();
+    await host.command(alice, {
+      id: 'private-after-membership',
+      playerId: 'player-a' as never,
+      sequence: 5,
+      type: 'sendChatMessage',
+      channel: 'settlement',
+      settlementId: 'settlement-player-a',
+      text: 'Members only',
+    });
+    host.resync(bob);
+    expect(bob.messages.at(-1)).toContain('private-after-membership');
+    host.resync(carol);
+    expect(carol.messages.at(-1)).not.toContain('private-after-membership');
+  });
+
+  it('keeps deleted-player tombstones server-side and prevents identity resurrection', async () => {
+    const host = new GlobalWorldHost(41);
+    const alice = connection();
+    const bob = connection();
+    await host.connect(alice, 'player-a');
+    await host.connect(bob, 'player-b');
+    await host.command(alice, {
+      id: 'invite-owner-successor',
+      playerId: 'player-a' as never,
+      sequence: 1,
+      type: 'inviteToSettlement',
+      settlementId: 'settlement-player-a',
+      targetPlayerId: 'player-b' as never,
+    });
+    await host.command(bob, {
+      id: 'accept-owner-successor',
+      playerId: 'player-b' as never,
+      sequence: 1,
+      type: 'acceptSettlementInvite',
+      settlementId: 'settlement-player-a',
+    });
+    await host.command(alice, {
+      id: 'transfer-before-delete',
+      playerId: 'player-a' as never,
+      sequence: 2,
+      type: 'transferSettlementOwnership',
+      settlementId: 'settlement-player-a',
+      targetPlayerId: 'player-b' as never,
+    });
+    await host.command(alice, {
+      id: 'delete-account',
+      playerId: 'player-a' as never,
+      sequence: 3,
+      type: 'deleteAccount',
+      confirmation: 'DELETE',
+    });
+    expect(host.world.players['player-a']).toBeUndefined();
+    expect(host.world.deletedPlayers['player-a']).toMatchObject({ id: 'player-a' });
+    host.resync(bob);
+    const bobBootstrap = JSON.parse(bob.messages.at(-1)!) as { state: Record<string, unknown> };
+    expect(bobBootstrap.state).not.toHaveProperty('deletedPlayers');
+
+    const returning = connection();
+    await host.connect(returning, 'player-a');
+    expect(host.world.players['player-a']).toBeUndefined();
+    const bootstrap = returning.messages
+      .map((message) => JSON.parse(message) as { type: string; state?: { players: unknown } })
+      .find(({ type }) => type === 'worldBootstrap');
+    expect(bootstrap?.state?.players).toEqual({});
+    await host.command(returning, {
+      id: 'deleted-command',
+      playerId: 'player-a' as never,
+      sequence: 4,
+      type: 'gather',
+      x: 0,
+      y: 0,
+    });
+    expect(returning.messages.at(-1)).toContain('account-deleted');
+  });
+
+  it('reveals shared-project coordinates and history only to relevant settlement members', async () => {
+    const host = new GlobalWorldHost(31);
+    const alice = connection();
+    const bob = connection();
+    await host.connect(alice, 'player-a');
+    await host.connect(bob, 'player-b');
+    const player = host.world.players['player-a']!;
+    const center = host.world.buildings['center-player-a']!;
+    const tile = Array.from({ length: player.plot.size }, (_, offsetX) =>
+      Array.from({ length: player.plot.size }, (_, offsetY) => ({
+        x: player.plot.x + offsetX,
+        y: player.plot.y + offsetY,
+      })),
+    )
+      .flat()
+      .find(
+        ({ x, y }) =>
+          terrainAt(host.world.seed, x, y) !== 'water' &&
+          !(y === center.y && x < center.x) &&
+          !(x === center.x && y === center.y) &&
+          !Object.values(host.world.buildings).some(
+            (building) => building.x === x && building.y === y,
+          ),
+      )!;
+    await host.command(alice, {
+      id: 'private-project',
+      playerId: 'player-a' as never,
+      sequence: 1,
+      type: 'createSharedConstructionProject',
+      settlementId: 'settlement-player-a',
+      buildingKind: 'storage',
+      ...tile,
+    });
+    await host.command(alice, {
+      id: 'private-project-funding',
+      playerId: 'player-a' as never,
+      sequence: 2,
+      type: 'contributeToSharedConstructionProject',
+      projectId: 'private-project',
+      item: 'wood',
+      amount: 1,
+    });
+    host.resync(bob);
+    const hidden = JSON.parse(bob.messages.at(-1)!) as {
+      state: { sharedConstructionProjects: Record<string, unknown> };
+    };
+    expect(hidden.state.sharedConstructionProjects).toEqual({});
+
+    await host.command(alice, {
+      id: 'invite-project-member',
+      playerId: 'player-a' as never,
+      sequence: 3,
+      type: 'inviteToSettlement',
+      settlementId: 'settlement-player-a',
+      targetPlayerId: 'player-b' as never,
+    });
+    host.resync(bob);
+    const invited = JSON.parse(bob.messages.at(-1)!) as {
+      state: { sharedConstructionProjects: Record<string, unknown> };
+    };
+    expect(invited.state.sharedConstructionProjects).toEqual({});
+    await host.command(bob, {
+      id: 'accept-project-member',
+      playerId: 'player-b' as never,
+      sequence: 1,
+      type: 'acceptSettlementInvite',
+      settlementId: 'settlement-player-a',
+    });
+    host.resync(bob);
+    const visible = JSON.parse(bob.messages.at(-1)!) as {
+      state: {
+        sharedConstructionProjects: Record<
+          string,
+          { x: number; contributionHistory: Array<{ playerId: string }> }
+        >;
+      };
+    };
+    expect(visible.state.sharedConstructionProjects['private-project']).toMatchObject({
+      x: tile.x,
+      contributionHistory: [{ playerId: 'player-a' }],
+    });
   });
 
   it('does not expose mined tiles outside the player’s explored chunks', async () => {
@@ -234,6 +582,61 @@ describe('durable world recovery', () => {
     expect(message.state.processedCommands).toEqual([]);
     expect(message.state.seed).toBeUndefined();
     expect(message.state.randomState).toBeUndefined();
+  });
+
+  it('aggregates explored strategic chunks without leaking entities hidden by fog', () => {
+    const world = createWorld(42);
+    joinPlayer(world, 'player-a');
+    joinPlayer(world, 'player-b');
+    const player = world.players['player-a']!;
+    player.exploredChunks['2:0'] = true;
+    player.visibleChunks = { ...player.visibleChunks };
+    world.players['player-b']!.territoryCells['4:0'] = true;
+    const foreign = {
+      ...world.buildings['center-player-b']!,
+      id: 'foreign-hidden' as never,
+      x: 32,
+      y: 0,
+    };
+    world.buildings[foreign.id] = foreign;
+    world.threats.hidden = {
+      id: 'hidden',
+      targetBuildingId: foreign.id,
+      health: 2,
+      damage: 1,
+      spawnedTick: 0,
+      x: 33,
+      y: 0,
+    };
+
+    const hidden = worldMapPageFor(world, 'player-a', undefined, 256);
+    const hiddenChunk = hidden.chunks.find((chunk) => chunk.x === 2 && chunk.y === 0)!;
+    expect(Object.values(hiddenChunk.terrain).reduce((total, count) => total + count, 0)).toBe(256);
+    expect(hiddenChunk).toMatchObject({
+      currentlyVisible: false,
+      visibleForeignBuildingCount: 0,
+      visibleThreatCount: 0,
+      claimedSectors: [{ ownerId: 'player-b', count: 1 }],
+    });
+
+    player.visibleChunks['2:0'] = true;
+    const visibleChunk = worldMapPageFor(world, 'player-a', undefined, 256).chunks.find(
+      (chunk) => chunk.x === 2 && chunk.y === 0,
+    )!;
+    expect(visibleChunk.visibleForeignBuildingCount).toBe(1);
+    expect(visibleChunk.visibleThreatCount).toBe(1);
+  });
+
+  it('paginates strategic-map summaries with stable chunk cursors', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    world.players['player-a']!.exploredChunks = { '0:0': true, '1:0': true, '2:0': true };
+    const first = worldMapPageFor(world, 'player-a', undefined, 2);
+    expect(first.chunks.map(({ x, y }) => `${x}:${y}`)).toEqual(['0:0', '1:0']);
+    expect(first.nextCursor).toBe('1:0');
+    const second = worldMapPageFor(world, 'player-a', first.nextCursor, 2);
+    expect(second.chunks.map(({ x, y }) => `${x}:${y}`)).toEqual(['2:0']);
+    expect(second.nextCursor).toBeUndefined();
   });
 
   it('sends a full relevant-world snapshot when an explored viewport chunk is subscribed', async () => {
@@ -330,6 +733,53 @@ describe('durable world recovery', () => {
     };
     expect(Object.keys(revoked.state.settlements)).toEqual(['settlement-player-b']);
     expect(revoked.state.buildings['center-player-a']).toBeUndefined();
+  });
+
+  it('publishes global objective totals without exposing other contributor identities', async () => {
+    const host = new GlobalWorldHost();
+    const alice = connection();
+    const bob = connection();
+    await host.connect(alice, 'player-a');
+    await host.connect(bob, 'player-b');
+    host.world.players['player-a']!.inventory.tool = 10;
+    host.world.players['player-b']!.inventory.tool = 10;
+    await host.command(alice, {
+      id: 'objective-a',
+      playerId: 'player-a' as never,
+      sequence: 1,
+      type: 'contributeToObjective',
+      objectiveId: 'frontier-beacon',
+      settlementId: 'settlement-player-a',
+      amount: 10,
+    });
+    await host.command(bob, {
+      id: 'objective-b',
+      playerId: 'player-b' as never,
+      sequence: 1,
+      type: 'contributeToObjective',
+      objectiveId: 'frontier-beacon',
+      settlementId: 'settlement-player-b',
+      amount: 10,
+    });
+    host.resync(alice);
+    const message = JSON.parse(alice.messages.at(-1)!) as {
+      state: {
+        cooperativeObjectives: {
+          'frontier-beacon': {
+            totalContributed: number;
+            contributionsByPlayer: Record<string, number>;
+            contributionsBySettlement: Record<string, number>;
+            contributionHistory: Array<{ playerId: string }>;
+          };
+        };
+      };
+    };
+    const objective = message.state.cooperativeObjectives['frontier-beacon'];
+    expect(objective.totalContributed).toBe(20);
+    expect(objective.contributionsByPlayer).toEqual({ 'player-a': 10 });
+    expect(objective.contributionsBySettlement).toEqual({ 'settlement-player-a': 10 });
+    expect(objective.contributionHistory.map(({ playerId }) => playerId)).toEqual(['player-a']);
+    expect(JSON.stringify(message)).not.toContain('objective-b');
   });
 
   it('runs the two-player gather, produce, defend, reconnect, and restore loop', async () => {
@@ -517,8 +967,24 @@ describe('runtime environment', () => {
     expect(
       parseEnvironment({
         NODE_ENV: 'production',
+        TRUST_PROXY: 'true',
         ALLOWED_ORIGINS: 'https://game.example, https://admin.example',
+        SESSION_SECRET: 'a-production-strength-session-secret-value',
       }).allowedOrigins,
     ).toEqual(['https://game.example', 'https://admin.example']);
+    expect(() =>
+      parseEnvironment({
+        NODE_ENV: 'production',
+        TRUST_PROXY: 'true',
+        ALLOWED_ORIGINS: 'https://game.example',
+      }),
+    ).toThrow('SESSION_SECRET');
+    expect(() =>
+      parseEnvironment({
+        NODE_ENV: 'production',
+        ALLOWED_ORIGINS: 'https://game.example',
+        SESSION_SECRET: 'a-production-strength-session-secret-value',
+      }),
+    ).toThrow('TRUST_PROXY');
   });
 });

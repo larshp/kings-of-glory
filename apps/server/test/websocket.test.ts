@@ -3,6 +3,7 @@ import { PROTOCOL_VERSION } from '@kings/protocol';
 import { nearestOreTile } from '@kings/simulation';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
+import { issueSession, SESSION_COOKIE, verifySession } from '../src/auth.js';
 import { createGameServer, type GameServer } from '../src/server.js';
 
 const environment: ServerEnvironment = {
@@ -11,7 +12,15 @@ const environment: ServerEnvironment = {
   logLevel: 'error',
   persistence: 'memory',
   production: false,
+  trustProxy: false,
   allowedOrigins: [],
+};
+const productionEnvironment: ServerEnvironment = {
+  ...environment,
+  production: true,
+  trustProxy: true,
+  allowedOrigins: ['https://game.example'],
+  sessionSecret: 'a-production-strength-session-secret-value',
 };
 
 const receive = <T extends { type: string }>(socket: WebSocket, type: T['type']) =>
@@ -143,6 +152,28 @@ describe('WebSocket game boundary', () => {
     socket.send(JSON.stringify({ type: 'ping', nonce: 'keepalive-1' }));
     await expect(pong).resolves.toEqual({ type: 'pong', nonce: 'keepalive-1' });
 
+    const directory = receive<{
+      type: 'directoryPage';
+      requestId: string;
+      page: { entries: Array<{ type: string; playerId?: string; displayName: string }> };
+    }>(socket, 'directoryPage');
+    socket.send(
+      JSON.stringify({
+        type: 'directorySearch',
+        requestId: 'directory-1',
+        query: 'socket-player',
+        limit: 20,
+      }),
+    );
+    await expect(directory).resolves.toMatchObject({
+      requestId: 'directory-1',
+      page: {
+        entries: expect.arrayContaining([
+          { type: 'player', playerId: 'socket-player', displayName: 'Settler 1' },
+        ]),
+      },
+    });
+
     const unauthorized = receive<{
       type: 'commandRejected';
       result: { accepted: boolean; code?: string };
@@ -196,6 +227,17 @@ describe('WebSocket game boundary', () => {
     await expect(duplicate).resolves.toMatchObject({
       result: { accepted: false, code: 'duplicate-command' },
     });
+    const mapPage = receive<{
+      type: 'worldMapPage';
+      requestId: string;
+      page: { chunks: unknown[]; totalExploredChunks: number };
+    }>(socket, 'worldMapPage');
+    socket.send(JSON.stringify({ type: 'worldMap', requestId: 'map-test', limit: 64 }));
+    await expect(mapPage).resolves.toMatchObject({
+      type: 'worldMapPage',
+      requestId: 'map-test',
+      page: { totalExploredChunks: expect.any(Number) },
+    });
     await expect(
       fetch(`http://127.0.0.1:${port}/metrics`).then((response) => response.text()),
     ).resolves.toContain('kings_commands_accepted_total 1');
@@ -216,8 +258,158 @@ describe('WebSocket game boundary', () => {
     ).resolves.toContain('kings_outbound_buffered_bytes');
     await expect(
       fetch(`http://127.0.0.1:${port}/metrics`).then((response) => response.text()),
+    ).resolves.toContain('kings_tick_phase_duration_ms{phase="advance-clock"}');
+    await expect(
+      fetch(`http://127.0.0.1:${port}/metrics`).then((response) => response.text()),
+    ).resolves.toContain('kings_path_queue_length');
+    await expect(
+      fetch(`http://127.0.0.1:${port}/metrics`).then((response) => response.text()),
     ).resolves.toContain('kings_checkpoint_tick 0');
     socket.terminate();
+  });
+
+  it('derives production identity from an HTTP-only signed session', async () => {
+    game = await createGameServer(productionEnvironment, new MemoryWorldPersistence());
+    const port = await game.listen(0);
+    const sessionResponse = await fetch(`http://127.0.0.1:${port}/session`, {
+      method: 'POST',
+      headers: { Origin: 'https://game.example', 'X-Forwarded-Proto': 'https' },
+    });
+    expect(sessionResponse.status).toBe(200);
+    expect(sessionResponse.headers.get('access-control-allow-credentials')).toBe('true');
+    const cookie = sessionResponse.headers.get('set-cookie');
+    expect(cookie).toContain('HttpOnly');
+    expect(cookie).toContain('SameSite=Strict');
+    expect(cookie).toContain('Secure');
+    const { playerId } = (await sessionResponse.json()) as { playerId: string };
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`, {
+      origin: 'https://game.example',
+      headers: { Cookie: cookie!.split(';')[0]!, 'X-Forwarded-Proto': 'https' },
+    });
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', resolve);
+      socket.once('error', reject);
+    });
+    const welcome = receive<{ type: 'welcome'; playerId: string }>(socket, 'welcome');
+    socket.send(JSON.stringify({ type: 'hello', version: PROTOCOL_VERSION, playerId }));
+    await expect(welcome).resolves.toMatchObject({ playerId });
+    socket.close();
+  });
+
+  it('rejects missing sessions and client-selected production identities', async () => {
+    game = await createGameServer(productionEnvironment, new MemoryWorldPersistence());
+    const port = await game.listen(0);
+    const unauthenticated = new WebSocket(`ws://127.0.0.1:${port}`, {
+      origin: 'https://game.example',
+      headers: { 'X-Forwarded-Proto': 'https' },
+    });
+    const unauthenticatedClosed = new Promise<{ code: number; reason: string }>((resolve) =>
+      unauthenticated.once('close', (code, reason) => resolve({ code, reason: reason.toString() })),
+    );
+    await expect(unauthenticatedClosed).resolves.toEqual({
+      code: 1008,
+      reason: 'Authentication required',
+    });
+
+    const response = await fetch(`http://127.0.0.1:${port}/session`, {
+      method: 'POST',
+      headers: { Origin: 'https://game.example', 'X-Forwarded-Proto': 'https' },
+    });
+    const cookie = response.headers.get('set-cookie')!.split(';')[0]!;
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`, {
+      origin: 'https://game.example',
+      headers: { Cookie: cookie, 'X-Forwarded-Proto': 'https' },
+    });
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', resolve);
+      socket.once('error', reject);
+    });
+    const closed = new Promise<{ code: number; reason: string }>((resolve) =>
+      socket.once('close', (code, reason) => resolve({ code, reason: reason.toString() })),
+    );
+    socket.send(
+      JSON.stringify({
+        type: 'hello',
+        version: PROTOCOL_VERSION,
+        playerId: 'player-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      }),
+    );
+    await expect(closed).resolves.toEqual({
+      code: 1008,
+      reason: 'Authenticated identity mismatch',
+    });
+  });
+
+  it('refreshes a session signed by the previous rotation key', async () => {
+    const previousSecret = 'the-previous-production-session-secret-value';
+    game = await createGameServer(
+      { ...productionEnvironment, previousSessionSecret: previousSecret },
+      new MemoryWorldPersistence(),
+    );
+    const port = await game.listen(0);
+    const playerId = 'player-12345678-1234-1234-1234-123456789abc';
+    const previousToken = issueSession(previousSecret, Date.now(), playerId);
+    const response = await fetch(`http://127.0.0.1:${port}/session`, {
+      method: 'POST',
+      headers: {
+        Origin: 'https://game.example',
+        'X-Forwarded-Proto': 'https',
+        Cookie: `${SESSION_COOKIE}=${previousToken}`,
+      },
+    });
+    await expect(response.json()).resolves.toEqual({ playerId });
+    const refreshedToken = response.headers.get('set-cookie')!.split(';')[0]!.split('=')[1]!;
+    expect(verifySession(refreshedToken, productionEnvironment.sessionSecret!)).toMatchObject({
+      playerId,
+    });
+  });
+
+  it('shares an account message quota across concurrent authenticated connections', async () => {
+    game = await createGameServer(productionEnvironment, new MemoryWorldPersistence());
+    const port = await game.listen(0);
+    const response = await fetch(`http://127.0.0.1:${port}/session`, {
+      method: 'POST',
+      headers: { Origin: 'https://game.example', 'X-Forwarded-Proto': 'https' },
+    });
+    const { playerId } = (await response.json()) as { playerId: string };
+    const cookie = response.headers.get('set-cookie')!.split(';')[0]!;
+    const clients = await Promise.all(
+      Array.from({ length: 3 }, async () => {
+        const socket = new WebSocket(`ws://127.0.0.1:${port}`, {
+          origin: 'https://game.example',
+          headers: { Cookie: cookie, 'X-Forwarded-Proto': 'https' },
+        });
+        await new Promise<void>((resolve, reject) => {
+          socket.once('open', resolve);
+          socket.once('error', reject);
+        });
+        const welcome = receive<{ type: 'welcome' }>(socket, 'welcome');
+        socket.send(JSON.stringify({ type: 'hello', version: PROTOCOL_VERSION, playerId }));
+        await welcome;
+        return socket;
+      }),
+    );
+    const rateLimited = new Promise<{ code: number; reason: string }>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Expected an account rate-limit close.')),
+        1_000,
+      );
+      for (const socket of clients)
+        socket.once('close', (code, reason) => {
+          if (reason.toString() !== 'Account message rate exceeded') return;
+          clearTimeout(timer);
+          resolve({ code, reason: reason.toString() });
+        });
+    });
+    for (const socket of clients)
+      for (let index = 0; index < 21; index += 1)
+        socket.send(JSON.stringify({ type: 'ping', nonce: `rate-${index}` }));
+    await expect(rateLimited).resolves.toEqual({
+      code: 1008,
+      reason: 'Account message rate exceeded',
+    });
+    for (const socket of clients) socket.close();
   });
 
   it('rejects incompatible protocol versions before assigning a player', async () => {

@@ -18,6 +18,7 @@ export interface WorldCanvasMetrics {
   readonly visibleBuildings: number;
   readonly visibleThreats: number;
   readonly activeChunks: number;
+  readonly renderObjectCount: number;
 }
 
 export interface WorldCanvasDebugState {
@@ -25,6 +26,7 @@ export interface WorldCanvasDebugState {
   readonly showCoordinates: boolean;
   readonly showChunks: boolean;
   readonly showEntityIds: boolean;
+  readonly showPaths: boolean;
 }
 
 export type OperationsOverlay = 'none' | 'resources' | 'logistics' | 'production' | 'bottlenecks';
@@ -446,6 +448,35 @@ export const WorldCanvas = ({
     const debugState = latestDebug.current;
     if (debugState?.enabled) {
       context.font = '10px ui-monospace, monospace';
+      if (debugState.showPaths) {
+        const buildingsById = new Map(
+          latestBuildings.current.map((building) => [building.id, building]),
+        );
+        context.strokeStyle = 'rgba(255, 208, 122, 0.9)';
+        context.lineWidth = 2;
+        context.setLineDash([6, 4]);
+        for (const threat of visibleByIsometricDepth(
+          latestThreats.current,
+          tileBounds.center,
+          visibleRadius,
+        )) {
+          const target = buildingsById.get(threat.targetBuildingId);
+          if (!target) continue;
+          const from = worldToScreen({
+            x: threat.x - latestFocus.current.x,
+            y: threat.y - latestFocus.current.y,
+          });
+          const to = worldToScreen({
+            x: target.x - latestFocus.current.x,
+            y: target.y - latestFocus.current.y,
+          });
+          context.beginPath();
+          context.moveTo(from.x + TILE_WIDTH / 2, from.y + TILE_HEIGHT / 2);
+          context.lineTo(to.x + TILE_WIDTH / 2, to.y + TILE_HEIGHT / 2);
+          context.stroke();
+        }
+        context.setLineDash([]);
+      }
       if (debugState.showCoordinates)
         for (const chunk of visibleRenderChunks(tileBounds))
           for (let x = chunk.minX; x <= chunk.maxX; x += 1)
@@ -518,22 +549,26 @@ export const WorldCanvas = ({
             return `${Math.floor((x ?? 0) / 16)}:${Math.floor((y ?? 0) / 16)}`;
           }),
         );
+        const renderedTiles =
+          (metricsBounds.maxX - metricsBounds.minX + 1) *
+          (metricsBounds.maxY - metricsBounds.minY + 1);
+        const visibleBuildings = visibleByIsometricDepth(
+          latestBuildings.current,
+          metricsBounds.center,
+          metricsRadius,
+        ).length;
+        const visibleThreats = visibleByIsometricDepth(
+          latestThreats.current,
+          metricsBounds.center,
+          metricsRadius,
+        ).length;
         latestMetrics.current?.({
           framesPerSecond: Math.round((renderedFrames * 1_000) / elapsed),
-          renderedTiles:
-            (metricsBounds.maxX - metricsBounds.minX + 1) *
-            (metricsBounds.maxY - metricsBounds.minY + 1),
-          visibleBuildings: visibleByIsometricDepth(
-            latestBuildings.current,
-            metricsBounds.center,
-            metricsRadius,
-          ).length,
-          visibleThreats: visibleByIsometricDepth(
-            latestThreats.current,
-            metricsBounds.center,
-            metricsRadius,
-          ).length,
+          renderedTiles,
+          visibleBuildings,
+          visibleThreats,
           activeChunks: chunks.size,
+          renderObjectCount: renderedTiles + visibleBuildings + visibleThreats,
         });
         renderedFrames = 0;
         sampleStartedAt = now;

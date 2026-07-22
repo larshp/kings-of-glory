@@ -102,6 +102,36 @@ describe('client message validation', () => {
       ),
     ).toMatchObject({ type: 'command' });
   });
+  it('accepts only a bounded account-deletion confirmation', () => {
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'delete-account-1',
+            playerId: 'player-a',
+            sequence: 1,
+            type: 'deleteAccount',
+            confirmation: 'DELETE',
+          },
+        }),
+      ),
+    ).toMatchObject({ type: 'command' });
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'delete-account-2',
+            playerId: 'player-a',
+            sequence: 2,
+            type: 'deleteAccount',
+            confirmation: 'x'.repeat(17),
+          },
+        }),
+      ),
+    ).toBeUndefined();
+  });
   it('accepts only the defined logistics-link shape', () => {
     expect(
       parseClientMessage(
@@ -230,6 +260,168 @@ describe('client message validation', () => {
       ),
     ).toBeUndefined();
   });
+  it('accepts only bounded cooperative objective commands', () => {
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'contribute-1',
+            playerId: 'player-a',
+            sequence: 1,
+            type: 'contributeToObjective',
+            objectiveId: 'frontier-beacon',
+            settlementId: 'settlement-player-a',
+            amount: 2,
+          },
+        }),
+      ),
+    ).toMatchObject({ type: 'command' });
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'contribute-invalid',
+            playerId: 'player-a',
+            sequence: 2,
+            type: 'contributeToObjective',
+            objectiveId: 'frontier-beacon',
+            settlementId: 'settlement-player-a',
+            amount: 0,
+          },
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'claim-1',
+            playerId: 'player-a',
+            sequence: 3,
+            type: 'claimObjectiveReward',
+            objectiveId: 'frontier-beacon',
+          },
+        }),
+      ),
+    ).toMatchObject({ type: 'command' });
+  });
+  it('accepts only bounded shared-construction project commands', () => {
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'project-1',
+            playerId: 'player-a',
+            sequence: 1,
+            type: 'createSharedConstructionProject',
+            settlementId: 'settlement-player-a',
+            buildingKind: 'storage',
+            x: 12,
+            y: 1,
+          },
+        }),
+      ),
+    ).toMatchObject({ type: 'command' });
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'project-invalid',
+            playerId: 'player-a',
+            sequence: 2,
+            type: 'createSharedConstructionProject',
+            settlementId: 'settlement-player-a',
+            buildingKind: 'settlement-center',
+            x: 12,
+            y: 1,
+          },
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'fund-1',
+            playerId: 'player-b',
+            sequence: 1,
+            type: 'contributeToSharedConstructionProject',
+            projectId: 'project-1',
+            item: 'wood',
+            amount: 1,
+          },
+        }),
+      ),
+    ).toMatchObject({ type: 'command' });
+  });
+  it('accepts bounded social commands and rejects oversized or malformed text', () => {
+    for (const command of [
+      { type: 'setPlayerName', name: 'River Warden' },
+      {
+        type: 'setSettlementName',
+        settlementId: 'settlement-player-a',
+        name: 'Iron Vale',
+      },
+      { type: 'sendChatMessage', channel: 'global', text: 'Need wood.' },
+      {
+        type: 'sendChatMessage',
+        channel: 'settlement',
+        settlementId: 'settlement-player-a',
+        text: 'Storage is ready.',
+      },
+      { type: 'setPlayerBlocked', targetPlayerId: 'player-b', blocked: true },
+      { type: 'reportChatMessage', messageId: 'message-1', reason: 'Abusive message' },
+    ])
+      expect(
+        parseClientMessage(
+          JSON.stringify({
+            type: 'command',
+            command: {
+              id: `social-${command.type}`,
+              playerId: 'player-a',
+              sequence: 1,
+              ...command,
+            },
+          }),
+        ),
+      ).toMatchObject({ type: 'command' });
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'oversized-chat',
+            playerId: 'player-a',
+            sequence: 1,
+            type: 'sendChatMessage',
+            channel: 'global',
+            text: 'x'.repeat(1_025),
+          },
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'malformed-block',
+            playerId: 'player-a',
+            sequence: 1,
+            type: 'setPlayerBlocked',
+            targetPlayerId: '../../player',
+            blocked: 'yes',
+          },
+        }),
+      ),
+    ).toBeUndefined();
+  });
   it('rejects malformed, incomplete, and unsafe commands', () => {
     expect(
       parseClientMessage(JSON.stringify({ type: 'command', command: { type: 'gather' } })),
@@ -272,6 +464,41 @@ describe('client message validation', () => {
     expect(parseClientMessage(JSON.stringify({ type: 'resync', version: 1.5 }))).toBeUndefined();
   });
 
+  it('accepts bounded directory searches and rejects unsafe cursors', () => {
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'directorySearch',
+          requestId: 'directory-1',
+          query: 'player',
+          limit: 20,
+        }),
+      ),
+    ).toMatchObject({ type: 'directorySearch' });
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'directorySearch',
+          requestId: 'directory-2',
+          query: '',
+          after: 'player:player-a',
+          limit: 50,
+        }),
+      ),
+    ).toMatchObject({ type: 'directorySearch' });
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'directorySearch',
+          requestId: 'directory-3',
+          query: 'x'.repeat(33),
+          after: '../../players',
+          limit: 51,
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
   it('accepts bounded integer chunk-interest updates only', () => {
     expect(
       parseClientMessage(JSON.stringify({ type: 'interest', chunks: [{ x: -1, y: 2 }] })),
@@ -286,6 +513,22 @@ describe('client message validation', () => {
           chunks: Array.from({ length: 65 }, () => ({ x: 0, y: 0 })),
         }),
       ),
+    ).toBeUndefined();
+  });
+
+  it('accepts bounded paginated strategic-map requests only', () => {
+    expect(
+      parseClientMessage(
+        JSON.stringify({ type: 'worldMap', requestId: 'map-1', after: '-2:3', limit: 64 }),
+      ),
+    ).toEqual({ type: 'worldMap', requestId: 'map-1', after: '-2:3', limit: 64 });
+    expect(
+      parseClientMessage(
+        JSON.stringify({ type: 'worldMap', requestId: 'map-2', after: 'hidden', limit: 64 }),
+      ),
+    ).toBeUndefined();
+    expect(
+      parseClientMessage(JSON.stringify({ type: 'worldMap', requestId: 'map-3', limit: 257 })),
     ).toBeUndefined();
   });
 });

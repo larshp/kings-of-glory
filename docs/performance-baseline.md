@@ -75,6 +75,82 @@ per-building linear recipe scan in that measured hot phase.
 Treat this as a comparative local baseline: absolute timings vary by machine and Node.js version,
 while the per-phase shape identifies where subsequent optimization work should start.
 
+## 2026-07-22 ownership/visibility index
+
+The same `1000 100` infrastructure profile was captured immediately before and after replacing
+per-player full-registry ownership scans and a duplicate visibility pass with one deterministic
+building/scout owner index per tick. Both runs produced state hash `d5626d89`. The measured
+`research-and-population` phase fell from 3.962013 ms/tick to 2.004458 ms/tick, a 49.4% reduction.
+The next-largest phase was then construction/production at 2.168711 ms/tick. This optimization also
+benefits viewport-interest state because visible chunks now derive from the same owner-local entity
+sets rather than rescanning every building for every player.
+
+## Measured single-process threshold bracket
+
+These are local development measurements, not hosting promises. The first-slice tick budget is
+20 ms. The full progression workload remained inside it at 50 players and 2,500 buildings:
+
+| Workload                                   | Result         |
+| ------------------------------------------ | -------------- |
+| 20 players / 1,000 buildings / 1,000 ticks | 276.64 ticks/s |
+| 40 players / 2,000 buildings / 1,000 ticks | 84.67 ticks/s  |
+| 50 players / 2,500 buildings / 1,000 ticks | 54.18 ticks/s  |
+
+The dense infrastructure profile brackets the entity-only threshold more closely. With one owner,
+6,001 buildings and 3,000 logistics links consumed 19.879 ms/tick across all phases; 6,401 buildings
+and 3,200 links consumed 23.061 ms/tick. On this machine, one process therefore stops meeting the
+20 ms first-slice simulation budget between those fixtures. Player fan-out, persistence, client-state
+filtering, and network serialization can lower the production threshold, so the supported target
+remains 20 players / 1,000 entities until an end-to-end deployment benchmark proves otherwise.
+
+## Scale decisions from the measurements
+
+- Inactive regions keep full deterministic simulation fidelity. No level-of-detail simulation is
+  enabled because equivalent outcomes have not been demonstrated.
+- Worker threads are not introduced: the supported workload is comfortably inside budget, while
+  splitting authoritative state would add ownership and synchronization costs without a measured
+  CPU bottleneck that requires it.
+- Path searches share a fixed per-tick visit budget, plot allocation has a fixed candidate budget,
+  checkpoints persist dirty chunks at bounded intervals, retained/audit queries are capped, and
+  command/outbound queues reject excess work rather than growing without bound.
+- JSON remains the measured transport for the first release. The target fan-out workload projects
+  720 bytes/s/player at 10 Hz, well below the 32 KiB/s/player budget, and total simulation, filtering,
+  serialization, and delivery remains below the server tick budget. A binary protocol is therefore
+  not justified by the current evidence.
+
+## End-to-end fan-out profile
+
+The fan-out profile restores a progressed bot world, connects every player, advances the authoritative
+host, builds each private interest-filtered view, constructs JSON deltas, and delivers them to measured
+in-memory connections:
+
+```powershell
+npm.cmd --prefix apps/server run profile:fanout -- 20 50 40
+```
+
+The initial selective-state implementation took 124.564 ms/tick at 20 players and 1,000 buildings.
+Cloning only authorized state reduced that to 41.982 ms/tick. Reusing unchanged terrain alone measured
+60.648 ms/tick in a separate 20-tick run and did not solve the dominant full-registry scan. A single
+per-broadcast building ownership/spatial index reduced a subsequent run to 26.900 ms/tick. Finally,
+fingerprinting each client subtree once and retaining immutable copies of unchanged subtrees reduced
+the 40-tick run to:
+
+```json
+{
+  "players": 20,
+  "entities": 1000,
+  "ticks": 40,
+  "tickDurationMs": 11.021795,
+  "bytesPerPlayerPerTick": 72,
+  "projectedBytesPerSecondPerPlayerAt10Hz": 720,
+  "lastStateBuildDurationMs": 0.293
+}
+```
+
+This local end-to-end result is 45% of the 20 ms server budget and 2.2% of the per-player bandwidth
+budget. The state hash and privacy tests remain the correctness gates for these optimizations; absolute
+timings remain machine-dependent.
+
 ## Repeated soak check
 
 Run repeated deterministic scenarios to catch state-hash drift, invariant failures, latency spikes, and

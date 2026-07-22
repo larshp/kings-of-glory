@@ -12,6 +12,7 @@ import {
   indexEntitiesByChunk,
   inspectWorld,
   joinPlayer,
+  MAX_ACTIVE_CONSTRUCTIONS_PER_PLAYER,
   nearestOreTile,
   nearestResourceTile,
   neighboringChunks,
@@ -51,6 +52,79 @@ describe('world simulation', () => {
       'threat-navigation-and-combat',
       'emit-events-and-mark-changes',
     ]);
+  });
+
+  it('reclaims an abandoned solo starter reservation and makes its plot reusable', () => {
+    const world = createWorld(99);
+    joinPlayer(world, 'player-a');
+    const originalPlot = structuredClone(world.players['player-a']!.plot);
+    const expiry = world.onboardingReservations['player-a']!.expiresTick;
+    world.tick = expiry - 1;
+
+    expect(advanceTick(world)).toContainEqual({
+      type: 'onboardingReservationReclaimed',
+      playerId: 'player-a',
+    });
+    expect(world.players['player-a']).toBeUndefined();
+    expect(world.settlements['settlement-player-a']).toBeUndefined();
+    expect(Object.values(world.buildings).some(({ ownerId }) => ownerId === 'player-a')).toBe(
+      false,
+    );
+    expect(world.deletedPlayers['player-a']).toMatchObject({
+      id: 'player-a',
+      deletedTick: expiry,
+      reason: 'abandoned-onboarding',
+    });
+
+    joinPlayer(world, 'player-b');
+    expect(world.players['player-b']?.plot).toEqual(originalPlot);
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('extends an active starter lease and permanently secures it with a completed smelter', () => {
+    const world = createWorld(99);
+    joinPlayer(world, 'player-a');
+    const initialExpiry = world.onboardingReservations['player-a']!.expiresTick;
+    world.tick = initialExpiry - 1;
+    const gathered = applyCommand(world, {
+      id: 'active-onboarding',
+      playerId: 'player-a' as never,
+      sequence: 1,
+      type: 'gather',
+      ...oreTileFor(world),
+    });
+    expect(gathered.result.accepted).toBe(true);
+    expect(world.onboardingReservations['player-a']!.expiresTick).toBeGreaterThan(initialExpiry);
+
+    const center = world.buildings['center-player-a']!;
+    world.buildings['smelter-player-a-test'] = {
+      ...structuredClone(center),
+      id: 'smelter-player-a-test' as never,
+      kind: 'smelter',
+      x: center.x - 1,
+      recipeId: 'smelt-ore',
+    };
+    advanceTick(world);
+    const reservation = world.onboardingReservations['player-a']!;
+    expect(reservation.securedTick).toBe(world.tick);
+    world.tick = reservation.expiresTick;
+    advanceTick(world);
+    expect(world.players['player-a']).toBeDefined();
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('secures rather than reclaims starter reservations that became cooperative', () => {
+    const world = createWorld(99);
+    joinPlayer(world, 'player-a');
+    joinPlayer(world, 'player-b');
+    world.settlements['settlement-player-a']!.members['player-b'] = 'member';
+    world.tick = world.onboardingReservations['player-a']!.expiresTick - 1;
+
+    advanceTick(world);
+
+    expect(world.players['player-a']).toBeDefined();
+    expect(world.onboardingReservations['player-a']?.securedTick).toBe(world.tick);
+    expect(inspectWorld(world)).toEqual([]);
   });
 
   it('reports changed entities and both chunks when an entity moves or is removed', () => {
@@ -341,6 +415,32 @@ describe('world simulation', () => {
     expect(world.players['player-a']?.population).toMatchObject({ employed: 1, unemployed: 0 });
   });
 
+  it('bounds active construction commands per player before allocating more entities', () => {
+    const world = createWorld(99);
+    joinPlayer(world, 'player-a');
+    const center = world.buildings['center-player-a']!;
+    for (let index = 0; index < MAX_ACTIVE_CONSTRUCTIONS_PER_PLAYER; index += 1)
+      world.buildings[`queued-${index}`] = {
+        ...structuredClone(center),
+        id: `queued-${index}` as never,
+        x: 1_000 + index,
+        constructionTicks: 1,
+        productionState: 'constructing',
+      };
+
+    expect(
+      applyCommand(world, {
+        id: 'construction-over-limit',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'placeStorage',
+        x: 12,
+        y: 0,
+      }).result,
+    ).toMatchObject({ accepted: false, code: 'construction-limit-reached' });
+    expect(Object.keys(world.buildings)).toHaveLength(MAX_ACTIVE_CONSTRUCTIONS_PER_PLAYER + 1);
+  });
+
   it('generates deterministic terrain', () => {
     expect(terrainAt(9, 24, -4)).toBe(terrainAt(9, 24, -4));
   });
@@ -487,7 +587,7 @@ describe('world simulation', () => {
     for (const player of Object.values(legacy.players)) delete player.inventory.tool;
     for (const building of Object.values(legacy.buildings)) delete building.inventory.tool;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(20);
+    expect(migrated.schemaVersion).toBe(26);
     expect(migrated.players['player-a']?.inventory.tool).toBe(0);
     expect(migrated.buildings['center-player-a']?.inventory.tool).toBe(0);
   });
@@ -497,7 +597,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 14;
     delete legacy.randomState;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(20);
+    expect(migrated.schemaVersion).toBe(26);
     expect(migrated.randomState).toBeGreaterThan(0);
     expect(inspectWorld(migrated)).toEqual([]);
   });
@@ -548,7 +648,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 16;
     for (const building of Object.values(legacy.buildings)) delete building.recipeId;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(20);
+    expect(migrated.schemaVersion).toBe(26);
     expect(migrated.buildings['center-player-a']?.recipeId).toBeNull();
     expect(
       Object.values(migrated.buildings).find((building) => building.kind === 'workshop')?.recipeId,
@@ -586,7 +686,7 @@ describe('world simulation', () => {
       priority: 1,
     };
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(20);
+    expect(migrated.schemaVersion).toBe(26);
     expect(migrated.buildings['center-player-a']?.productionState).toBe('idle');
     expect(migrated.logisticsLinks.legacy).toMatchObject({
       throughputPerTick: 1,
@@ -604,7 +704,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 18;
     for (const building of Object.values(legacy.buildings)) delete building.constructionMaterials;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(20);
+    expect(migrated.schemaVersion).toBe(26);
     expect(migrated.buildings['center-player-a']?.constructionMaterials).toEqual({
       ore: 0,
       wood: 0,
@@ -624,8 +724,104 @@ describe('world simulation', () => {
     legacy.minedTiles = { '12:0': 3 };
     const node = nearestOreTile(legacy.seed, 12, 0, 16)!;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(20);
+    expect(migrated.schemaVersion).toBe(26);
     expect(migrated.minedTiles[`${node.x}:${node.y}`]).toBe(3);
+  });
+
+  it('migrates version 20 worlds with a fresh cooperative objective ledger', () => {
+    const current = createWorld(19);
+    const { cooperativeObjectives: _objectives, playerActivity: _activity, ...legacy } = current;
+    void _objectives;
+    void _activity;
+    const migrated = deserializeWorld({ ...legacy, schemaVersion: 20 });
+    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.cooperativeObjectives['frontier-beacon']).toMatchObject({
+      totalContributed: 0,
+      completedTick: null,
+      contributionsByPlayer: {},
+      rewardClaims: {},
+    });
+    expect(inspectWorld(migrated)).toEqual([]);
+  });
+
+  it('migrates version 21 worlds with deterministic new-player threat protection', () => {
+    const current = createWorld(23);
+    joinPlayer(current, 'player-a');
+    current.tick = 41;
+    const { playerActivity: _activity, sharedConstructionProjects: _projects, ...legacy } = current;
+    void _activity;
+    void _projects;
+    const migrated = deserializeWorld({ ...legacy, schemaVersion: 21 });
+    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.playerActivity['player-a']).toEqual({
+      lastActiveTick: 41,
+      raidEligibleTick: 341,
+    });
+    expect(inspectWorld(migrated)).toEqual([]);
+  });
+
+  it('migrates version 22 worlds with an empty shared-construction ledger', () => {
+    const current = createWorld(29);
+    joinPlayer(current, 'player-a');
+    const { sharedConstructionProjects: _projects, ...legacy } = current;
+    void _projects;
+    const migrated = deserializeWorld({ ...legacy, schemaVersion: 22 });
+    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.sharedConstructionProjects).toEqual({});
+    expect(migrated.playerActivity).toEqual(current.playerActivity);
+    expect(inspectWorld(migrated)).toEqual([]);
+  });
+
+  it('migrates version 23 worlds with unique default names and empty moderation state', () => {
+    const current = createWorld(31);
+    joinPlayer(current, 'player-b');
+    joinPlayer(current, 'player-a');
+    const { social: _social, ...legacy } = current;
+    void _social;
+    const migrated = deserializeWorld({ ...legacy, schemaVersion: 23 });
+    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.social).toMatchObject({
+      playerNames: { 'player-a': 'Settler 1', 'player-b': 'Settler 2' },
+      settlementNames: {
+        'settlement-player-a': 'Settlement 1',
+        'settlement-player-b': 'Settlement 2',
+      },
+      messages: [],
+      reports: [],
+      lastChatTick: {},
+    });
+    expect(inspectWorld(migrated)).toEqual([]);
+  });
+
+  it('migrates version 24 worlds with an empty deleted-player tombstone ledger', () => {
+    const current = createWorld(37);
+    joinPlayer(current, 'player-a');
+    const {
+      deletedPlayers: _deletedPlayers,
+      onboardingReservations: _onboardingReservations,
+      ...legacy
+    } = current;
+    void _deletedPlayers;
+    void _onboardingReservations;
+    const migrated = deserializeWorld({ ...legacy, schemaVersion: 24 });
+    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.deletedPlayers).toEqual({});
+    expect(inspectWorld(migrated)).toEqual([]);
+  });
+
+  it('migrates version 25 worlds with a fresh bounded starter reservation', () => {
+    const current = createWorld(41);
+    joinPlayer(current, 'player-a');
+    const { onboardingReservations: _onboardingReservations, ...legacy } = current;
+    void _onboardingReservations;
+    const migrated = deserializeWorld({ ...legacy, schemaVersion: 25 });
+    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.onboardingReservations['player-a']).toEqual({
+      createdTick: 0,
+      expiresTick: 36_000,
+      securedTick: null,
+    });
+    expect(inspectWorld(migrated)).toEqual([]);
   });
 
   it('adds settlement capacity and grows aggregated population', () => {
@@ -879,7 +1075,12 @@ describe('world simulation', () => {
         y: 0,
       }).result.accepted,
     ).toBe(true);
-    for (let index = 0; index < 150; index += 1) advanceTick(world);
+    let spawnedTick: number | undefined;
+    for (let index = 0; index < 360; index += 1) {
+      const events = advanceTick(world);
+      if (events.some((event) => event.type === 'threatSpawned')) spawnedTick ??= world.tick;
+    }
+    expect(spawnedTick).toBe(300);
     expect(Object.keys(world.threats)).toHaveLength(0);
     expect(
       Object.values(world.buildings).find((building) => building.kind === 'smelter')?.health,
@@ -920,7 +1121,7 @@ describe('world simulation', () => {
         y: 0,
       }).result.accepted,
     ).toBe(true);
-    for (let index = 0; index < 99; index += 1) advanceTick(world);
+    for (let index = 0; index < 299; index += 1) advanceTick(world);
     const healthBeforeEvent = Object.fromEntries(
       Object.values(world.buildings).map((building) => [building.id, building.health]),
     );
@@ -983,7 +1184,7 @@ describe('world simulation', () => {
       x: 12,
       y: 0,
     });
-    for (let index = 0; index < 150; index += 1) advanceTick(world);
+    for (let index = 0; index < 300; index += 1) advanceTick(world);
     const raider = Object.values(world.threats)[0]!;
     const initialPosition = { x: raider.x, y: raider.y };
     const target = world.buildings[raider.targetBuildingId]!;
@@ -1097,6 +1298,225 @@ describe('world simulation', () => {
     expect(movedSecondTick.some((id) => !movedFirstTick.includes(id))).toBe(true);
   });
 
+  it('reserves overlapping spawn resources for the nearest starting settlement', () => {
+    const world = createWorld(37);
+    joinPlayer(world, 'player-a');
+    joinPlayer(world, 'player-b');
+    world.players['player-a']!.plot = { x: 0, y: 0, size: 8 };
+    world.players['player-b']!.plot = { x: 8, y: 0, size: 8 };
+    const resource = Array.from({ length: 17 }, (_, x) => x)
+      .flatMap((x) => Array.from({ length: 9 }, (_, y) => ({ x, y })))
+      .find(({ x, y }) => {
+        const terrain = terrainAt(world.seed, x, y);
+        const distanceA = Math.abs(4 - x) + Math.abs(4 - y);
+        const distanceB = Math.abs(12 - x) + Math.abs(4 - y);
+        return (
+          (terrain === 'ore' || terrain === 'wood') &&
+          distanceA <= 8 &&
+          distanceB <= 8 &&
+          distanceA < distanceB
+        );
+      });
+    expect(resource).toBeDefined();
+    expect(
+      applyCommand(world, {
+        id: 'steal-spawn-resource',
+        playerId: 'player-b' as never,
+        sequence: 1,
+        type: 'gather',
+        ...resource!,
+      }).result,
+    ).toMatchObject({ code: 'reserved-resource' });
+    expect(
+      applyCommand(world, {
+        id: 'gather-reserved-resource',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'gather',
+        ...resource!,
+      }).result.accepted,
+    ).toBe(true);
+  });
+
+  it('preserves settlement buffers and an unbuildable access lane', () => {
+    const world = createWorld(41);
+    joinPlayer(world, 'player-a');
+    joinPlayer(world, 'player-b');
+    const player = world.players['player-a']!;
+    const other = world.players['player-b']!;
+    player.research.unlocked['territorial-charter'] = true;
+    const targetX = Math.floor(other.plot.x / 8) * 8 - 8;
+    const targetY = Math.floor(other.plot.y / 8) * 8;
+    const targetCellX = Math.floor(targetX / 8);
+    const targetCellY = Math.floor(targetY / 8);
+    player.territoryCells[`${targetCellX - 1}:${targetCellY}`] = true;
+    player.exploredChunks[`${Math.floor(targetX / 16)}:${Math.floor(targetY / 16)}`] = true;
+    expect(
+      applyCommand(world, {
+        id: 'surround-settlement',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'claimTerritory',
+        x: targetX,
+        y: targetY,
+      }).result,
+    ).toMatchObject({ code: 'protected-area' });
+
+    const center = world.buildings['center-player-a']!;
+    expect(
+      applyCommand(world, {
+        id: 'block-settlement-access',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'placeStorage',
+        x: player.plot.x,
+        y: center.y,
+      }).result,
+    ).toMatchObject({ code: 'protected-area' });
+  });
+
+  it('never routes a threat through another settlement or changes its target', () => {
+    const world = createWorld(43);
+    joinPlayer(world, 'player-a');
+    joinPlayer(world, 'player-b');
+    const target = world.buildings['center-player-a']!;
+    const foreignPlot = { x: target.x - 6, y: target.y - 2, size: 4 };
+    world.players['player-b']!.plot = foreignPlot;
+    world.threats.leashed = {
+      id: 'leashed',
+      targetBuildingId: target.id,
+      health: 100,
+      damage: 1,
+      spawnedTick: 0,
+      x: foreignPlot.x - 3,
+      y: target.y,
+    };
+    advanceTick(world);
+    const threat = world.threats.leashed!;
+    expect(threat.targetBuildingId).toBe(target.id);
+    expect(
+      threat.x >= foreignPlot.x - 2 &&
+        threat.x < foreignPlot.x + foreignPlot.size + 2 &&
+        threat.y >= foreignPlot.y - 2 &&
+        threat.y < foreignPlot.y + foreignPlot.size + 2,
+    ).toBe(false);
+  });
+
+  it('lets inactive settlements take pressure without allowing unattended destruction', () => {
+    const world = createWorld(47);
+    joinPlayer(world, 'player-a');
+    const center = world.buildings['center-player-a']!;
+    const target = {
+      ...center,
+      id: 'offline-storage' as never,
+      kind: 'storage' as const,
+      x: center.x + 1,
+      health: 6,
+      maxHealth: 10,
+      inventoryCapacity: 200,
+    };
+    world.buildings[target.id] = target;
+    world.playerActivity['player-a'] = { lastActiveTick: 0, raidEligibleTick: 0 };
+    world.tick = 309;
+    world.threats.offline = {
+      id: 'offline',
+      targetBuildingId: target.id,
+      health: 100,
+      damage: 3,
+      spawnedTick: 0,
+      x: target.x + 1,
+      y: target.y,
+    };
+    advanceTick(world);
+    expect(target.health).toBe(5);
+    expect(world.threats.offline).toBeDefined();
+
+    expect(
+      applyCommand(world, {
+        id: 'return-online',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'explore',
+        x: center.x,
+        y: center.y,
+      }).result.accepted,
+    ).toBe(true);
+    world.tick = 319;
+    advanceTick(world);
+    expect(target.health).toBe(2);
+  });
+
+  it('conserves combat state changes to configured damage and defense', () => {
+    const world = createWorld(53);
+    joinPlayer(world, 'player-a');
+    const center = world.buildings['center-player-a']!;
+    const target = {
+      ...center,
+      id: 'combat-storage' as never,
+      kind: 'storage' as const,
+      x: center.x + 1,
+      health: 10,
+      maxHealth: 10,
+      inventoryCapacity: 200,
+    };
+    const tower = {
+      ...center,
+      id: 'combat-tower' as never,
+      kind: 'watchtower' as const,
+      x: center.x + 2,
+      y: center.y + 1,
+      health: 15,
+      maxHealth: 15,
+    };
+    world.buildings[target.id] = target;
+    world.buildings[tower.id] = tower;
+    world.playerActivity['player-a'] = { lastActiveTick: 9, raidEligibleTick: 0 };
+    world.tick = 9;
+    world.threats.combat = {
+      id: 'combat',
+      targetBuildingId: target.id,
+      health: 10,
+      damage: 2,
+      spawnedTick: 0,
+      x: target.x + 1,
+      y: target.y,
+    };
+    const inventoryBefore = structuredClone(world.players['player-a']!.inventory);
+    advanceTick(world);
+    expect(world.threats.combat?.health).toBe(9);
+    expect(target.health).toBe(8);
+    expect(world.players['player-a']!.inventory).toEqual(inventoryBefore);
+  });
+
+  it('keeps long-running inactive threat pressure deterministic and bounded', () => {
+    const left = createWorld(59, false);
+    for (const id of ['player-a', 'player-b', 'player-c']) {
+      joinPlayer(left, id);
+      const center = left.buildings[`center-${id}`]!;
+      left.buildings[`durable-${id}`] = {
+        ...center,
+        id: `durable-${id}` as never,
+        kind: 'storage',
+        x: center.x + 1,
+        y: center.y + 1,
+        health: 100,
+        maxHealth: 100,
+        inventoryCapacity: 200,
+      };
+      left.playerActivity[id] = { lastActiveTick: 0, raidEligibleTick: 0 };
+    }
+    const right = structuredClone(left);
+    for (let index = 0; index < 3_000; index += 1) {
+      advanceTick(left);
+      advanceTick(right);
+    }
+    expect(stateHash(left)).toBe(stateHash(right));
+    expect(inspectWorld(left)).toEqual([]);
+    expect(Object.keys(left.threats).length).toBeLessThanOrEqual(3);
+    for (const building of Object.values(left.buildings))
+      expect(building.health).toBeGreaterThanOrEqual(Math.ceil(building.maxHealth / 2));
+  });
+
   it('transfers resources atomically between players and rejects duplicate retries', () => {
     const world = createWorld();
     joinPlayer(world, 'player-a');
@@ -1126,6 +1546,533 @@ describe('world simulation', () => {
     expect(applyCommand(world, command).result).toMatchObject({ code: 'duplicate-command' });
     expect(world.players['player-b']?.inventory.wood).toBe(7);
     expect(world.transfers).toHaveLength(1);
+  });
+
+  it('linearizes competing recipient-capacity transfers without creating or destroying items', () => {
+    for (const firstSender of ['player-a', 'player-c'] as const) {
+      const secondSender = firstSender === 'player-a' ? 'player-c' : 'player-a';
+      const world = createWorld();
+      joinPlayer(world, 'player-a');
+      joinPlayer(world, 'player-b');
+      joinPlayer(world, 'player-c');
+      world.players['player-a']!.inventory = { ore: 0, wood: 0, ingot: 5, tool: 0 };
+      world.players['player-b']!.inventory = { ore: 0, wood: 0, ingot: 95, tool: 0 };
+      world.players['player-c']!.inventory = { ore: 0, wood: 0, ingot: 5, tool: 0 };
+      const transfer = (sender: 'player-a' | 'player-c') =>
+        applyCommand(world, {
+          id: `capacity-${sender}`,
+          playerId: sender as never,
+          sequence: 1,
+          type: 'transferToPlayer',
+          targetPlayerId: 'player-b' as never,
+          item: 'ingot',
+          amount: 5,
+        }).result;
+      expect(transfer(firstSender).accepted).toBe(true);
+      expect(transfer(secondSender)).toMatchObject({ accepted: false, code: 'inventory-full' });
+      expect(world.players['player-b']?.inventory.ingot).toBe(100);
+      expect(
+        Object.values(world.players).reduce((total, player) => total + player.inventory.ingot, 0),
+      ).toBe(105);
+      expect(world.transfers).toHaveLength(1);
+      expect(inspectWorld(world)).toEqual([]);
+    }
+  });
+
+  it('resolves acceptance/removal and ownership/removal conflicts in authoritative order', () => {
+    const membershipWorld = (removeFirst: boolean) => {
+      const world = createWorld();
+      joinPlayer(world, 'player-a');
+      joinPlayer(world, 'player-b');
+      applyCommand(world, {
+        id: `invite-${removeFirst}`,
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'inviteToSettlement',
+        settlementId: 'settlement-player-a',
+        targetPlayerId: 'player-b' as never,
+      });
+      const accept = {
+        id: `accept-${removeFirst}`,
+        playerId: 'player-b' as never,
+        sequence: 1,
+        type: 'acceptSettlementInvite' as const,
+        settlementId: 'settlement-player-a',
+      };
+      const remove = {
+        id: `remove-${removeFirst}`,
+        playerId: 'player-a' as never,
+        sequence: 2,
+        type: 'removeSettlementMember' as const,
+        settlementId: 'settlement-player-a',
+        targetPlayerId: 'player-b' as never,
+      };
+      const results = removeFirst
+        ? [applyCommand(world, remove).result, applyCommand(world, accept).result]
+        : [applyCommand(world, accept).result, applyCommand(world, remove).result];
+      return { world, results };
+    };
+    const removedAfterAccept = membershipWorld(false);
+    expect(removedAfterAccept.results.every(({ accepted }) => accepted)).toBe(true);
+    expect(
+      removedAfterAccept.world.settlements['settlement-player-a']?.members['player-b'],
+    ).toBeUndefined();
+    const acceptedAfterFailedRemove = membershipWorld(true);
+    expect(acceptedAfterFailedRemove.results[0]).toMatchObject({ code: 'not-settlement-member' });
+    expect(
+      acceptedAfterFailedRemove.world.settlements['settlement-player-a']?.members['player-b'],
+    ).toBe('member');
+
+    const ownershipWorld = (removeFirst: boolean) => {
+      const world = createWorld();
+      joinPlayer(world, 'player-a');
+      joinPlayer(world, 'player-b');
+      applyCommand(world, {
+        id: `invite-owner-${removeFirst}`,
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'inviteToSettlement',
+        settlementId: 'settlement-player-a',
+        targetPlayerId: 'player-b' as never,
+      });
+      applyCommand(world, {
+        id: `accept-owner-${removeFirst}`,
+        playerId: 'player-b' as never,
+        sequence: 1,
+        type: 'acceptSettlementInvite',
+        settlementId: 'settlement-player-a',
+      });
+      const first = removeFirst
+        ? applyCommand(world, {
+            id: 'remove-before-transfer',
+            playerId: 'player-a' as never,
+            sequence: 2,
+            type: 'removeSettlementMember',
+            settlementId: 'settlement-player-a',
+            targetPlayerId: 'player-b' as never,
+          }).result
+        : applyCommand(world, {
+            id: 'transfer-before-remove',
+            playerId: 'player-a' as never,
+            sequence: 2,
+            type: 'transferSettlementOwnership',
+            settlementId: 'settlement-player-a',
+            targetPlayerId: 'player-b' as never,
+          }).result;
+      const second = removeFirst
+        ? applyCommand(world, {
+            id: 'transfer-after-remove',
+            playerId: 'player-a' as never,
+            sequence: 3,
+            type: 'transferSettlementOwnership',
+            settlementId: 'settlement-player-a',
+            targetPlayerId: 'player-b' as never,
+          }).result
+        : applyCommand(world, {
+            id: 'remove-after-transfer',
+            playerId: 'player-a' as never,
+            sequence: 3,
+            type: 'removeSettlementMember',
+            settlementId: 'settlement-player-a',
+            targetPlayerId: 'player-b' as never,
+          }).result;
+      return { world, first, second };
+    };
+    const transferred = ownershipWorld(false);
+    expect(transferred.first.accepted).toBe(true);
+    expect(transferred.second).toMatchObject({ code: 'settlement-permission-denied' });
+    expect(transferred.world.settlements['settlement-player-a']?.ownerId).toBe('player-b');
+    const removed = ownershipWorld(true);
+    expect(removed.first.accepted).toBe(true);
+    expect(removed.second).toMatchObject({ code: 'not-settlement-member' });
+    expect(removed.world.settlements['settlement-player-a']?.ownerId).toBe('player-a');
+    expect(inspectWorld(transferred.world)).toEqual([]);
+    expect(inspectWorld(removed.world)).toEqual([]);
+  });
+
+  it('completes a multi-settlement objective and grants each contributor one auditable reward', () => {
+    const world = createWorld(73);
+    joinPlayer(world, 'player-a');
+    joinPlayer(world, 'player-b');
+    joinPlayer(world, 'player-c');
+    world.players['player-a']!.inventory.tool = 10;
+    world.players['player-b']!.inventory.tool = 10;
+    expect(
+      applyCommand(world, {
+        id: 'contribute-a',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'contributeToObjective',
+        objectiveId: 'frontier-beacon',
+        settlementId: 'settlement-player-a',
+        amount: 10,
+      }).result,
+    ).toMatchObject({ accepted: true });
+    const completion = applyCommand(world, {
+      id: 'contribute-b',
+      playerId: 'player-b' as never,
+      sequence: 1,
+      type: 'contributeToObjective',
+      objectiveId: 'frontier-beacon',
+      settlementId: 'settlement-player-b',
+      amount: 10,
+    });
+    expect(completion.events.map(({ type }) => type)).toEqual([
+      'objectiveContributed',
+      'objectiveCompleted',
+    ]);
+    const objective = world.cooperativeObjectives['frontier-beacon'];
+    expect(objective).toMatchObject({
+      totalContributed: 20,
+      completedTick: 0,
+      contributionsBySettlement: {
+        'settlement-player-a': 10,
+        'settlement-player-b': 10,
+      },
+    });
+    expect(
+      applyCommand(world, {
+        id: 'claim-without-contribution',
+        playerId: 'player-c' as never,
+        sequence: 1,
+        type: 'claimObjectiveReward',
+        objectiveId: 'frontier-beacon',
+      }).result,
+    ).toMatchObject({ accepted: false, code: 'objective-contribution-required' });
+    const claim = {
+      id: 'claim-a',
+      playerId: 'player-a' as never,
+      sequence: 2,
+      type: 'claimObjectiveReward' as const,
+      objectiveId: 'frontier-beacon' as const,
+    };
+    expect(applyCommand(world, claim).result).toMatchObject({ accepted: true });
+    expect(world.players['player-a']!.inventory.ingot).toBe(2);
+    expect(applyCommand(world, claim).result).toMatchObject({
+      accepted: false,
+      code: 'duplicate-command',
+    });
+    expect(
+      applyCommand(world, { ...claim, id: 'claim-a-again', sequence: 3 }).result,
+    ).toMatchObject({ accepted: false, code: 'reward-already-claimed' });
+    expect(world.players['player-a']!.inventory.ingot).toBe(2);
+    expect(objective.rewardHistory).toEqual([
+      { commandId: 'claim-a', playerId: 'player-a', reward: { ingot: 2 }, tick: 0 },
+    ]);
+    expect(inspectWorld(world)).toEqual([]);
+    expect(stateHash(deserializeWorld(JSON.parse(JSON.stringify(world))))).toBe(stateHash(world));
+  });
+
+  it('funds a settlement-owned construction project from multiple members with exact history', () => {
+    const world = createWorld(79);
+    joinPlayer(world, 'player-a');
+    joinPlayer(world, 'player-b');
+    joinPlayer(world, 'player-c');
+    applyCommand(world, {
+      id: 'invite-project-builder',
+      playerId: 'player-a' as never,
+      sequence: 1,
+      type: 'inviteToSettlement',
+      settlementId: 'settlement-player-a',
+      targetPlayerId: 'player-b' as never,
+    });
+    applyCommand(world, {
+      id: 'accept-project-builder',
+      playerId: 'player-b' as never,
+      sequence: 1,
+      type: 'acceptSettlementInvite',
+      settlementId: 'settlement-player-a',
+    });
+    const owner = world.players['player-a']!;
+    const center = world.buildings['center-player-a']!;
+    const tile = Array.from({ length: owner.plot.size }, (_, offsetX) =>
+      Array.from({ length: owner.plot.size }, (_, offsetY) => ({
+        x: owner.plot.x + offsetX,
+        y: owner.plot.y + offsetY,
+      })),
+    )
+      .flat()
+      .find(
+        ({ x, y }) =>
+          terrainAt(world.seed, x, y) !== 'water' &&
+          !(y === center.y && x < center.x) &&
+          !(x === center.x && y === center.y),
+      )!;
+    expect(
+      applyCommand(world, {
+        id: 'member-cannot-create-project',
+        playerId: 'player-b' as never,
+        sequence: 2,
+        type: 'createSharedConstructionProject',
+        settlementId: 'settlement-player-a',
+        buildingKind: 'storage',
+        ...tile,
+      }).result,
+    ).toMatchObject({ code: 'settlement-permission-denied' });
+    applyCommand(world, {
+      id: 'make-project-builder',
+      playerId: 'player-a' as never,
+      sequence: 2,
+      type: 'setSettlementRole',
+      settlementId: 'settlement-player-a',
+      targetPlayerId: 'player-b' as never,
+      role: 'builder',
+    });
+    const creation = applyCommand(world, {
+      id: 'shared-storage',
+      playerId: 'player-b' as never,
+      sequence: 2,
+      type: 'createSharedConstructionProject',
+      settlementId: 'settlement-player-a',
+      buildingKind: 'storage',
+      ...tile,
+    });
+    expect(creation.events.map(({ type }) => type)).toEqual(['sharedProjectCreated']);
+    const projectId = 'shared-storage';
+    expect(
+      applyCommand(world, {
+        id: 'outsider-project-contribution',
+        playerId: 'player-c' as never,
+        sequence: 1,
+        type: 'contributeToSharedConstructionProject',
+        projectId,
+        item: 'wood',
+        amount: 1,
+      }).result,
+    ).toMatchObject({ code: 'not-settlement-member' });
+    const contribution = {
+      id: 'builder-project-contribution',
+      playerId: 'player-b' as never,
+      sequence: 3,
+      type: 'contributeToSharedConstructionProject' as const,
+      projectId,
+      item: 'wood' as const,
+      amount: 1,
+    };
+    expect(applyCommand(world, contribution).result.accepted).toBe(true);
+    expect(applyCommand(world, contribution).result).toMatchObject({ code: 'duplicate-command' });
+    const completion = applyCommand(world, {
+      id: 'owner-project-contribution',
+      playerId: 'player-a' as never,
+      sequence: 3,
+      type: 'contributeToSharedConstructionProject',
+      projectId,
+      item: 'wood',
+      amount: 1,
+    });
+    expect(completion.events.map(({ type }) => type)).toEqual([
+      'sharedProjectContributed',
+      'sharedProjectCompleted',
+    ]);
+    const project = world.sharedConstructionProjects[projectId]!;
+    expect(project).toMatchObject({
+      settlementId: 'settlement-player-a',
+      contributed: { wood: 2 },
+      completedTick: 0,
+    });
+    expect(project.contributionHistory.map(({ playerId }) => playerId)).toEqual([
+      'player-b',
+      'player-a',
+    ]);
+    expect(world.buildings[project.buildingId!]).toMatchObject({
+      ownerId: 'player-a',
+      kind: 'storage',
+      x: tile.x,
+      y: tile.y,
+      constructionMaterials: { wood: 2 },
+    });
+    expect(world.players['player-a']!.inventory.wood).toBe(4);
+    expect(world.players['player-b']!.inventory.wood).toBe(4);
+    expect(
+      applyCommand(world, {
+        id: 'transfer-project-owner',
+        playerId: 'player-a' as never,
+        sequence: 4,
+        type: 'transferSettlementOwnership',
+        settlementId: 'settlement-player-a',
+        targetPlayerId: 'player-b' as never,
+      }).result.accepted,
+    ).toBe(true);
+    expect(world.buildings[project.buildingId!]?.ownerId).toBe('player-b');
+    expect(inspectWorld(world)).toEqual([]);
+    expect(stateHash(deserializeWorld(JSON.parse(JSON.stringify(world))))).toBe(stateHash(world));
+  });
+
+  it('normalizes unique names and enforces moderated, rate-limited, reportable chat', () => {
+    const world = createWorld(83);
+    joinPlayer(world, 'player-a');
+    joinPlayer(world, 'player-b');
+    expect(
+      applyCommand(world, {
+        id: 'name-a',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'setPlayerName',
+        name: '  Álpha   One  ',
+      }).result.accepted,
+    ).toBe(true);
+    expect(world.social.playerNames['player-a']).toBe('Álpha One');
+    expect(
+      applyCommand(world, {
+        id: 'duplicate-name',
+        playerId: 'player-b' as never,
+        sequence: 1,
+        type: 'setPlayerName',
+        name: 'A\u0301LPHA ONE',
+      }).result,
+    ).toMatchObject({ code: 'name-taken' });
+    expect(
+      applyCommand(world, {
+        id: 'moderated-name',
+        playerId: 'player-b' as never,
+        sequence: 1,
+        type: 'setPlayerName',
+        name: 'System Herald',
+      }).result,
+    ).toMatchObject({ code: 'content-rejected' });
+    expect(
+      applyCommand(world, {
+        id: 'name-b',
+        playerId: 'player-b' as never,
+        sequence: 1,
+        type: 'setPlayerName',
+        name: 'Beta Two',
+      }).result.accepted,
+    ).toBe(true);
+    expect(
+      applyCommand(world, {
+        id: 'settlement-name',
+        playerId: 'player-a' as never,
+        sequence: 2,
+        type: 'setSettlementName',
+        settlementId: 'settlement-player-a',
+        name: '  Iron   Vale ',
+      }).result.accepted,
+    ).toBe(true);
+    expect(world.social.settlementNames['settlement-player-a']).toBe('Iron Vale');
+    expect(
+      applyCommand(world, {
+        id: 'unauthorized-settlement-name',
+        playerId: 'player-b' as never,
+        sequence: 2,
+        type: 'setSettlementName',
+        settlementId: 'settlement-player-a',
+        name: 'Stolen Vale',
+      }).result,
+    ).toMatchObject({ code: 'settlement-permission-denied' });
+
+    expect(
+      applyCommand(world, {
+        id: 'chat-a-1',
+        playerId: 'player-a' as never,
+        sequence: 3,
+        type: 'sendChatMessage',
+        channel: 'global',
+        text: '  Need   wood\nnear the beacon. ',
+      }).result.accepted,
+    ).toBe(true);
+    expect(world.social.messages[0]).toMatchObject({
+      id: 'chat-a-1',
+      senderName: 'Álpha One',
+      text: 'Need wood near the beacon.',
+      channel: 'global',
+    });
+    expect(
+      applyCommand(world, {
+        id: 'chat-too-fast',
+        playerId: 'player-a' as never,
+        sequence: 4,
+        type: 'sendChatMessage',
+        channel: 'global',
+        text: 'Another message',
+      }).result,
+    ).toMatchObject({ code: 'chat-rate-limited' });
+    expect(
+      applyCommand(world, {
+        id: 'block-a',
+        playerId: 'player-b' as never,
+        sequence: 2,
+        type: 'setPlayerBlocked',
+        targetPlayerId: 'player-a' as never,
+        blocked: true,
+      }).result.accepted,
+    ).toBe(true);
+    expect(
+      applyCommand(world, {
+        id: 'report-a',
+        playerId: 'player-b' as never,
+        sequence: 3,
+        type: 'reportChatMessage',
+        messageId: 'chat-a-1',
+        reason: '  abusive   coordination ',
+      }).result.accepted,
+    ).toBe(true);
+    expect(world.social.reports[0]).toMatchObject({
+      reporterId: 'player-b',
+      reason: 'abusive coordination',
+      reportedMessage: { id: 'chat-a-1', text: 'Need wood near the beacon.' },
+      status: 'open',
+    });
+    expect(
+      applyCommand(world, {
+        id: 'report-a-again',
+        playerId: 'player-b' as never,
+        sequence: 4,
+        type: 'reportChatMessage',
+        messageId: 'chat-a-1',
+        reason: 'duplicate report',
+      }).result,
+    ).toMatchObject({ code: 'already-reported' });
+    for (let index = 0; index < 5; index += 1) advanceTick(world);
+    expect(
+      applyCommand(world, {
+        id: 'chat-a-2',
+        playerId: 'player-a' as never,
+        sequence: 4,
+        type: 'sendChatMessage',
+        channel: 'global',
+        text: 'Cooldown elapsed',
+      }).result.accepted,
+    ).toBe(true);
+    expect(
+      applyCommand(world, {
+        id: 'outsider-settlement-chat',
+        playerId: 'player-b' as never,
+        sequence: 4,
+        type: 'sendChatMessage',
+        channel: 'settlement',
+        settlementId: 'settlement-player-a',
+        text: 'Private channel',
+      }).result,
+    ).toMatchObject({ code: 'not-settlement-member' });
+    applyCommand(world, {
+      id: 'invite-chat-member',
+      playerId: 'player-a' as never,
+      sequence: 5,
+      type: 'inviteToSettlement',
+      settlementId: 'settlement-player-a',
+      targetPlayerId: 'player-b' as never,
+    });
+    applyCommand(world, {
+      id: 'accept-chat-member',
+      playerId: 'player-b' as never,
+      sequence: 4,
+      type: 'acceptSettlementInvite',
+      settlementId: 'settlement-player-a',
+    });
+    expect(
+      applyCommand(world, {
+        id: 'settlement-chat',
+        playerId: 'player-b' as never,
+        sequence: 5,
+        type: 'sendChatMessage',
+        channel: 'settlement',
+        settlementId: 'settlement-player-a',
+        text: 'Private channel',
+      }).result.accepted,
+    ).toBe(true);
+    expect(inspectWorld(world)).toEqual([]);
+    expect(stateHash(deserializeWorld(JSON.parse(JSON.stringify(world))))).toBe(stateHash(world));
   });
 
   it('enforces settlement roles while allowing delegated building and logistics work', () => {
@@ -1271,6 +2218,125 @@ describe('world simulation', () => {
     ).toBe(true);
     expect(world.settlements['settlement-player-a']?.members['player-a']).toBeUndefined();
     expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('deletes a non-owner account atomically, anonymizes history, and reserves its identity', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    joinPlayer(world, 'player-b');
+    applyCommand(world, {
+      id: 'invite-a',
+      playerId: 'player-a' as never,
+      sequence: 1,
+      type: 'inviteToSettlement',
+      settlementId: 'settlement-player-a',
+      targetPlayerId: 'player-b' as never,
+    });
+    applyCommand(world, {
+      id: 'accept-b',
+      playerId: 'player-b' as never,
+      sequence: 1,
+      type: 'acceptSettlementInvite',
+      settlementId: 'settlement-player-a',
+    });
+    expect(
+      applyCommand(world, {
+        id: 'delete-while-owner',
+        playerId: 'player-a' as never,
+        sequence: 2,
+        type: 'deleteAccount',
+        confirmation: 'DELETE',
+      }).result,
+    ).toMatchObject({ code: 'cannot-delete-settlement-owner' });
+    applyCommand(world, {
+      id: 'transfer-owner',
+      playerId: 'player-a' as never,
+      sequence: 2,
+      type: 'transferSettlementOwnership',
+      settlementId: 'settlement-player-a',
+      targetPlayerId: 'player-b' as never,
+    });
+    applyCommand(world, {
+      id: 'invite-deleting-player',
+      playerId: 'player-b' as never,
+      sequence: 2,
+      type: 'inviteToSettlement',
+      settlementId: 'settlement-player-b',
+      targetPlayerId: 'player-a' as never,
+    });
+    applyCommand(world, {
+      id: 'farewell-message',
+      playerId: 'player-a' as never,
+      sequence: 3,
+      type: 'sendChatMessage',
+      channel: 'global',
+      text: 'Goodbye',
+    });
+    applyCommand(world, {
+      id: 'report-farewell',
+      playerId: 'player-b' as never,
+      sequence: 3,
+      type: 'reportChatMessage',
+      messageId: 'farewell-message',
+      reason: 'Keep the moderation record',
+    });
+    applyCommand(world, {
+      id: 'block-a',
+      playerId: 'player-b' as never,
+      sequence: 4,
+      type: 'setPlayerBlocked',
+      targetPlayerId: 'player-a' as never,
+      blocked: true,
+    });
+    expect(
+      applyCommand(world, {
+        id: 'delete-unconfirmed',
+        playerId: 'player-a' as never,
+        sequence: 4,
+        type: 'deleteAccount',
+        confirmation: 'delete',
+      }).result,
+    ).toMatchObject({ code: 'account-deletion-confirmation-required' });
+    const deletion = applyCommand(world, {
+      id: 'delete-confirmed',
+      playerId: 'player-a' as never,
+      sequence: 4,
+      type: 'deleteAccount',
+      confirmation: 'DELETE',
+    });
+    expect(deletion.result.accepted).toBe(true);
+    expect(deletion.events).toContainEqual({ type: 'playerDeleted', playerId: 'player-a' });
+    expect(world.players['player-a']).toBeUndefined();
+    expect(world.deletedPlayers['player-a']).toEqual({
+      id: 'player-a',
+      deletedTick: 0,
+      reason: 'account-deletion',
+    });
+    expect(Object.values(world.buildings).some(({ ownerId }) => ownerId === 'player-a')).toBe(
+      false,
+    );
+    expect(world.settlements['settlement-player-a']?.members['player-a']).toBeUndefined();
+    expect(world.settlements['settlement-player-b']?.invitations['player-a']).toBeUndefined();
+    expect(world.social.playerNames['player-a']).toBeUndefined();
+    expect(world.social.blockedPlayers['player-b']?.['player-a']).toBeUndefined();
+    expect(world.social.messages[0]).toMatchObject({
+      senderId: 'player-a',
+      senderName: 'Deleted player 1',
+    });
+    expect(world.social.reports[0]?.reportedMessage.senderName).toBe('Deleted player 1');
+    expect(joinPlayer(world, 'player-a')).toEqual([]);
+    expect(
+      applyCommand(world, {
+        id: 'deleted-retry',
+        playerId: 'player-a' as never,
+        sequence: 5,
+        type: 'gather',
+        x: 0,
+        y: 0,
+      }).result,
+    ).toMatchObject({ code: 'account-deleted' });
+    expect(inspectWorld(world)).toEqual([]);
+    expect(inspectWorld(deserializeWorld(JSON.parse(JSON.stringify(world))))).toEqual([]);
   });
 
   it("lets settlement owners revoke a member's delegated building permissions", () => {
@@ -1888,7 +2954,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 7;
     delete legacy.settlements;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(20);
+    expect(migrated.schemaVersion).toBe(26);
     expect(migrated.settlements['settlement-player-a']?.members['player-a']).toBe('owner');
   });
 
@@ -1972,11 +3038,29 @@ describe('world simulation', () => {
     expect(first.hash).toBe(second.hash);
     expect(first.commandCount).toBeGreaterThan(0);
     expect(first.invariantErrors).toEqual([]);
+    expect(first.botActions).toMatchObject({
+      gather: expect.any(Number),
+      build: 48,
+      research: 24,
+      trade: 1,
+      reconnect: 12,
+    });
+    expect(first.botActions.gather).toBeGreaterThan(0);
     expect(
       Object.values(first.state.buildings)
         .filter((building) => building.kind === 'workshop')
         .reduce((total, building) => total + building.inventory.tool, 0),
     ).toBeGreaterThan(0);
+  });
+
+  it('runs progression bots through expansion and active threat response', () => {
+    const result = runBotScenario(2, 500);
+    expect(result.botActions.research).toBeGreaterThanOrEqual(4);
+    expect(result.botActions.expand).toBe(1);
+    expect(result.botActions.defend).toBeGreaterThan(0);
+    expect(result.botActions.trade).toBe(1);
+    expect(result.botActions.reconnect).toBe(2);
+    expect(result.invariantErrors).toEqual([]);
   });
 
   it('supports a target-density bot workload without changing its deterministic result', () => {

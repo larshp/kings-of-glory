@@ -7,11 +7,18 @@ import {
 } from 'react';
 import {
   buildings as buildingDefinitions,
+  cooperativeObjectives as cooperativeObjectiveDefinitions,
   producers as producerDefinitions,
   recipes,
   technologies,
 } from '@kings/content';
-import { PROTOCOL_VERSION, type ClientWorldState, type ServerMessage } from '@kings/protocol';
+import {
+  PROTOCOL_VERSION,
+  type ClientWorldState,
+  type DirectoryEntry,
+  type ServerMessage,
+  type WorldMapChunkSummary,
+} from '@kings/protocol';
 import { type Building, type SettlementRole } from '@kings/simulation';
 import { WorldCanvas } from './WorldCanvas.js';
 import type {
@@ -20,7 +27,14 @@ import type {
   WorldCanvasDebugState,
   WorldCanvasMetrics,
 } from './WorldCanvas.js';
-import { loadRenderAssets, type RenderAssets } from './render-assets.js';
+import { loadRenderAssets, spriteAtlasManifest, type RenderAssets } from './render-assets.js';
+import {
+  informationCategories,
+  searchInformation,
+  type InformationCategory,
+  type InformationEntry,
+} from './information-search.js';
+import { groupNotifications, type NotificationSeverity } from './notifications.js';
 import { synchronizeWorld } from './world-sync.js';
 import {
   defaultPreferences,
@@ -33,10 +47,29 @@ import {
 } from './preferences.js';
 import './style.css';
 
-const storedPlayerId = sessionStorage.getItem('kings-dev-player-id');
-const playerId = storedPlayerId ?? `dev-${crypto.randomUUID().slice(0, 8)}`;
-if (!storedPlayerId) sessionStorage.setItem('kings-dev-player-id', playerId);
 const defaultServerUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname || 'localhost'}:3001`;
+const serverUrl = import.meta.env.VITE_SERVER_URL ?? defaultServerUrl;
+const sessionUrl = new URL(serverUrl);
+sessionUrl.protocol = sessionUrl.protocol === 'wss:' ? 'https:' : 'http:';
+sessionUrl.pathname = '/session';
+sessionUrl.search = '';
+sessionUrl.hash = '';
+const storedPlayerId = sessionStorage.getItem('kings-dev-player-id');
+const fallbackPlayerId = storedPlayerId ?? `dev-${crypto.randomUUID().slice(0, 8)}`;
+const playerIdPromise = (async () => {
+  let resolvedPlayerId = fallbackPlayerId;
+  try {
+    const response = await fetch(sessionUrl, { method: 'POST', credentials: 'include' });
+    if (response.ok) {
+      const session = (await response.json()) as { playerId?: unknown };
+      if (typeof session.playerId === 'string') resolvedPlayerId = session.playerId;
+    }
+  } catch {
+    // Development remains usable while the local server starts; production WebSockets require a session.
+  }
+  sessionStorage.setItem('kings-dev-player-id', resolvedPlayerId);
+  return resolvedPlayerId;
+})();
 
 const rejectionMessage = (code: string | undefined) => {
   const messages: Record<string, string> = {
@@ -44,6 +77,8 @@ const rejectionMessage = (code: string | undefined) => {
     'out-of-range': 'That tile is too far from your settlement.',
     'resource-depleted': 'That deposit is exhausted. Try another resource tile.',
     'outside-plot': 'Build inside your claimed territory.',
+    'protected-area': 'That area preserves another settlement or its access route.',
+    'reserved-resource': 'That resource is reserved for the nearest starting settlement.',
     occupied: 'Another building already occupies that tile.',
     'insufficient-wood': 'Gather more wood before starting this construction.',
     'insufficient-ore': 'Gather or transfer more ore first.',
@@ -55,6 +90,25 @@ const rejectionMessage = (code: string | undefined) => {
     'incompatible-building': 'Copy settings only between completed producers of the same kind.',
     'building-destroyed': 'Repair or demolish the destroyed building first.',
     'technology-locked': 'Research the required technology first.',
+    'unknown-objective': 'That cooperative objective is no longer available.',
+    'objective-complete': 'That cooperative objective is already complete.',
+    'objective-incomplete': 'The objective must be completed before rewards can be claimed.',
+    'objective-contribution-required': 'Contribute before claiming this objective reward.',
+    'reward-already-claimed': 'You already claimed this objective reward.',
+    'unknown-project': 'That shared construction project no longer exists.',
+    'project-complete': 'That shared construction project is already fully funded.',
+    'project-limit-reached': 'Complete an active settlement project before starting another.',
+    'construction-limit-reached':
+      'Complete or cancel an active construction before starting another.',
+    'invalid-name':
+      'Use the allowed length and only letters, numbers, spaces, periods, apostrophes, or hyphens.',
+    'name-taken': 'That name is already in use.',
+    'content-rejected': 'That text was rejected by the world moderation rules.',
+    'chat-rate-limited': 'Wait a few world ticks before sending another message.',
+    'invalid-message': 'Enter a non-empty message within the length limit.',
+    'unknown-message': 'That chat message is no longer available.',
+    'already-reported': 'You already reported that message.',
+    'cannot-block-self': 'You cannot block yourself.',
     'not-explored': 'Explore that area before claiming it.',
     'not-adjacent': 'Claim a sector next to your existing territory.',
     'unknown-recipient': 'That recipient has not joined this world yet.',
@@ -67,6 +121,10 @@ const rejectionMessage = (code: string | undefined) => {
     'cannot-remove-settlement-owner': 'Transfer ownership before removing the current owner.',
     'cannot-transfer-settlement-ownership-to-self':
       'Choose another settlement member as the owner.',
+    'cannot-delete-settlement-owner':
+      'Transfer ownership of every settlement before deleting this account.',
+    'account-deletion-confirmation-required': 'Type DELETE exactly to confirm account deletion.',
+    'account-deleted': 'This player identity has been permanently deleted.',
     unauthorized: 'Your connection cannot perform that action for this player.',
     'persistence-failed': 'The world could not save your action. It was not applied.',
   };
@@ -85,6 +143,10 @@ const technologyCostLabel = (
   Object.entries(cost)
     .map(([item, amount]) => `${amount} ${item}${amount === 1 ? '' : 's'}`)
     .join(', ');
+const amountLabel = (amounts: object) =>
+  Object.entries(amounts as Readonly<Record<string, number>>)
+    .map(([item, amount]) => `${amount} ${item}`)
+    .join(', ');
 const recipeForBuilding = (building: Building) =>
   Object.values(recipes).find((recipe) => recipe.id === building.recipeId);
 const recipeOptionsForBuilding = (building: Building) => {
@@ -97,12 +159,16 @@ const recipeOptionsForBuilding = (building: Building) => {
 };
 
 export const App = () => {
+  const [identity, setIdentity] = useState({ playerId: fallbackPlayerId, ready: false });
+  const playerId = identity.playerId;
   const socket = useRef<WebSocket | undefined>(undefined);
   const sequence = useRef(0);
   const stateVersion = useRef<number | undefined>(undefined);
   const clientWorldState = useRef<ClientWorldState | undefined>(undefined);
   const resyncRequested = useRef(false);
-  const pendingCommands = useRef(new Map<string, string>());
+  const pendingCommands = useRef(
+    new Map<string, { message?: string; onAcknowledged?: () => void }>(),
+  );
   const [state, setState] = useState<ClientWorldState>();
   const [status, setStatus] = useState('Connecting');
   // seq bumps on every message so an identical repeated toast (e.g. "Gathered
@@ -133,12 +199,45 @@ export const App = () => {
     showCoordinates: false,
     showChunks: false,
     showEntityIds: false,
+    showPaths: false,
   });
   const [operationsOverlay, setOperationsOverlay] = useState<OperationsOverlay>('none');
   const messageCount = useRef({ received: 0, sent: 0 });
   const [messageRate, setMessageRate] = useState({ received: 0, sent: 0 });
+  const [updateApplicationMs, setUpdateApplicationMs] = useState(0);
+  const [worldMap, setWorldMap] = useState<{
+    chunks: WorldMapChunkSummary[];
+    nextCursor?: string;
+    totalExploredChunks: number;
+  }>();
+  const [worldMapLoading, setWorldMapLoading] = useState(false);
+  const [directoryQuery, setDirectoryQuery] = useState('');
+  const [directory, setDirectory] = useState<{
+    entries: DirectoryEntry[];
+    nextCursor?: string;
+  }>();
+  const [playerNameDraft, setPlayerNameDraft] = useState('');
+  const [settlementNameDraft, setSettlementNameDraft] = useState('');
+  const [chatText, setChatText] = useState('');
+  const [chatSettlementId, setChatSettlementId] = useState('global');
+  const [accountDeletionConfirmation, setAccountDeletionConfirmation] = useState('');
+  const [informationQuery, setInformationQuery] = useState('');
+  const [informationCategory, setInformationCategory] = useState<InformationCategory | 'all'>(
+    'all',
+  );
 
   useEffect(() => {
+    let active = true;
+    void playerIdPromise.then((resolvedPlayerId) => {
+      if (active) setIdentity({ playerId: resolvedPlayerId, ready: true });
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!identity.ready) return;
     let stopped = false;
     let retryTimer: number | undefined;
     let heartbeatTimer: number | undefined;
@@ -147,7 +246,7 @@ export const App = () => {
     let activeConnection: WebSocket | undefined;
     const connect = () => {
       setStatus(attempts === 0 ? 'Connecting' : 'Reconnecting');
-      const connection = new WebSocket(import.meta.env.VITE_SERVER_URL ?? defaultServerUrl);
+      const connection = new WebSocket(serverUrl);
       activeConnection = connection;
       socket.current = connection;
       connection.onopen = () => {
@@ -212,9 +311,36 @@ export const App = () => {
           return;
         }
         messageCount.current.received += 1;
+        if (message.type === 'worldMapPage') {
+          setWorldMap((current) => ({
+            chunks: message.page.after
+              ? [
+                  ...(current?.chunks ?? []),
+                  ...message.page.chunks.filter(
+                    (chunk) =>
+                      !current?.chunks.some(
+                        (existing) => existing.x === chunk.x && existing.y === chunk.y,
+                      ),
+                  ),
+                ]
+              : [...message.page.chunks],
+            ...(message.page.nextCursor ? { nextCursor: message.page.nextCursor } : {}),
+            totalExploredChunks: message.page.totalExploredChunks,
+          }));
+          setWorldMapLoading(false);
+        }
+        if (message.type === 'directoryPage') {
+          setDirectory((current) => ({
+            entries: message.page.after
+              ? [...(current?.entries ?? []), ...message.page.entries]
+              : [...message.page.entries],
+            ...(message.page.nextCursor ? { nextCursor: message.page.nextCursor } : {}),
+          }));
+        }
         if (message.type === 'welcome') {
           setStatus('Connected');
         }
+        const updateStartedAt = performance.now();
         const synchronization = synchronizeWorld(
           { version: stateVersion.current, state: clientWorldState.current },
           message,
@@ -225,6 +351,16 @@ export const App = () => {
           clientWorldState.current = synchronization.sync.state;
           resyncRequested.current = false;
           setState(synchronization.sync.state);
+          setUpdateApplicationMs(performance.now() - updateStartedAt);
+        }
+        if (
+          message.type === 'worldBootstrap' &&
+          synchronization.sync.state &&
+          !synchronization.sync.state.players[playerId]
+        ) {
+          sessionStorage.removeItem('kings-dev-player-id');
+          window.location.reload();
+          return;
         }
         if (
           synchronization.needsResync &&
@@ -237,10 +373,11 @@ export const App = () => {
           messageCount.current.sent += 1;
         }
         if (message.type === 'commandAcknowledged') {
-          const successMessage = pendingCommands.current.get(message.result.commandId);
-          if (successMessage) {
-            notify(successMessage);
+          const pending = pendingCommands.current.get(message.result.commandId);
+          if (pending) {
+            if (pending.message) notify(pending.message);
             pendingCommands.current.delete(message.result.commandId);
+            pending.onAcknowledged?.();
           }
         }
         if (message.type === 'commandRejected') {
@@ -275,7 +412,7 @@ export const App = () => {
       if (socket.current === activeConnection) socket.current = undefined;
       activeConnection?.close();
     };
-  }, []);
+  }, [identity.ready, playerId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -338,10 +475,18 @@ export const App = () => {
     setPreferences(updated);
     notify(`Camera control updated to ${displayKey(event.code)}.`);
   };
-  const send = (command: Record<string, unknown>, successMessage?: string) => {
+  const send = (
+    command: Record<string, unknown>,
+    successMessage?: string,
+    onAcknowledged?: () => void,
+  ) => {
     if (socket.current?.readyState !== WebSocket.OPEN) return;
     const id = crypto.randomUUID();
-    if (successMessage) pendingCommands.current.set(id, successMessage);
+    if (successMessage || onAcknowledged)
+      pendingCommands.current.set(id, {
+        ...(successMessage ? { message: successMessage } : {}),
+        ...(onAcknowledged ? { onAcknowledged } : {}),
+      });
     socket.current.send(
       JSON.stringify({
         type: 'command',
@@ -353,6 +498,32 @@ export const App = () => {
   const sendInterest = (chunks: readonly { x: number; y: number }[]) => {
     if (socket.current?.readyState !== WebSocket.OPEN) return;
     socket.current.send(JSON.stringify({ type: 'interest', chunks }));
+    messageCount.current.sent += 1;
+  };
+  const requestWorldMap = (after?: string) => {
+    if (socket.current?.readyState !== WebSocket.OPEN) return;
+    setWorldMapLoading(true);
+    socket.current.send(
+      JSON.stringify({
+        type: 'worldMap',
+        requestId: `map-${crypto.randomUUID()}`,
+        ...(after ? { after } : {}),
+        limit: 64,
+      }),
+    );
+    messageCount.current.sent += 1;
+  };
+  const requestDirectory = (after?: string) => {
+    if (socket.current?.readyState !== WebSocket.OPEN) return;
+    socket.current.send(
+      JSON.stringify({
+        type: 'directorySearch',
+        requestId: `directory-${crypto.randomUUID()}`,
+        query: directoryQuery.trim(),
+        ...(after ? { after } : {}),
+        limit: 20,
+      }),
+    );
     messageCount.current.sent += 1;
   };
   const plot = useMemo(() => player?.plot, [player]);
@@ -440,8 +611,19 @@ export const App = () => {
     : [];
   const exploredChunkCount = Object.keys(player?.exploredChunks ?? {}).length;
   const visibleChunkCount = Object.keys(player?.visibleChunks ?? {}).length;
+  const progressionEra = player?.research.unlocked['territorial-charter']
+    ? 'Expansion era'
+    : player?.research.unlocked.metallurgy
+      ? 'Industry era'
+      : 'Founding era';
   const transfers = state?.transfers ?? [];
   const personalSettlement = state?.settlements[`settlement-${playerId}`];
+  const frontierBeacon = state?.cooperativeObjectives['frontier-beacon'];
+  const frontierBeaconDefinition = cooperativeObjectiveDefinitions['frontier-beacon'];
+  const sharedProjects = Object.values(state?.sharedConstructionProjects ?? {});
+  const chatMessages = state?.social.messages ?? [];
+  const blockedPlayerIds = Object.keys(state?.social.blockedPlayers[playerId] ?? {});
+  const ownedSettlements = settlements.filter((settlement) => settlement.ownerId === playerId);
   const logisticsLinks = Object.values(state?.logisticsLinks ?? {});
   const logisticsTarget = state?.buildings[logisticsTargetId];
   const logisticsItems = logisticsTarget
@@ -496,6 +678,155 @@ export const App = () => {
       ]
     : [];
   const nextOnboardingStep = onboardingSteps.find((step) => !step.complete);
+  const onboardingReservation = state?.onboardingReservations[playerId];
+  const activeAlertEntries: Array<InformationEntry & { readonly severity: NotificationSeverity }> =
+    player
+      ? [
+          ...(player.population.capacity <= player.population.total
+            ? [
+                {
+                  id: 'alert-housing',
+                  category: 'alerts' as const,
+                  severity: 'warning' as const,
+                  title: 'Housing is full',
+                  detail: 'Build housing before the settlement can grow.',
+                },
+              ]
+            : []),
+          ...(player.population.satisfaction < 50 && player.population.total > 2
+            ? [
+                {
+                  id: 'alert-wellbeing',
+                  category: 'alerts' as const,
+                  severity: 'warning' as const,
+                  title: 'Low wellbeing',
+                  detail: 'Surplus settlers may leave at the next settlement review.',
+                },
+              ]
+            : []),
+          ...(player.population.unemployed > 0
+            ? [
+                {
+                  id: 'alert-unemployed',
+                  category: 'alerts' as const,
+                  severity: 'info' as const,
+                  title: `${player.population.unemployed} settlers available`,
+                  detail: 'Build or prioritize production and construction work.',
+                },
+              ]
+            : []),
+          ...(!hasCompletedHearth
+            ? [
+                {
+                  id: 'alert-hearth',
+                  category: 'alerts' as const,
+                  severity: 'info' as const,
+                  title: 'Hearth needed',
+                  detail: 'Build a hearth to improve settlement wellbeing.',
+                },
+              ]
+            : []),
+          ...(activeThreats.length > 0
+            ? [
+                {
+                  id: 'alert-threats',
+                  category: 'alerts' as const,
+                  severity: 'critical' as const,
+                  title: `${activeThreats.length} active raider threat${activeThreats.length === 1 ? '' : 's'}`,
+                  detail: 'Review damaged targets, repairs, and watchtower coverage.',
+                },
+              ]
+            : []),
+        ]
+      : [];
+  const alertGroups = groupNotifications(activeAlertEntries);
+  const informationEntries: InformationEntry[] = player
+    ? [
+        ...Object.values(buildingDefinitions).map((definition) => {
+          const instances = ownedBuildings.filter((building) => building.kind === definition.id);
+          const constructing = instances.filter(
+            (building) => building.constructionTicks > 0,
+          ).length;
+          const technology = definition.requiredTechnology
+            ? technologies[definition.requiredTechnology]
+            : undefined;
+          return {
+            id: `construction-${definition.id}`,
+            category: 'construction' as const,
+            title: definition.displayName,
+            detail: `${amountLabel(definition.cost)}; ${definition.constructionTicks} worker ticks; ${instances.length} owned${constructing ? `, ${constructing} constructing` : ''}; ${technology ? `${technology.displayName} required` : 'available in the Founding era'}.`,
+            keywords: [definition.id, technology?.displayName ?? 'unlocked'],
+          };
+        }),
+        ...Object.values(recipes).map((recipe) => ({
+          id: `recipe-${recipe.id}`,
+          category: 'recipes' as const,
+          title: recipe.id,
+          detail: `${amountLabel(recipe.input)} → ${amountLabel(recipe.output)} in ${recipe.ticks} ticks.`,
+          keywords: [...Object.keys(recipe.input), ...Object.keys(recipe.output)],
+        })),
+        {
+          id: 'inventory-player',
+          category: 'inventory' as const,
+          title: 'Player inventory',
+          detail: amountLabel(player.inventory),
+          keywords: ['carried personal'],
+        },
+        ...manageableBuildings.map((building) => ({
+          id: `inventory-${building.id}`,
+          category: 'inventory' as const,
+          title: `${buildingDefinitions[building.kind].displayName} · ${building.id}`,
+          detail: `${amountLabel(building.inventory)}; ${building.inventoryCapacity} total capacity.`,
+          keywords: [building.kind, building.productionState],
+        })),
+        {
+          id: 'population-total',
+          category: 'population' as const,
+          title: 'Settlement population',
+          detail: `${player.population.total}/${player.population.capacity} housed; ${player.population.employed} employed; ${player.population.unemployed} available; ${player.population.satisfaction} wellbeing.`,
+          keywords: ['settlers jobs housing shelter satisfaction'],
+        },
+        ...Object.values(technologies).map((technology) => ({
+          id: `research-${technology.id}`,
+          category: 'research' as const,
+          title: technology.displayName,
+          detail: `${player.research.unlocked[technology.id] ? 'Unlocked' : player.research.activeTechnology === technology.id ? `${player.research.ticksRemaining} ticks remaining` : 'Available to research'}; costs ${amountLabel(technology.cost)}; prerequisites ${technology.prerequisites.join(', ') || 'none'}.`,
+          keywords: [technology.id, ...technology.prerequisites],
+        })),
+        {
+          id: 'defense-overview',
+          category: 'defense' as const,
+          title: 'Settlement defense',
+          detail: `${activeThreats.length} active threats; ${ownedBuildings.filter((building) => building.kind === 'watchtower' && building.constructionTicks === 0).length} completed watchtowers.`,
+          keywords: ['raiders watchtower repair health'],
+        },
+        ...activeThreats.map((threat) => ({
+          id: `defense-${threat.id}`,
+          category: 'defense' as const,
+          title: `Raider ${threat.id}`,
+          detail: `${threat.health} health; targeting ${threat.targetBuildingId} at ${threat.x}, ${threat.y}.`,
+          keywords: ['threat attack target'],
+        })),
+        ...(activeAlertEntries.length > 0
+          ? activeAlertEntries.map(({ severity, ...alert }) => ({
+              ...alert,
+              keywords: [...(alert.keywords ?? []), severity],
+            }))
+          : [
+              {
+                id: 'alerts-clear',
+                category: 'alerts' as const,
+                title: 'No active alerts',
+                detail: 'Housing, wellbeing, employment, hearth, and defense checks are clear.',
+              },
+            ]),
+      ]
+    : [];
+  const informationResults = searchInformation(
+    informationEntries,
+    informationQuery,
+    informationCategory,
+  );
 
   return (
     <main
@@ -682,6 +1013,18 @@ export const App = () => {
             />
             Entity IDs
           </label>
+          <label className="checkbox-label" htmlFor="renderer-debug-paths">
+            <input
+              id="renderer-debug-paths"
+              type="checkbox"
+              disabled={!rendererDebug.enabled}
+              checked={rendererDebug.showPaths}
+              onChange={(event) =>
+                setRendererDebug((current) => ({ ...current, showPaths: event.target.checked }))
+              }
+            />
+            Threat paths
+          </label>
         </details>
         <section className="operations-overlay" aria-labelledby="operations-overlay-title">
           <h2 id="operations-overlay-title">Operations overlay</h2>
@@ -711,6 +1054,18 @@ export const App = () => {
           <p>
             {canvasMetrics?.activeChunks ?? '—'} active chunks · {messageRate.received} received/s ·{' '}
             {messageRate.sent} sent/s
+          </p>
+          <p>
+            {canvasMetrics?.renderObjectCount ?? '—'} render objects ·{' '}
+            {renderAssets
+              ? Math.round(
+                  Object.values(spriteAtlasManifest).reduce(
+                    (bytes, atlas) => bytes + atlas.width * atlas.height * 4,
+                    0,
+                  ) / 1024,
+                )
+              : '—'}{' '}
+            KiB estimated atlas memory · {updateApplicationMs.toFixed(2)} ms update apply
           </p>
         </details>
         {!state && (
@@ -746,26 +1101,36 @@ export const App = () => {
             <p>
               Exploration: {exploredChunkCount} explored · {visibleChunkCount} currently visible
             </p>
-            {player.population.capacity <= player.population.total && (
-              <p className="alert">
-                Housing is full. Build housing before your settlement can grow.
-              </p>
-            )}
-            {player.population.satisfaction < 50 && player.population.total > 2 && (
-              <p className="alert">
-                Low wellbeing will cause surplus settlers to leave at the next settlement review.
-              </p>
-            )}
-            {player.population.unemployed > 0 && (
-              <p className="alert">
-                {player.population.unemployed} settler
-                {player.population.unemployed === 1 ? '' : 's'} need work. Build or prioritize a
-                smelter.
-              </p>
-            )}
-            {!hasCompletedHearth && (
-              <p className="alert">Build a hearth to improve settlement wellbeing.</p>
-            )}
+            <section className="notification-center" aria-labelledby="notification-center-title">
+              <h2 id="notification-center-title">Notifications</h2>
+              {activeAlertEntries.length === 0 ? (
+                <p className="notification-clear">No active settlement alerts.</p>
+              ) : (
+                <>
+                  <p aria-live="polite">
+                    {activeAlertEntries.length} active alert
+                    {activeAlertEntries.length === 1 ? '' : 's'}, grouped by severity.
+                  </p>
+                  {alertGroups.map((group) => (
+                    <details
+                      className={`notification-group ${group.severity}`}
+                      key={group.severity}
+                    >
+                      <summary>
+                        {group.severity}: {group.notifications.length}
+                      </summary>
+                      <ul>
+                        {group.notifications.map((alert) => (
+                          <li key={alert.id}>
+                            <strong>{alert.title}</strong> — {alert.detail}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  ))}
+                </>
+              )}
+            </section>
             <section className="settlement-stats" aria-labelledby="settlement-stats-title">
               <h2 id="settlement-stats-title">Settlement needs</h2>
               <p>
@@ -777,6 +1142,62 @@ export const App = () => {
                 Work: {player.population.employed}/{player.population.total} settlers assigned
               </p>
               <p>Wellbeing: {hasCompletedHearth ? 'hearth active' : 'hearth needed'}</p>
+            </section>
+            <section className="information-browser" aria-labelledby="information-browser-title">
+              <h2 id="information-browser-title">Settlement information</h2>
+              <p>
+                Search construction, recipes, inventories, population, research, defense, and
+                current alerts.
+              </p>
+              <div className="information-search-controls">
+                <label htmlFor="information-category">
+                  Category
+                  <select
+                    id="information-category"
+                    value={informationCategory}
+                    onChange={(event) =>
+                      setInformationCategory(event.target.value as InformationCategory | 'all')
+                    }
+                  >
+                    <option value="all">All information</option>
+                    {informationCategories.map((category) => (
+                      <option key={category} value={category}>
+                        {category[0]?.toLocaleUpperCase()}
+                        {category.slice(1)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label htmlFor="information-query">
+                  Search
+                  <input
+                    id="information-query"
+                    type="search"
+                    value={informationQuery}
+                    onChange={(event) => setInformationQuery(event.target.value)}
+                    placeholder="Try wood, smelter, jobs, raider…"
+                  />
+                </label>
+              </div>
+              <p aria-live="polite">
+                {informationResults.length} result
+                {informationResults.length === 1 ? '' : 's'}
+              </p>
+              {informationResults.length > 0 ? (
+                <ul className="information-results">
+                  {informationResults.map((entry) => (
+                    <li key={entry.id}>
+                      <span className={`information-category ${entry.category}`}>
+                        {entry.category}
+                      </span>
+                      <strong>{entry.title}</strong>
+                      <span>{entry.detail}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p>No settlement information matches this search.</p>
+              )}
             </section>
             <p>
               Ore {player.inventory.ore} · Wood {player.inventory.wood} · Ingot{' '}
@@ -813,6 +1234,13 @@ export const App = () => {
             </p>
             <section className="onboarding" aria-labelledby="getting-started-title">
               <h2 id="getting-started-title">Getting started</h2>
+              {onboardingReservation && (
+                <p className="onboarding-reservation">
+                  {onboardingReservation.securedTick === null
+                    ? `Starter reservation is temporary until your smelter is complete. Active commands extend it; current expiry is world tick ${onboardingReservation.expiresTick}.`
+                    : `Starter reservation secured at world tick ${onboardingReservation.securedTick}.`}
+                </p>
+              )}
               {nextOnboardingStep && (
                 <p className="onboarding-next">Next: {nextOnboardingStep.text}</p>
               )}
@@ -887,6 +1315,257 @@ export const App = () => {
                 : 'No active raider threats'}
             </p>
             <h2>Cooperation</h2>
+            {frontierBeacon && personalSettlement && (
+              <section className="global-objective" aria-labelledby="frontier-beacon-title">
+                <h3 id="frontier-beacon-title">{frontierBeaconDefinition.displayName}</h3>
+                <p>{frontierBeaconDefinition.description}</p>
+                <p>
+                  Shared progress: {frontierBeacon.totalContributed}/
+                  {frontierBeaconDefinition.targetAmount} tools. Your contribution:{' '}
+                  {frontierBeacon.contributionsByPlayer[playerId] ?? 0}.
+                </p>
+                {frontierBeacon.completedTick === null ? (
+                  <button
+                    disabled={
+                      player.inventory.tool < 1 ||
+                      frontierBeacon.totalContributed >= frontierBeaconDefinition.targetAmount
+                    }
+                    onClick={() =>
+                      send(
+                        {
+                          type: 'contributeToObjective',
+                          objectiveId: 'frontier-beacon',
+                          settlementId: personalSettlement.id,
+                          amount: 1,
+                        },
+                        'Contributed one tool to the Frontier Beacon.',
+                      )
+                    }
+                  >
+                    Contribute 1 tool
+                  </button>
+                ) : (
+                  <>
+                    <p>Completed at tick {frontierBeacon.completedTick}.</p>
+                    <button
+                      disabled={
+                        !frontierBeacon.contributionsByPlayer[playerId] ||
+                        Boolean(frontierBeacon.rewardClaims[playerId])
+                      }
+                      onClick={() =>
+                        send(
+                          { type: 'claimObjectiveReward', objectiveId: 'frontier-beacon' },
+                          'Claimed the Frontier Beacon reward.',
+                        )
+                      }
+                    >
+                      {frontierBeacon.rewardClaims[playerId]
+                        ? 'Reward claimed'
+                        : 'Claim reward: 2 ingots'}
+                    </button>
+                  </>
+                )}
+              </section>
+            )}
+            <section className="identity-panel" aria-labelledby="identity-title">
+              <h3 id="identity-title">Names</h3>
+              <p>
+                Playing as {state.social.playerNames[playerId] ?? playerId}. Names are normalized,
+                unique, length-limited, and checked by server moderation rules.
+              </p>
+              <label htmlFor="player-name">Player display name</label>
+              <input
+                id="player-name"
+                value={playerNameDraft}
+                maxLength={24}
+                onChange={(event) => setPlayerNameDraft(event.target.value)}
+                placeholder={state.social.playerNames[playerId] ?? 'Settler'}
+              />
+              <button
+                disabled={!playerNameDraft.trim()}
+                onClick={() => {
+                  send(
+                    { type: 'setPlayerName', name: playerNameDraft },
+                    'Updated your player name.',
+                  );
+                  setPlayerNameDraft('');
+                }}
+              >
+                Update player name
+              </button>
+              <details className="account-deletion">
+                <summary>Delete account</summary>
+                <p>
+                  This permanently removes your private player state, buildings, scouts, land, and
+                  memberships. Moderation and transaction ledgers retain server-side integrity
+                  records with your display name removed. This player identity cannot be reused.
+                </p>
+                {ownedSettlements.length > 0 && (
+                  <p>Transfer ownership of every settlement before deleting this account.</p>
+                )}
+                <label htmlFor="account-deletion-confirmation">Type DELETE to confirm</label>
+                <input
+                  id="account-deletion-confirmation"
+                  value={accountDeletionConfirmation}
+                  maxLength={16}
+                  autoComplete="off"
+                  onChange={(event) => setAccountDeletionConfirmation(event.target.value)}
+                />
+                <button
+                  className="danger-button"
+                  disabled={ownedSettlements.length > 0 || accountDeletionConfirmation !== 'DELETE'}
+                  onClick={() =>
+                    send(
+                      { type: 'deleteAccount', confirmation: accountDeletionConfirmation },
+                      undefined,
+                      () => {
+                        sessionStorage.removeItem('kings-dev-player-id');
+                        window.location.reload();
+                      },
+                    )
+                  }
+                >
+                  Permanently delete account
+                </button>
+              </details>
+            </section>
+            <section className="chat-panel" aria-labelledby="chat-title">
+              <h3 id="chat-title">Cooperation chat</h3>
+              <label htmlFor="chat-channel">Channel</label>
+              <select
+                id="chat-channel"
+                value={chatSettlementId}
+                onChange={(event) => setChatSettlementId(event.target.value)}
+              >
+                <option value="global">Global</option>
+                {settlements
+                  .filter((settlement) => settlement.members[playerId])
+                  .map((settlement) => (
+                    <option key={settlement.id} value={settlement.id}>
+                      {state.social.settlementNames[settlement.id] ?? settlement.id}
+                    </option>
+                  ))}
+              </select>
+              <label htmlFor="chat-message">Message</label>
+              <textarea
+                id="chat-message"
+                value={chatText}
+                maxLength={280}
+                onChange={(event) => setChatText(event.target.value)}
+                placeholder="Coordinate with other settlements"
+              />
+              <button
+                disabled={!chatText.trim()}
+                onClick={() => {
+                  send(
+                    chatSettlementId === 'global'
+                      ? { type: 'sendChatMessage', channel: 'global', text: chatText }
+                      : {
+                          type: 'sendChatMessage',
+                          channel: 'settlement',
+                          settlementId: chatSettlementId,
+                          text: chatText,
+                        },
+                    'Message sent.',
+                  );
+                  setChatText('');
+                }}
+              >
+                Send message
+              </button>
+              <ul className="chat-messages" aria-live="polite">
+                {chatMessages.slice(-30).map((message) => (
+                  <li key={message.id}>
+                    <strong>{message.senderName}</strong> [{message.channel}] {message.text}
+                    {message.senderId !== playerId && (
+                      <span className="chat-controls">
+                        <button
+                          onClick={() =>
+                            send({
+                              type: 'setPlayerBlocked',
+                              targetPlayerId: message.senderId,
+                              blocked: true,
+                            })
+                          }
+                        >
+                          Block
+                        </button>
+                        <button
+                          onClick={() =>
+                            send(
+                              {
+                                type: 'reportChatMessage',
+                                messageId: message.id,
+                                reason: 'Inappropriate or abusive message',
+                              },
+                              'Message reported for moderator review.',
+                            )
+                          }
+                        >
+                          Report
+                        </button>
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              {blockedPlayerIds.length > 0 && (
+                <p>
+                  Blocked:{' '}
+                  {blockedPlayerIds.map((blockedId) => (
+                    <button
+                      key={blockedId}
+                      onClick={() =>
+                        send({
+                          type: 'setPlayerBlocked',
+                          targetPlayerId: blockedId,
+                          blocked: false,
+                        })
+                      }
+                    >
+                      Unblock {state.social.playerNames[blockedId] ?? blockedId}
+                    </button>
+                  ))}
+                </p>
+              )}
+            </section>
+            <section className="player-directory" aria-labelledby="directory-title">
+              <h3 id="directory-title">World directory</h3>
+              <p>Search public player and settlement identifiers without revealing map state.</p>
+              <label htmlFor="directory-query">Player or settlement</label>
+              <input
+                id="directory-query"
+                value={directoryQuery}
+                maxLength={32}
+                onChange={(event) => setDirectoryQuery(event.target.value)}
+                placeholder="Search the world"
+              />
+              <button onClick={() => requestDirectory()}>Search directory</button>
+              {directory && (
+                <ul className="directory-results">
+                  {directory.entries.map((entry) =>
+                    entry.type === 'player' ? (
+                      <li key={`player:${entry.playerId}`}>
+                        Player {entry.displayName} ({entry.playerId}){' '}
+                        <button onClick={() => setRecipientId(entry.playerId)}>
+                          Send resources
+                        </button>{' '}
+                        <button onClick={() => setInviteeId(entry.playerId)}>Invite</button>
+                      </li>
+                    ) : (
+                      <li key={`settlement:${entry.settlementId}`}>
+                        {entry.displayName} ({entry.settlementId}) — owner {entry.ownerId},{' '}
+                        {entry.memberCount} member
+                        {entry.memberCount === 1 ? '' : 's'}
+                      </li>
+                    ),
+                  )}
+                </ul>
+              )}
+              {directory?.nextCursor && (
+                <button onClick={() => requestDirectory(directory.nextCursor)}>More results</button>
+              )}
+            </section>
             <label htmlFor="recipient-id">Recipient player ID</label>
             <input
               id="recipient-id"
@@ -948,9 +1627,12 @@ export const App = () => {
               {settlements.map((settlement) => {
                 const role = settlement.members[playerId];
                 const invited = settlement.invitations[playerId];
+                const projects = sharedProjects.filter(
+                  (project) => project.settlementId === settlement.id,
+                );
                 return (
                   <section className="settlement" key={settlement.id}>
-                    <strong>{settlement.id}</strong>
+                    <strong>{state.social.settlementNames[settlement.id] ?? settlement.id}</strong>
                     {invited && !role && (
                       <button
                         onClick={() =>
@@ -963,6 +1645,38 @@ export const App = () => {
                     {role && (
                       <>
                         <span>Your role: {role}</span>
+                        {role === 'owner' && (
+                          <>
+                            <label htmlFor={`settlement-name-${settlement.id}`}>
+                              Settlement name
+                            </label>
+                            <input
+                              id={`settlement-name-${settlement.id}`}
+                              value={settlementNameDraft}
+                              maxLength={32}
+                              onChange={(event) => setSettlementNameDraft(event.target.value)}
+                              placeholder={
+                                state.social.settlementNames[settlement.id] ?? settlement.id
+                              }
+                            />
+                            <button
+                              disabled={!settlementNameDraft.trim()}
+                              onClick={() => {
+                                send(
+                                  {
+                                    type: 'setSettlementName',
+                                    settlementId: settlement.id,
+                                    name: settlementNameDraft,
+                                  },
+                                  'Updated the settlement name.',
+                                );
+                                setSettlementNameDraft('');
+                              }}
+                            >
+                              Update settlement name
+                            </button>
+                          </>
+                        )}
                         {role !== 'owner' && (
                           <button
                             onClick={() =>
@@ -975,7 +1689,7 @@ export const App = () => {
                         <ul className="member-list">
                           {Object.entries(settlement.members).map(([memberId, memberRole]) => (
                             <li key={memberId}>
-                              {memberId}: {memberRole}
+                              {state.social.playerNames[memberId] ?? memberId}: {memberRole}
                               {role === 'owner' && memberId !== playerId && (
                                 <span className="role-controls">
                                   <button
@@ -1041,6 +1755,77 @@ export const App = () => {
                             </li>
                           ))}
                         </ul>
+                        {(role === 'owner' || role === 'builder') && (
+                          <button
+                            disabled={!selectedTile}
+                            onClick={() =>
+                              selectedTile &&
+                              send(
+                                {
+                                  type: 'createSharedConstructionProject',
+                                  settlementId: settlement.id,
+                                  buildingKind: 'storage',
+                                  ...selectedTile,
+                                },
+                                'Created a shared storage construction project.',
+                              )
+                            }
+                          >
+                            Start shared storage at selected tile
+                          </button>
+                        )}
+                        {projects.length > 0 && (
+                          <ul className="project-list">
+                            {projects.map((project) => {
+                              const item = (['wood', 'ore', 'ingot', 'tool'] as const).find(
+                                (candidate) =>
+                                  project.contributed[candidate] < project.required[candidate],
+                              );
+                              const remaining = item
+                                ? project.required[item] - project.contributed[item]
+                                : 0;
+                              return (
+                                <li key={project.id}>
+                                  {project.buildingKind} at {project.x}, {project.y}:{' '}
+                                  {project.completedTick === null
+                                    ? `${project.contributed.wood}/${project.required.wood} wood funded`
+                                    : `completed at tick ${project.completedTick}`}
+                                  {project.completedTick === null && item && (
+                                    <button
+                                      disabled={player.inventory[item] < 1 || remaining < 1}
+                                      onClick={() =>
+                                        send(
+                                          {
+                                            type: 'contributeToSharedConstructionProject',
+                                            projectId: project.id,
+                                            item,
+                                            amount: 1,
+                                          },
+                                          `Contributed one ${item} to the shared project.`,
+                                        )
+                                      }
+                                    >
+                                      Contribute 1 {item}
+                                    </button>
+                                  )}
+                                  {project.contributionHistory.length > 0 && (
+                                    <small>
+                                      {' '}
+                                      Recent:{' '}
+                                      {project.contributionHistory
+                                        .slice(-3)
+                                        .map(
+                                          (contribution) =>
+                                            `${contribution.playerId} +${contribution.amount} ${contribution.item}`,
+                                        )
+                                        .join(', ')}
+                                    </small>
+                                  )}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        )}
                       </>
                     )}
                   </section>
@@ -1169,6 +1954,20 @@ export const App = () => {
             </section>
             <h2>Progression</h2>
             <p>
+              <strong>{progressionEra}</strong>
+            </p>
+            <ol className="progression-milestones">
+              <li className="complete">Founding: establish production and shelter.</li>
+              <li className={player.research.unlocked.metallurgy ? 'complete' : undefined}>
+                Industry: research Metallurgy to unlock workshops and watchtowers.
+              </li>
+              <li
+                className={player.research.unlocked['territorial-charter'] ? 'complete' : undefined}
+              >
+                Expansion: research the Territorial Charter to claim explored sectors.
+              </li>
+            </ol>
+            <p>
               Research: {player.research.activeTechnology ?? 'idle'} (
               {player.research.ticksRemaining} ticks)
             </p>
@@ -1202,6 +2001,59 @@ export const App = () => {
             >
               Claim frontier sector
             </button>
+            <section className="strategic-map" aria-labelledby="strategic-map-title">
+              <h2 id="strategic-map-title">Strategic world map</h2>
+              <p>
+                Aggregated explored chunks only. Entities hidden by fog are never included in these
+                summaries.
+              </p>
+              <button disabled={worldMapLoading} onClick={() => requestWorldMap()}>
+                {worldMapLoading && !worldMap ? 'Loading map…' : 'Refresh strategic map'}
+              </button>
+              {worldMap && (
+                <>
+                  <p>
+                    Showing {worldMap.chunks.length} of {worldMap.totalExploredChunks} explored
+                    chunks.
+                  </p>
+                  <ul className="strategic-map-list">
+                    {worldMap.chunks.map((chunk) => (
+                      <li key={`${chunk.x}:${chunk.y}`}>
+                        <strong>
+                          {chunk.x}:{chunk.y} {chunk.currentlyVisible ? '(visible)' : '(explored)'}
+                        </strong>
+                        <span>
+                          Resources: {chunk.terrain.ore} ore tiles, {chunk.terrain.wood} timber
+                          tiles
+                        </span>
+                        <span>
+                          Own buildings: {chunk.ownBuildingCount}
+                          {chunk.currentlyVisible
+                            ? ` · foreign buildings: ${chunk.visibleForeignBuildingCount} · threats: ${chunk.visibleThreatCount}`
+                            : ''}
+                        </span>
+                        {chunk.claimedSectors.length > 0 && (
+                          <span>
+                            Claims:{' '}
+                            {chunk.claimedSectors
+                              .map(({ ownerId, count }) => `${ownerId} (${count})`)
+                              .join(', ')}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                  {worldMap.nextCursor && (
+                    <button
+                      disabled={worldMapLoading}
+                      onClick={() => requestWorldMap(worldMap.nextCursor)}
+                    >
+                      {worldMapLoading ? 'Loading…' : 'Load more explored chunks'}
+                    </button>
+                  )}
+                </>
+              )}
+            </section>
             <h2>Buildings</h2>
             {manageableBuildings.map((building) => {
               const role = roleForBuilding(building);

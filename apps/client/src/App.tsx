@@ -20,7 +20,7 @@ import {
   type WorldMapChunkSummary,
 } from '@kings/protocol';
 import { type Building, type SettlementRole } from '@kings/simulation';
-import { WorldCanvas } from './WorldCanvas.js';
+import { initialCameraFocus, WorldCanvas } from './WorldCanvas.js';
 import type {
   OperationsOverlay,
   PickedEntity,
@@ -841,11 +841,7 @@ export const App = () => {
         logisticsLinks={logisticsLinks}
         operationsOverlay={operationsOverlay}
         cameraBindings={preferences.camera}
-        focus={
-          plot
-            ? { x: plot.x + Math.floor(plot.size / 2), y: plot.y + Math.floor(plot.size / 2) }
-            : { x: 0, y: 0 }
-        }
+        focus={initialCameraFocus(Object.values(state?.buildings ?? {}), playerId, plot)}
         selectedTile={selectedTile}
         placementPreview={
           previewCandidate

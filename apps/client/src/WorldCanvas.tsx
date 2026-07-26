@@ -55,6 +55,12 @@ interface Viewport {
   readonly scale: number;
 }
 
+/** Places the center of the focused isometric diamond at the viewport center. */
+export const cameraOrigin = (width: number, height: number) => ({
+  x: width / 2 - TILE_WIDTH / 2,
+  y: height / 2 - TILE_HEIGHT / 2,
+});
+
 export interface VisibleTileBounds {
   readonly minX: number;
   readonly maxX: number;
@@ -72,6 +78,20 @@ interface IsometricEntity {
 export type PickedEntity =
   | { readonly type: 'building'; readonly id: string }
   | { readonly type: 'threat'; readonly id: string };
+
+export const initialCameraFocus = (
+  buildings: readonly Building[],
+  playerId: string,
+  plot: { readonly x: number; readonly y: number; readonly size: number } | undefined,
+) => {
+  const settlementCenter = buildings.find(
+    (building) => building.kind === 'settlement-center' && building.ownerId === playerId,
+  );
+  if (settlementCenter) return { x: settlementCenter.x, y: settlementCenter.y };
+  return plot
+    ? { x: plot.x + Math.floor(plot.size / 2), y: plot.y + Math.floor(plot.size / 2) }
+    : { x: 0, y: 0 };
+};
 
 /** Threats render above buildings, so they win a click on the same tile. */
 export const entityAtTile = (
@@ -109,10 +129,11 @@ export const visibleTileBounds = (
   focus: { x: number; y: number },
   viewport: Viewport,
 ): VisibleTileBounds => {
+  const origin = cameraOrigin(width, height);
   const screenToAbsoluteWorld = (screenX: number, screenY: number) => {
     const local = screenToWorld({
-      x: (screenX - width / 2 - viewport.panX) / viewport.scale,
-      y: (screenY - 80 - viewport.panY) / viewport.scale,
+      x: (screenX - origin.x - viewport.panX) / viewport.scale - TILE_WIDTH / 2,
+      y: (screenY - origin.y - viewport.panY) / viewport.scale - TILE_HEIGHT / 2,
     });
     return { x: focus.x + local.x, y: focus.y + local.y };
   };
@@ -277,7 +298,8 @@ export const WorldCanvas = ({
       Math.abs(tileBounds.minY - tileBounds.center.y),
       Math.abs(tileBounds.maxY - tileBounds.center.y),
     );
-    context.translate(width / 2 + view.panX, 80 + view.panY);
+    const origin = cameraOrigin(width, height);
+    context.translate(origin.x + view.panX, origin.y + view.panY);
     context.scale(view.scale, view.scale);
 
     const diamond = (point: { x: number; y: number }, fill: string, stroke?: string) => {
@@ -585,9 +607,10 @@ export const WorldCanvas = ({
     const tileAtPointer = (event: PointerEvent) => {
       const rectangle = element.getBoundingClientRect();
       const view = viewport.current;
+      const origin = cameraOrigin(rectangle.width, rectangle.height);
       const world = screenToTile({
-        x: (event.clientX - rectangle.left - rectangle.width / 2 - view.panX) / view.scale,
-        y: (event.clientY - rectangle.top - 80 - view.panY) / view.scale,
+        x: (event.clientX - rectangle.left - origin.x - view.panX) / view.scale,
+        y: (event.clientY - rectangle.top - origin.y - view.panY) / view.scale,
       });
       return {
         x: world.x + latestFocus.current.x,

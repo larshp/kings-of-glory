@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  cameraOrigin,
   entityAtTile,
+  initialCameraFocus,
   logisticsStatusColor,
   productionRateLabel,
   visibleByIsometricDepth,
@@ -10,6 +12,31 @@ import {
 } from './WorldCanvas.js';
 
 describe('visibleByIsometricDepth', () => {
+  it('places the focused tile diamond at the viewport center', () => {
+    expect(cameraOrigin(640, 480)).toEqual({ x: 288, y: 224 });
+    expect(
+      visibleTileBounds(640, 480, { x: 4, y: 7 }, { panX: 0, panY: 0, scale: 1 }).center,
+    ).toEqual({ x: 4, y: 7 });
+  });
+
+  it('focuses the initial map on the player settlement center', () => {
+    const buildings = [
+      { id: 'foreign-center', kind: 'settlement-center', ownerId: 'other', x: 30, y: 40 },
+      { id: 'own-center', kind: 'settlement-center', ownerId: 'player', x: 4, y: 7 },
+    ] as never;
+    expect(initialCameraFocus(buildings, 'player', { x: 0, y: 0, size: 16 })).toEqual({
+      x: 4,
+      y: 7,
+    });
+  });
+
+  it('falls back to the plot center until the settlement center is available', () => {
+    expect(initialCameraFocus([], 'player', { x: 8, y: 12, size: 16 })).toEqual({
+      x: 16,
+      y: 20,
+    });
+  });
+
   it('uses distinct logistics overlay colors for flow and actionable blockage', () => {
     expect(logisticsStatusColor('transferred')).toBe('#68d7f5');
     expect(logisticsStatusColor('target-full')).toBe('#f4b860');

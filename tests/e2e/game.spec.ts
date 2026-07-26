@@ -78,7 +78,16 @@ test('loads onboarding accessibly at the supported viewport and input surface', 
   await page.goto('/');
   await expect(page.locator('.status')).toHaveText('Connected');
   await expect(page.getByRole('heading', { name: 'Getting started' })).toBeVisible();
-  await expect(page.locator('canvas')).toHaveAttribute('aria-label', /isometric world map/i);
+  const canvas = page.locator('canvas');
+  await expect(canvas).toHaveAttribute('aria-label', /isometric world map/i);
+  const bounds = await canvas.boundingBox();
+  if (!bounds) throw new Error('World canvas has no visible bounds');
+  await canvas.dispatchEvent('pointerup', {
+    clientX: bounds.x + bounds.width / 2,
+    clientY: bounds.y + bounds.height / 2,
+    pointerId: 1,
+  });
+  await expect(page.getByText('Selected building: settlement-center')).toBeVisible();
   await expect(page.getByText(/Next: Gather ore and wood/)).toBeVisible();
   await page.keyboard.press('Tab');
   await expect(page.locator(':focus')).toBeVisible();

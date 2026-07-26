@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { performance } from 'node:perf_hooks';
 import { verifyAndRecordRestoredDatabase } from '@kings/server-runtime';
 import {
   assertSafeRestoreTarget,
@@ -17,14 +18,37 @@ interface BackupManifest {
   readonly checkpoint: { readonly id: string; readonly tick: number; readonly stateHash: string };
 }
 
+export const parseBackupManifest = (raw: string): BackupManifest => {
+  const value: unknown = JSON.parse(raw);
+  if (!value || typeof value !== 'object') throw new Error('Backup manifest must be an object');
+  const manifest = value as Partial<BackupManifest>;
+  const checkpoint = manifest.checkpoint;
+  if (
+    typeof manifest.createdAt !== 'string' ||
+    Number.isNaN(Date.parse(manifest.createdAt)) ||
+    typeof manifest.sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(manifest.sha256) ||
+    !checkpoint ||
+    typeof checkpoint.id !== 'string' ||
+    !/^[0-9a-f-]{36}$/.test(checkpoint.id) ||
+    !Number.isSafeInteger(checkpoint.tick) ||
+    checkpoint.tick < 0 ||
+    typeof checkpoint.stateHash !== 'string' ||
+    !/^[0-9a-f]{8}$/.test(checkpoint.stateHash)
+  )
+    throw new Error('Backup manifest has an invalid shape');
+  return manifest as BackupManifest;
+};
+
 export const runRestoreDrill = async (environment: NodeJS.ProcessEnv) => {
+  const startedAt = performance.now();
   const sourceUrl = requireEnvironment(environment, 'DATABASE_URL');
   const targetUrl = requireEnvironment(environment, 'RESTORE_DATABASE_URL');
   const confirmedDatabase = requireEnvironment(environment, 'RESTORE_CONFIRM_DATABASE');
   const operator = requireEnvironment(environment, 'RESTORE_OPERATOR');
   const backupFile = resolve(requireEnvironment(environment, 'BACKUP_FILE'));
   const target = assertSafeRestoreTarget(sourceUrl, targetUrl, confirmedDatabase);
-  const manifest = JSON.parse(await readFile(`${backupFile}.json`, 'utf8')) as BackupManifest;
+  const manifest = parseBackupManifest(await readFile(`${backupFile}.json`, 'utf8'));
   const actualSha256 = await sha256File(backupFile);
   if (actualSha256 !== manifest.sha256)
     throw new Error('Backup SHA-256 does not match its manifest');
@@ -52,6 +76,7 @@ export const runRestoreDrill = async (environment: NodeJS.ProcessEnv) => {
     target,
     backupSha256: actualSha256,
     checkpoint,
+    durationMs: performance.now() - startedAt,
     verified: true,
   } as const;
   await writeFile(`${backupFile}.restore.json`, `${JSON.stringify(report, null, 2)}\n`, 'utf8');

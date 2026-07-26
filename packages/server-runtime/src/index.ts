@@ -256,10 +256,10 @@ export class GlobalWorldHost {
     };
   }
 
-  async restore(): Promise<void> {
+  async restore(options: { migrate?: boolean } = {}): Promise<void> {
     const startedAt = performance.now();
     try {
-      await this.persistence.migrate();
+      if (options.migrate ?? true) await this.persistence.migrate();
       const checkpoint = await this.persistence.loadLatestCheckpoint();
       if (!checkpoint) return;
       this.#world = deserializeWorld(checkpoint.state);
@@ -844,6 +844,7 @@ export class GlobalWorldHost {
     );
     const visibleState = {
       schemaVersion: source.schemaVersion,
+      contentVersion: source.contentVersion,
       peaceful: source.peaceful,
       tick: source.tick,
       players: { [playerId]: player },

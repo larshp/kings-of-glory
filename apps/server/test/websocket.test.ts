@@ -109,6 +109,16 @@ describe('WebSocket game boundary', () => {
     await game?.shutdown();
   });
 
+  it('allows only read methods on operational endpoints', async () => {
+    game = await createGameServer(environment, new MemoryWorldPersistence());
+    const port = await game.listen(0);
+    for (const path of ['/', '/health', '/ready', '/metrics']) {
+      const response = await fetch(`http://127.0.0.1:${port}${path}`, { method: 'POST' });
+      expect(response.status).toBe(405);
+      expect(response.headers.get('allow')).toBe('GET, HEAD');
+    }
+  });
+
   it('handshakes, acknowledges authoritative commands, and rejects duplicate retries', async () => {
     game = await createGameServer(environment, new MemoryWorldPersistence());
     const port = await game.listen(0);

@@ -116,7 +116,7 @@ export const runAdministrativeCli = async (
   );
   const host = new GlobalWorldHost(1, persistence);
   try {
-    await host.restore();
+    await host.restore({ migrate: false });
     if (action.type === 'inspect') return host.inspectAdministrative(action.request);
     if (action.type === 'inspect-audits') return host.administrativeAuditEvents(action.limit);
     if (environment.ADMIN_CONFIRM_OFFLINE !== 'YES')

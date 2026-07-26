@@ -19,6 +19,7 @@ import {
   terrainAt,
 } from '@kings/simulation';
 import { parseEnvironment } from '../src/env.js';
+import { PROTOCOL_VERSION } from '@kings/protocol';
 
 const connection = (): Connection & { messages: string[] } => ({
   messages: [],
@@ -885,7 +886,7 @@ describe('durable world recovery', () => {
       state: { players: Record<string, unknown> };
     };
     expect(welcome.type).toBe('welcome');
-    expect(welcome.version).toBe(2);
+    expect(welcome.version).toBe(PROTOCOL_VERSION);
     expect(bootstrap.type).toBe('worldBootstrap');
     expect(bootstrap.stateVersion).toBe(0);
     expect(Object.keys(bootstrap.state.players)).toEqual(['player-a']);
@@ -986,5 +987,29 @@ describe('runtime environment', () => {
         SESSION_SECRET: 'a-production-strength-session-secret-value',
       }),
     ).toThrow('TRUST_PROXY');
+  });
+
+  it('runs migrations on startup only outside production', () => {
+    expect(parseEnvironment({}).migrateOnStartup).toBe(true);
+    expect(
+      parseEnvironment({
+        NODE_ENV: 'production',
+        TRUST_PROXY: 'true',
+        ALLOWED_ORIGINS: 'https://game.example',
+        SESSION_SECRET: 'a-production-strength-session-secret-value',
+      }).migrateOnStartup,
+    ).toBe(false);
+    expect(() =>
+      parseEnvironment({
+        NODE_ENV: 'production',
+        TRUST_PROXY: 'true',
+        ALLOWED_ORIGINS: 'https://game.example',
+        SESSION_SECRET: 'a-production-strength-session-secret-value',
+        MIGRATE_ON_STARTUP: 'true',
+      }),
+    ).toThrow('run the migration job separately');
+    expect(() => parseEnvironment({ MIGRATE_ON_STARTUP: 'sometimes' })).toThrow(
+      'MIGRATE_ON_STARTUP must be true or false',
+    );
   });
 });

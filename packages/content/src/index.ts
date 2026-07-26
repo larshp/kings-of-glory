@@ -1,4 +1,6 @@
 /** Content schemas deliberately use plain data so the same definitions work in builds and on the server. */
+export const CONTENT_VERSION = 1 as const;
+
 export interface ItemDefinition {
   readonly id: string;
   readonly displayName: string;

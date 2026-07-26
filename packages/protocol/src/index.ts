@@ -54,7 +54,7 @@ export interface ClientWorldState extends Omit<
 export type ClientWorldDelta = Partial<ClientWorldState>;
 
 /** Bump whenever a client can no longer safely interpret server state messages. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 export const MAX_MESSAGE_BYTES = 64 * 1024;
 export const MAX_INTEREST_CHUNKS = 64;
 
@@ -270,6 +270,8 @@ export const parseClientMessage = (raw: string): ClientMessage | undefined => {
     if (
       message.type === 'hello' &&
       typeof message.version === 'number' &&
+      Number.isSafeInteger(message.version) &&
+      message.version >= 0 &&
       isIdentifier(message.playerId)
     )
       return message as ClientMessage;
@@ -307,8 +309,7 @@ export const parseClientMessage = (raw: string): ClientMessage | undefined => {
       message.version >= 0
     )
       return message as ClientMessage;
-    if (message.type === 'ping' && typeof message.nonce === 'string')
-      return message as ClientMessage;
+    if (message.type === 'ping' && isIdentifier(message.nonce)) return message as ClientMessage;
     return undefined;
   } catch {
     return undefined;

@@ -45,7 +45,7 @@ export const createGameServer = async (
     undefined,
     environment.peaceful,
   );
-  await host.restore();
+  await host.restore({ migrate: environment.migrateOnStartup ?? !environment.production });
   let stopping = false;
   let lastTickDurationMs = 0;
   let tickFailures = 0;
@@ -68,6 +68,12 @@ export const createGameServer = async (
     response.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
     if (environment.production)
       response.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    const requireReadMethod = () => {
+      if (request.method === 'GET' || request.method === 'HEAD') return true;
+      response.writeHead(405, { Allow: 'GET, HEAD' });
+      response.end();
+      return false;
+    };
     if (request.url === '/session') {
       const origin = request.headers.origin;
       const originAllowed =
@@ -117,6 +123,7 @@ export const createGameServer = async (
       return;
     }
     if (request.url === '/' && !environment.production) {
+      if (!requireReadMethod()) return;
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end(
         '<!doctype html><title>Kings of Glory server</title><main style="font-family:system-ui;max-width:42rem;margin:4rem auto"><h1>Kings of Glory server is running</h1><p>The browser client is served by Vite at <a href="http://localhost:5173/">http://localhost:5173/</a>.</p><p>Start both development services with <code>npm run dev</code>.</p></main>',
@@ -124,11 +131,13 @@ export const createGameServer = async (
       return;
     }
     if (request.url === '/health') {
+      if (!requireReadMethod()) return;
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ status: 'ok', processHealthy: true }));
       return;
     }
     if (request.url === '/ready') {
+      if (!requireReadMethod()) return;
       const ready = !stopping;
       response.writeHead(ready ? 200 : 503, { 'content-type': 'application/json' });
       response.end(
@@ -142,6 +151,7 @@ export const createGameServer = async (
       return;
     }
     if (request.url === '/metrics') {
+      if (!requireReadMethod()) return;
       const metrics = host.metrics;
       const activeChunks = new Set(
         Object.values(host.world.buildings).map(

@@ -87,7 +87,9 @@ export const runBotScenario = (
     joinPlayer(state, player);
     const playerState = state.players[player]!;
     // Covers the whole ore -> ingot -> tool chain after constructing the basic settlement.
-    playerState.inventory.wood = 15 + (targetBuildingsPerPlayer - 5) * 2;
+    // Keep a repair reserve after the density fixture funds all construction;
+    // otherwise the target-size load can silently skip its threat-response path.
+    playerState.inventory.wood = 25 + (targetBuildingsPerPlayer - 5) * 2;
     playerState.inventory.ingot = 1;
     // This is a density fixture rather than a starter-settlement scenario: give
     // it enough abstract construction labor to exercise production and combat
@@ -211,7 +213,7 @@ export const runBotScenario = (
             amount: 1,
             direction: 'toBuilding',
           });
-        if (storage && storage.constructionTicks === 0 && state.players[player]!.inventory.wood > 0)
+        if (storage && storage.constructionTicks === 0 && state.players[player]!.inventory.wood > 5)
           issue(player, {
             type: 'transfer',
             buildingId: storage.id,
@@ -268,11 +270,9 @@ export const runBotScenario = (
         if (issue('bot-0', { type: 'claimTerritory', x, y }).result.accepted) break;
       }
     }
-    for (const threat of Object.values(state.threats)) {
-      const target = state.buildings[threat.targetBuildingId];
-      if (target && target.health < target.maxHealth)
-        issue(target.ownerId, { type: 'repair', buildingId: target.id });
-    }
+    for (const target of Object.values(state.buildings))
+      if (target.health < target.maxHealth)
+        requireIssue(target.ownerId, { type: 'repair', buildingId: target.id });
     advanceTick(state);
     if (ticks > 1 && tick === Math.floor(ticks / 2)) {
       state = deserializeWorld(state);

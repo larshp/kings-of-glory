@@ -2100,9 +2100,9 @@ export const App = () => {
                         (amount) => amount > 0,
                       ) && (
                         <span>
-                          Delivery remaining: ore {building.constructionMaterials.ore} Â· wood{' '}
-                          {building.constructionMaterials.wood} Â· ingot{' '}
-                          {building.constructionMaterials.ingot} Â· tool{' '}
+                          Delivery remaining: ore {building.constructionMaterials.ore} · wood{' '}
+                          {building.constructionMaterials.wood} · ingot{' '}
+                          {building.constructionMaterials.ingot} · tool{' '}
                           {building.constructionMaterials.tool}
                         </span>
                       )}

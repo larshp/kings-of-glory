@@ -43,6 +43,14 @@ Compare future measured runs against this command, state hash, entity count, thr
 shape. Heap and RSS values vary with the Node.js runtime and machine; investigate sustained growth or
 material regressions before raising the target entity count or adding per-tick work.
 
+## 2026-07-26 release-scenario check
+
+After adding the explicit content version and making threat response mandatory at target density, a
+three-round local check produced a stable `70bfdb9c` hash at 275.16 ticks/second, with 1,000 entities,
+90.5 MB peak RSS, and 28.1 MB peak heap. The paired load run reported seven accepted repairs, proving
+the dense scenario no longer passes while skipping defense. This is a short regression check, not the
+required multi-hour release soak; the manual release-candidate workflow records that longer evidence.
+
 ## Per-phase infrastructure profile
 
 The dense 1,000-pair logistics fixture profiles each authoritative phase without putting a clock in

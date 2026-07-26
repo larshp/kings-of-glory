@@ -1,0 +1,118 @@
+name: release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      soak_rounds:
+        description: Deterministic soak rounds (increase for the final multi-hour run)
+        required: true
+        default: '25'
+
+permissions:
+  contents: read
+
+jobs:
+  exercise:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: kings_test
+          POSTGRES_PASSWORD: kings_test
+          POSTGRES_DB: kings_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kings_test -d kings_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://kings_runtime:runtime_test@127.0.0.1:5432/kings_release
+      POSTGRES_TEST_URL: postgres://kings_test:kings_test@127.0.0.1:5432/kings_test
+      BACKUP_DIR: ${{ github.workspace }}/release-evidence/backups
+      MIGRATE_ON_STARTUP: 'false'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm audit --prod --audit-level high
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm build
+      - run: pnpm test
+      - name: Exercise the supported browser matrix
+        run: |
+          pnpm exec playwright install --with-deps chromium firefox webkit
+          pnpm test:e2e
+      - name: Provision and verify least-privilege database roles
+        shell: bash
+        env:
+          PGPASSWORD: kings_test
+        run: |
+          psql --host=127.0.0.1 --username=kings_test --dbname=kings_test --set=ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE kings_migrator LOGIN PASSWORD 'migrator_test';
+          CREATE ROLE kings_runtime LOGIN PASSWORD 'runtime_test';
+          CREATE ROLE kings_backup LOGIN PASSWORD 'backup_test';
+          SQL
+          createdb --host=127.0.0.1 --username=kings_test --owner=kings_migrator kings_release
+          DATABASE_URL=postgres://kings_migrator:migrator_test@127.0.0.1:5432/kings_release \
+            npm --prefix apps/server run migrate
+          PGPASSWORD=migrator_test psql --host=127.0.0.1 --username=kings_migrator \
+            --dbname=kings_release --set=ON_ERROR_STOP=1 \
+            --file=ops/postgres/least-privilege.sql
+          psql --host=127.0.0.1 --username=kings_test --dbname=kings_release \
+            --set=ON_ERROR_STOP=1 --file=ops/postgres/verify-least-privilege.sql
+      - name: Exercise process start, readiness, and graceful checkpoint shutdown
+        shell: bash
+        env:
+          PERSISTENCE: postgres
+          PORT: '3101'
+        run: |
+          mkdir -p release-evidence
+          node apps/server/dist/index.js >release-evidence/server.log 2>&1 &
+          server_pid=$!
+          trap 'kill -TERM "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3101/ready >release-evidence/readiness.json; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:3101/health >release-evidence/health.json
+          curl --fail --silent http://127.0.0.1:3101/metrics >release-evidence/metrics.txt
+          kill -TERM "$server_pid"
+          wait "$server_pid"
+          trap - EXIT
+      - name: Exercise backup and isolated restore
+        shell: bash
+        env:
+          DATABASE_URL: postgres://kings_backup:backup_test@127.0.0.1:5432/kings_release
+          RESTORE_DATABASE_URL: postgres://kings_test:kings_test@127.0.0.1:5432/kings_restore
+          RESTORE_CONFIRM_DATABASE: kings_restore
+          RESTORE_OPERATOR: github-actions
+          PGPASSWORD: kings_test
+        run: |
+          npm --prefix apps/server run backup
+          createdb --host=127.0.0.1 --username=kings_test kings_restore
+          export BACKUP_FILE
+          BACKUP_FILE=$(find "$BACKUP_DIR" -name '*.dump' -type f -print -quit)
+          npm --prefix apps/server run restore:drill
+      - name: Run target-load and deterministic soak scenarios
+        shell: bash
+        run: |
+          npm --prefix apps/server run load -- 20 1000 50 | tee release-evidence/load.json
+          npm --prefix apps/server run soak -- 20 1000 50 '${{ inputs.soak_rounds }}' | tee release-evidence/soak.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-evidence-${{ github.sha }}
+          path: release-evidence/
+          if-no-files-found: error
+          retention-days: 90

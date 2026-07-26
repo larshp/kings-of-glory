@@ -6,6 +6,8 @@ import {
   displayPath,
   postgresToolEnvironment,
   prepareBackupPath,
+  pruneExpiredBackups,
+  replicateBackupArtifacts,
   requireEnvironment,
   runPostgresTool,
   sha256File,
@@ -32,15 +34,28 @@ export const createDatabaseBackup = async (environment: NodeJS.ProcessEnv) => {
     checkpoint,
   } as const;
   await writeFile(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-  return { backupFile, manifestFile, manifest };
+  let offsite: Awaited<ReturnType<typeof replicateBackupArtifacts>> | undefined;
+  let prunedBackups: string[] = [];
+  if (environment.BACKUP_OFFSITE_DIR) {
+    offsite = await replicateBackupArtifacts(
+      backupFile,
+      manifestFile,
+      environment.BACKUP_OFFSITE_DIR,
+    );
+    if (environment.BACKUP_RETENTION_ENABLED === 'true')
+      prunedBackups = await pruneExpiredBackups(environment.BACKUP_OFFSITE_DIR);
+  } else if (environment.BACKUP_RETENTION_ENABLED === 'true') {
+    throw new Error('BACKUP_OFFSITE_DIR is required when BACKUP_RETENTION_ENABLED=true');
+  }
+  return { backupFile, manifestFile, manifest, offsite, prunedBackups };
 };
 
 const invokedPath = process.argv[1];
 if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href)
   createDatabaseBackup(process.env)
-    .then(({ backupFile, manifest }) => {
+    .then(({ backupFile, manifest, offsite, prunedBackups }) => {
       process.stdout.write(
-        `${JSON.stringify({ event: 'backup.completed', backupFile, checkpoint: manifest.checkpoint, sha256: manifest.sha256 })}\n`,
+        `${JSON.stringify({ event: 'backup.completed', backupFile, offsiteBackupFile: offsite?.offsiteBackupFile, checkpoint: manifest.checkpoint, sha256: manifest.sha256, prunedBackups })}\n`,
       );
     })
     .catch((error: unknown) => {

@@ -49,6 +49,6 @@ describe('checkpoint inspection', () => {
       state: legacy,
     });
     expect(inspection.errors).toEqual([]);
-    expect(inspection.world?.schemaVersion).toBe(26);
+    expect(inspection.world?.schemaVersion).toBe(27);
   });
 });

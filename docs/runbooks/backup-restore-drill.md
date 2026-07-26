@@ -22,8 +22,11 @@ Set `PG_DUMP` only when `pg_dump` is not on `PATH`. Schedule this command at lea
 frequently than the accepted recovery-point objective requires. Retain daily backups for 14 days,
 weekly backups for 8 weeks, and monthly backups for 12 months on encrypted off-host storage. Alert on
 a missing manifest, non-zero exit, zero-byte dump, or backup age beyond the schedule. Test retention
-deletion against a non-production directory before enabling it; this repository deliberately does not
-delete operator files.
+deletion against a non-production directory before enabling it. Set `BACKUP_OFFSITE_DIR` to an
+encrypted off-host mount and `BACKUP_RETENTION_ENABLED=true` only after that test; the command copies
+the dump and manifest before pruning only validated `kings-of-glory-*.dump` pairs. The checked-in
+systemd service and timer under `ops/systemd/` provide the daily schedule and require the off-host
+mount to be present.
 
 ## Isolated restore drill
 
@@ -46,6 +49,11 @@ Set `PG_RESTORE` only when `pg_restore` is not on `PATH`. A successful command i
 sufficient for the release drill: start a server against the restored database, verify `/health`,
 `/ready`, `/metrics`, a WebSocket handshake, representative player inventories, and the reported
 checkpoint hash. Record elapsed recovery time and confirm it satisfies the five-minute RTO.
+
+The quarterly `kings-restore-drill.timer` selects the newest complete dump/manifest pair from
+`BACKUP_OFFSITE_DIR` and runs the same verification using credentials from
+`/etc/kings-of-glory/restore-drill.env`. Its target is a permanently isolated disposable database;
+monitor the timer result and the age of the newest `.restore.json` report.
 
 ## Evidence and failure handling
 

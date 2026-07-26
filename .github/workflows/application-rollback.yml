@@ -1,0 +1,148 @@
+name: application rollback rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      previous_ref:
+        description: Previously deployed commit or tag to exercise against candidate-created data
+        required: true
+        default: main~1
+
+permissions:
+  contents: read
+
+jobs:
+  rehearse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: kings_test
+          POSTGRES_PASSWORD: kings_test
+          POSTGRES_DB: kings_rollback
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kings_test -d kings_rollback"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://kings_test:kings_test@127.0.0.1:5432/kings_rollback
+      PERSISTENCE: postgres
+      MIGRATE_ON_STARTUP: 'false'
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v6
+      - name: Check out previous application
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.previous_ref }}
+          path: previous
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          cache: pnpm
+      - name: Build candidate and previous application
+        shell: bash
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm --dir previous install --frozen-lockfile
+          pnpm --dir previous build
+      - name: Seed forward-migrated candidate data
+        shell: bash
+        run: |
+          mkdir -p rollback-evidence
+          DATABASE_URL="$DATABASE_URL" npm --prefix apps/server run migrate
+          PORT=3201 node apps/server/dist/index.js >rollback-evidence/candidate-seed.log 2>&1 &
+          candidate_pid=$!
+          trap 'kill -TERM "$candidate_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3201/ready \
+              >rollback-evidence/candidate-seed-ready.json; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:3201/ready >/dev/null
+          kill -TERM "$candidate_pid"
+          wait "$candidate_pid"
+          trap - EXIT
+      - name: Exercise previous application without data rollback
+        shell: bash
+        env:
+          PREVIOUS_REF: ${{ inputs.previous_ref }}
+        run: |
+          set +e
+          PORT=3202 node previous/apps/server/dist/index.js >rollback-evidence/previous.log 2>&1 &
+          previous_pid=$!
+          previous_ready=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3202/ready \
+              >rollback-evidence/previous-ready.json; then
+              previous_ready=true
+              break
+            fi
+            if ! kill -0 "$previous_pid" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          if [ "$previous_ready" = true ]; then
+            kill -TERM "$previous_pid"
+            wait "$previous_pid"
+            previous_exit=$?
+            outcome=compatible-start
+            rollback_valid=true
+          elif kill -0 "$previous_pid" 2>/dev/null; then
+            kill -TERM "$previous_pid"
+            wait "$previous_pid"
+            previous_exit=$?
+            outcome=failed-to-become-ready
+            rollback_valid=false
+          else
+            wait "$previous_pid"
+            previous_exit=$?
+            outcome=refused-forward-data
+            if grep --extended-regexp --quiet \
+              'Database schema version .* newer|Unsupported world (snapshot schema|content) version' \
+              rollback-evidence/previous.log; then
+              rollback_valid=true
+            else
+              rollback_valid=false
+            fi
+          fi
+          set -e
+          printf '{"previousRef":"%s","outcome":"%s","exitCode":%s,"valid":%s}\n' \
+            "$PREVIOUS_REF" "$outcome" "$previous_exit" "$rollback_valid" \
+            >rollback-evidence/previous-outcome.json
+          [ "$rollback_valid" = true ]
+      - name: Prove candidate recovery after rollback attempt
+        if: always()
+        shell: bash
+        run: |
+          PORT=3203 node apps/server/dist/index.js >rollback-evidence/candidate-recovery.log 2>&1 &
+          candidate_pid=$!
+          trap 'kill -TERM "$candidate_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3203/ready \
+              >rollback-evidence/candidate-recovery-ready.json; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:3203/ready >/dev/null
+          curl --fail --silent http://127.0.0.1:3203/health \
+            >rollback-evidence/candidate-recovery-health.json
+          kill -TERM "$candidate_pid"
+          wait "$candidate_pid"
+          trap - EXIT
+      - name: Upload rollback evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: application-rollback-${{ github.sha }}
+          path: rollback-evidence/
+          if-no-files-found: error
+          retention-days: 90

@@ -587,7 +587,7 @@ describe('world simulation', () => {
     for (const player of Object.values(legacy.players)) delete player.inventory.tool;
     for (const building of Object.values(legacy.buildings)) delete building.inventory.tool;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.schemaVersion).toBe(27);
     expect(migrated.players['player-a']?.inventory.tool).toBe(0);
     expect(migrated.buildings['center-player-a']?.inventory.tool).toBe(0);
   });
@@ -597,7 +597,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 14;
     delete legacy.randomState;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.schemaVersion).toBe(27);
     expect(migrated.randomState).toBeGreaterThan(0);
     expect(inspectWorld(migrated)).toEqual([]);
   });
@@ -648,7 +648,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 16;
     for (const building of Object.values(legacy.buildings)) delete building.recipeId;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.schemaVersion).toBe(27);
     expect(migrated.buildings['center-player-a']?.recipeId).toBeNull();
     expect(
       Object.values(migrated.buildings).find((building) => building.kind === 'workshop')?.recipeId,
@@ -686,7 +686,7 @@ describe('world simulation', () => {
       priority: 1,
     };
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.schemaVersion).toBe(27);
     expect(migrated.buildings['center-player-a']?.productionState).toBe('idle');
     expect(migrated.logisticsLinks.legacy).toMatchObject({
       throughputPerTick: 1,
@@ -704,7 +704,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 18;
     for (const building of Object.values(legacy.buildings)) delete building.constructionMaterials;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.schemaVersion).toBe(27);
     expect(migrated.buildings['center-player-a']?.constructionMaterials).toEqual({
       ore: 0,
       wood: 0,
@@ -724,7 +724,7 @@ describe('world simulation', () => {
     legacy.minedTiles = { '12:0': 3 };
     const node = nearestOreTile(legacy.seed, 12, 0, 16)!;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.schemaVersion).toBe(27);
     expect(migrated.minedTiles[`${node.x}:${node.y}`]).toBe(3);
   });
 
@@ -734,7 +734,7 @@ describe('world simulation', () => {
     void _objectives;
     void _activity;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 20 });
-    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.schemaVersion).toBe(27);
     expect(migrated.cooperativeObjectives['frontier-beacon']).toMatchObject({
       totalContributed: 0,
       completedTick: null,
@@ -752,7 +752,7 @@ describe('world simulation', () => {
     void _activity;
     void _projects;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 21 });
-    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.schemaVersion).toBe(27);
     expect(migrated.playerActivity['player-a']).toEqual({
       lastActiveTick: 41,
       raidEligibleTick: 341,
@@ -766,7 +766,7 @@ describe('world simulation', () => {
     const { sharedConstructionProjects: _projects, ...legacy } = current;
     void _projects;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 22 });
-    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.schemaVersion).toBe(27);
     expect(migrated.sharedConstructionProjects).toEqual({});
     expect(migrated.playerActivity).toEqual(current.playerActivity);
     expect(inspectWorld(migrated)).toEqual([]);
@@ -779,7 +779,7 @@ describe('world simulation', () => {
     const { social: _social, ...legacy } = current;
     void _social;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 23 });
-    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.schemaVersion).toBe(27);
     expect(migrated.social).toMatchObject({
       playerNames: { 'player-a': 'Settler 1', 'player-b': 'Settler 2' },
       settlementNames: {
@@ -804,7 +804,7 @@ describe('world simulation', () => {
     void _deletedPlayers;
     void _onboardingReservations;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 24 });
-    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.schemaVersion).toBe(27);
     expect(migrated.deletedPlayers).toEqual({});
     expect(inspectWorld(migrated)).toEqual([]);
   });
@@ -815,13 +815,28 @@ describe('world simulation', () => {
     const { onboardingReservations: _onboardingReservations, ...legacy } = current;
     void _onboardingReservations;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 25 });
-    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.schemaVersion).toBe(27);
     expect(migrated.onboardingReservations['player-a']).toEqual({
       createdTick: 0,
       expiresTick: 36_000,
       securedTick: null,
     });
     expect(inspectWorld(migrated)).toEqual([]);
+  });
+
+  it('migrates version 26 worlds onto the explicit content version', () => {
+    const current = createWorld(43);
+    const { contentVersion: _contentVersion, ...legacy } = current;
+    void _contentVersion;
+    const migrated = deserializeWorld({ ...legacy, schemaVersion: 26 });
+    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.contentVersion).toBe(1);
+  });
+
+  it('rejects a current-schema snapshot written for incompatible content', () => {
+    expect(() => deserializeWorld({ ...createWorld(47), contentVersion: 2 })).toThrow(
+      'Unsupported world content version: 2; expected 1',
+    );
   });
 
   it('adds settlement capacity and grows aggregated population', () => {
@@ -2954,7 +2969,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 7;
     delete legacy.settlements;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(26);
+    expect(migrated.schemaVersion).toBe(27);
     expect(migrated.settlements['settlement-player-a']?.members['player-a']).toBe('owner');
   });
 
@@ -3064,10 +3079,11 @@ describe('world simulation', () => {
   });
 
   it('supports a target-density bot workload without changing its deterministic result', () => {
-    const first = runBotScenario(2, 30, 50);
-    const second = runBotScenario(2, 30, 50);
+    const first = runBotScenario(20, 500, 50);
+    const second = runBotScenario(20, 500, 50);
     expect(first.hash).toBe(second.hash);
-    expect(Object.keys(first.state.buildings)).toHaveLength(100);
+    expect(Object.keys(first.state.buildings)).toHaveLength(1_000);
+    expect(first.botActions.defend).toBeGreaterThan(0);
     expect(first.invariantErrors).toEqual([]);
   });
 

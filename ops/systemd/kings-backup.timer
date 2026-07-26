@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Kings of Glory off-site backup
+
+[Timer]
+OnCalendar=*-*-* 02:15:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+Unit=kings-backup.service
+
+[Install]
+WantedBy=timers.target

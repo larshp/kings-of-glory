@@ -370,7 +370,7 @@ Exit criteria:
 - [x] Replace development identity with production authentication and secure session management.
 - [x] Use secure, HTTP-only, same-site cookies or an equivalently reviewed token design.
 - [x] Require TLS in production and validate WebSocket origins.
-- [ ] Validate every untrusted HTTP, WebSocket, content, administrative, and database boundary.
+- [x] Validate every untrusted HTTP, WebSocket, content, administrative, and database boundary.
 - [x] Enforce server-side authorization for every command and query.
 - [x] Add per-connection and per-account rate limits without introducing a separate cache service.
 - [x] Add request and message size limits before parsing large payloads.
@@ -390,20 +390,20 @@ Exit criteria:
 
 ## Phase 15: Add operations and safe deployment
 
-- [ ] Define development, test, staging, and production configuration. Production still contains exactly one player-facing global world; non-production worlds are disposable test environments.
-- [ ] Choose a hosting approach for the static browser assets, Node.js process, and PostgreSQL without requiring Docker.
+- [x] Define development, test, staging, and production configuration. Production still contains exactly one player-facing global world; non-production worlds are disposable test environments.
+- [x] Choose a hosting approach for the static browser assets, Node.js process, and PostgreSQL without requiring Docker.
 - [x] Add liveness and readiness endpoints that distinguish process health from world readiness.
 - [x] Add structured logs with correlation IDs for connections, commands, players, checkpoints, and failures.
-- [ ] Create dashboards and alerts for tick overruns, crashes, database failures, failed checkpoints, journal lag, connection spikes, memory pressure, and backup failure.
+- [x] Create dashboards and alerts for tick overruns, crashes, database failures, failed checkpoints, journal lag, connection spikes, memory pressure, and backup failure.
 - [x] Add graceful restart and maintenance mode with clear browser messaging.
-- [ ] Make deployments reject incompatible database, snapshot, content, or protocol versions before accepting players.
+- [x] Make deployments reject incompatible database, snapshot, content, or protocol versions before accepting players.
 - [x] Define forward-only database migrations and versioned snapshot migrations.
 - [ ] Test application rollback separately from data rollback; do not assume a database schema can be safely downgraded.
-- [ ] Automate production backups with retention and off-host storage.
-- [ ] Schedule recurring restore drills and record their duration and verification results.
+- [x] Automate production backups with retention and off-host storage.
+- [x] Schedule recurring restore drills and record their duration and verification results.
 - [x] Write runbooks for failed deployment, corrupted latest checkpoint, database outage, runaway tick time, malicious client flood, lost credentials, and world rollback.
 - [x] Add a world-consistency inspection command that can run read-only against a checkpoint.
-- [ ] Define maintenance windows and player communication procedures.
+- [x] Define maintenance windows and player communication procedures.
 
 Exit criteria:
 
@@ -415,14 +415,14 @@ Exit criteria:
 
 - [x] Maintain unit tests for pure rules, invariants, coordinates, recipes, permissions, AI decisions, and serialization.
 - [x] Maintain property-based tests for conservation, bounds, idempotency, and concurrency-sensitive systems.
-- [ ] Maintain integration tests for WebSockets, PostgreSQL, checkpoints, journal replay, reconnect, migrations, and authentication.
-- [ ] Add browser end-to-end tests for onboarding and the critical gather-build-produce-research-defend loop.
+- [x] Maintain integration tests for WebSockets, PostgreSQL, checkpoints, journal replay, reconnect, migrations, and authentication.
+- [x] Add browser end-to-end tests for onboarding and the critical gather-build-produce-research-defend loop.
 - [x] Maintain deterministic replay scenarios and compare final state hashes in CI.
 - [ ] Run compatibility tests in every supported browser.
 - [ ] Run load, soak, crash, restart, backup, restore, and interrupted-deployment tests against release candidates.
 - [ ] Run a private internal world and fix all world-corrupting, duplication, authorization, and recovery defects before inviting external players.
 - [ ] Run a closed alpha focused on comprehension, simulation correctness, persistence, and cooperative behavior.
-- [ ] Decide and communicate whether the alpha world will reset.
+- [x] Decide and communicate whether the alpha world will reset.
 - [ ] Run a beta at the planned concurrency target and tune progression, resource distribution, onboarding placement, and PvE pressure using telemetry and playtests.
 - [ ] Freeze incompatible save and protocol changes before declaring the production world permanent.
 - [ ] Prepare support, moderation, incident, privacy, terms, and data-deletion processes appropriate to the chosen authentication and communication features.

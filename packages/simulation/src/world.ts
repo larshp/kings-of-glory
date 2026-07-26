@@ -10,6 +10,7 @@ import {
 } from './commands.js';
 import {
   buildings as buildingDefinitions,
+  CONTENT_VERSION,
   cooperativeObjectives as cooperativeObjectiveDefinitions,
   environmentalEvents,
   logisticsLinks as logisticsDefinitions,
@@ -226,7 +227,8 @@ export interface OnboardingReservation {
   securedTick: number | null;
 }
 export interface WorldState {
-  schemaVersion: 26;
+  schemaVersion: 27;
+  contentVersion: typeof CONTENT_VERSION;
   seed: number;
   /** When true, no PvE threats spawn. Peaceful worlds stay threat-free. */
   peaceful: boolean;
@@ -594,7 +596,8 @@ const initialCooperativeObjectives = (): WorldState['cooperativeObjectives'] =>
   ) as unknown as WorldState['cooperativeObjectives'];
 
 export const createWorld = (seed = 1, peaceful = true): WorldState => ({
-  schemaVersion: 26,
+  schemaVersion: 27,
+  contentVersion: CONTENT_VERSION,
   seed,
   peaceful,
   randomState: createRandomState(seed),
@@ -2301,7 +2304,10 @@ interface Version24World extends Omit<
 > {
   schemaVersion: 24;
 }
-interface Version25World extends Omit<WorldState, 'schemaVersion' | 'onboardingReservations'> {
+interface Version26World extends Omit<WorldState, 'schemaVersion' | 'contentVersion'> {
+  schemaVersion: 26;
+}
+interface Version25World extends Omit<Version26World, 'schemaVersion' | 'onboardingReservations'> {
   schemaVersion: 25;
 }
 interface Version10World extends Omit<LegacyWorldBase, 'threats'> {
@@ -2488,11 +2494,17 @@ const onboardingReservationsForExistingWorld = (
       ];
     }),
   );
-const migrateVersion25 = (state: Version25World): WorldState => ({
+const migrateVersion26 = (state: Version26World): WorldState => ({
   ...state,
-  schemaVersion: 26,
-  onboardingReservations: onboardingReservationsForExistingWorld(state),
+  schemaVersion: 27,
+  contentVersion: CONTENT_VERSION,
 });
+const migrateVersion25 = (state: Version25World): WorldState =>
+  migrateVersion26({
+    ...state,
+    schemaVersion: 26,
+    onboardingReservations: onboardingReservationsForExistingWorld(state),
+  });
 const migrateVersion24 = (state: Version24World): WorldState =>
   migrateVersion25({
     ...state,
@@ -2603,8 +2615,15 @@ const migrateToCurrentSchema = (state: unknown): WorldState => {
 
 /** Forward-only snapshot migration kept inside the platform-independent simulation. */
 export const deserializeWorld = (raw: unknown): WorldState => {
-  const candidate = structuredClone(raw) as { schemaVersion?: number };
-  if (candidate.schemaVersion === 26) return candidate as WorldState;
+  const candidate = structuredClone(raw) as { schemaVersion?: number; contentVersion?: number };
+  if (candidate.schemaVersion === 27) {
+    if (candidate.contentVersion !== CONTENT_VERSION)
+      throw new Error(
+        `Unsupported world content version: ${String(candidate.contentVersion)}; expected ${CONTENT_VERSION}`,
+      );
+    return candidate as WorldState;
+  }
+  if (candidate.schemaVersion === 26) return migrateVersion26(candidate as Version26World);
   if (candidate.schemaVersion === 25) return migrateVersion25(candidate as Version25World);
   if (candidate.schemaVersion === 24) return migrateVersion24(candidate as Version24World);
   if (candidate.schemaVersion === 23) return migrateVersion23(candidate as Version23World);

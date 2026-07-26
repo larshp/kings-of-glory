@@ -6,6 +6,8 @@ export interface ServerEnvironment {
   production: boolean;
   trustProxy: boolean;
   peaceful: boolean;
+  /** Development convenience only; production migrations use a separate credential and process. */
+  migrateOnStartup?: boolean;
   allowedOrigins: readonly string[];
   databaseUrl?: string;
   sessionSecret?: string;
@@ -19,6 +21,7 @@ export const parseEnvironment = (env: Record<string, string | undefined>): Serve
   const production = env.NODE_ENV === 'production';
   const trustProxy = env.TRUST_PROXY === 'true';
   const peaceful = env.PEACEFUL !== 'false';
+  const migrateOnStartup = env.MIGRATE_ON_STARTUP ? env.MIGRATE_ON_STARTUP === 'true' : !production;
   const allowedOrigins = (env.ALLOWED_ORIGINS ?? '')
     .split(',')
     .map((origin) => origin.trim())
@@ -40,6 +43,12 @@ export const parseEnvironment = (env: Record<string, string | undefined>): Serve
     throw new Error('SESSION_SECRET_PREVIOUS must be at least 32 characters when set.');
   if (production && !trustProxy)
     throw new Error('TRUST_PROXY=true is required for production TLS enforcement.');
+  if (env.MIGRATE_ON_STARTUP && !['true', 'false'].includes(env.MIGRATE_ON_STARTUP))
+    throw new Error('MIGRATE_ON_STARTUP must be true or false.');
+  if (production && migrateOnStartup)
+    throw new Error(
+      'MIGRATE_ON_STARTUP must be false in production; run the migration job separately.',
+    );
   return {
     port,
     worldSeed,
@@ -48,6 +57,7 @@ export const parseEnvironment = (env: Record<string, string | undefined>): Serve
     production,
     trustProxy,
     peaceful,
+    migrateOnStartup,
     allowedOrigins,
     ...(env.DATABASE_URL ? { databaseUrl: env.DATABASE_URL } : {}),
     ...(env.SESSION_SECRET ? { sessionSecret: env.SESSION_SECRET } : {}),

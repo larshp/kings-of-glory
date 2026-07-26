@@ -453,6 +453,13 @@ describe('client message validation', () => {
         JSON.stringify({ type: 'hello', version: 1, playerId: '../../database-admin' }),
       ),
     ).toBeUndefined();
+    expect(
+      parseClientMessage(JSON.stringify({ type: 'hello', version: 1.5, playerId: 'player-a' })),
+    ).toBeUndefined();
+    expect(
+      parseClientMessage(JSON.stringify({ type: 'ping', nonce: 'x'.repeat(65) })),
+    ).toBeUndefined();
+    expect(parseClientMessage(JSON.stringify({ type: 'ping', nonce: '../admin' }))).toBeUndefined();
   });
 
   it('accepts resynchronization requests only with a valid received version', () => {

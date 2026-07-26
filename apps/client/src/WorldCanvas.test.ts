@@ -5,6 +5,8 @@ import {
   initialCameraFocus,
   logisticsStatusColor,
   productionRateLabel,
+  resourceIsReachable,
+  tileHoverLines,
   visibleByIsometricDepth,
   visibleChunkCoordinates,
   visibleRenderChunks,
@@ -35,6 +37,68 @@ describe('visibleByIsometricDepth', () => {
       x: 16,
       y: 20,
     });
+  });
+
+  it('describes hovered terrain, ownership, occupants, and buildability', () => {
+    expect(
+      tileHoverLines({
+        tile: { x: 4, y: 7 },
+        terrain: 'grass',
+        minedAmount: 0,
+        resourceReachable: true,
+        territoryOwner: 'player',
+        playerId: 'player',
+        placementValid: false,
+        building: {
+          kind: 'settlement-center',
+          constructionTicks: 0,
+          health: 25,
+          maxHealth: 25,
+        } as never,
+        threat: undefined,
+      }),
+    ).toEqual([
+      'Tile 4, 7',
+      'Grassland · Your territory',
+      'settlement center · health 25/25',
+      'Not buildable',
+    ]);
+  });
+
+  it('shows authoritative remaining yield for finite resource tiles', () => {
+    expect(
+      tileHoverLines({
+        tile: { x: 2, y: 3 },
+        terrain: 'ore',
+        minedAmount: 4,
+        resourceReachable: true,
+        territoryOwner: undefined,
+        playerId: 'player',
+        placementValid: false,
+        building: undefined,
+        threat: undefined,
+      }),
+    ).toEqual(expect.arrayContaining(['Resource remaining: 6/10', 'Reachable for gathering']));
+    expect(
+      tileHoverLines({
+        tile: { x: 2, y: 3 },
+        terrain: 'wood',
+        minedAmount: 99,
+        resourceReachable: false,
+        territoryOwner: undefined,
+        playerId: 'player',
+        placementValid: false,
+        building: undefined,
+        threat: undefined,
+      }),
+    ).toEqual(expect.arrayContaining(['Resource remaining: 0/10', 'Out of gathering range']));
+  });
+
+  it('uses the authoritative plot-center gathering range', () => {
+    const plot = { x: 10, y: 20, size: 8 };
+    expect(resourceIsReachable({ x: 22, y: 24 }, plot)).toBe(true);
+    expect(resourceIsReachable({ x: 23, y: 24 }, plot)).toBe(false);
+    expect(resourceIsReachable({ x: 14, y: 24 }, undefined)).toBe(false);
   });
 
   it('uses distinct logistics overlay colors for flow and actionable blockage', () => {

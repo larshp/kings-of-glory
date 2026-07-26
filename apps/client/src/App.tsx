@@ -837,11 +837,15 @@ export const App = () => {
         buildings={Object.values(state?.buildings ?? {})}
         threats={Object.values(state?.threats ?? {})}
         terrain={state?.terrain ?? {}}
+        minedTiles={state?.minedTiles ?? {}}
         territory={state?.territory ?? {}}
         logisticsLinks={logisticsLinks}
         operationsOverlay={operationsOverlay}
         cameraBindings={preferences.camera}
         focus={initialCameraFocus(Object.values(state?.buildings ?? {}), playerId, plot)}
+        playerId={playerId}
+        playerPlot={plot}
+        hoveredTile={hoveredTile}
         selectedTile={selectedTile}
         placementPreview={
           previewCandidate

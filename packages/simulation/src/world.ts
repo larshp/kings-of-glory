@@ -318,7 +318,7 @@ const INVENTORY_CAPACITY = PLAYER_INVENTORY_CAPACITY;
 const MAX_ACTIVE_SHARED_PROJECTS_PER_SETTLEMENT = 3;
 export const MAX_ACTIVE_CONSTRUCTIONS_PER_PLAYER = 64;
 export const MAX_PLOT_CANDIDATE_ATTEMPTS = 100_000;
-const GATHER_RANGE = 8;
+export const GATHER_RANGE = 8;
 const TERRITORY_CELL_SIZE = 8;
 const RESOURCE_SECTOR_SIZE = 8;
 /** Bounds all threat route work together, rather than once per threat. */

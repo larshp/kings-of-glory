@@ -1,19 +1,30 @@
 import { expect, test, type Page } from '@playwright/test';
 
+const canvasProbePositions = (width: number, height: number) => {
+  const positions: Array<{ x: number; y: number }> = [];
+  for (let y = 30; y < height - 20; y += 36)
+    for (let x = 30; x < width - 20; x += 36) positions.push({ x, y });
+  return positions.sort(
+    (left, right) =>
+      (left.x - width / 2) ** 2 +
+      (left.y - height / 2) ** 2 -
+      ((right.x - width / 2) ** 2 + (right.y - height / 2) ** 2),
+  );
+};
+
 const selectCanvasTile = async (page: Page, expectedText: RegExp) => {
   const canvas = page.locator('canvas');
   await expect(canvas).toBeVisible();
   const bounds = await canvas.boundingBox();
   if (!bounds) throw new Error('World canvas has no visible bounds');
-  for (let y = 30; y < bounds.height - 20; y += 36)
-    for (let x = 30; x < bounds.width - 20; x += 36) {
-      await canvas.dispatchEvent('pointerup', {
-        clientX: bounds.x + x,
-        clientY: bounds.y + y,
-        pointerId: 1,
-      });
-      if (expectedText.test(await page.locator('body').innerText())) return;
-    }
+  for (const position of canvasProbePositions(bounds.width, bounds.height)) {
+    await canvas.dispatchEvent('pointerup', {
+      clientX: bounds.x + position.x,
+      clientY: bounds.y + position.y,
+      pointerId: 1,
+    });
+    if (expectedText.test(await page.locator('body').innerText())) return;
+  }
   throw new Error(`Could not find a canvas tile matching ${String(expectedText)}`);
 };
 
@@ -38,30 +49,44 @@ const gatherResource = async (page: Page, resource: 'ore' | 'wood') => {
   const bounds = await canvas.boundingBox();
   if (!bounds) throw new Error('World canvas has no visible bounds');
   const selected = resource === 'ore' ? /\(ore deposit\)/ : /\(timber grove\)/;
-  for (let y = 30; y < bounds.height - 20; y += 36)
-    for (let x = 30; x < bounds.width - 20; x += 36) {
-      await canvas.dispatchEvent('pointerup', {
-        clientX: bounds.x + x,
-        clientY: bounds.y + y,
-        pointerId: 1,
-      });
-      if (!selected.test(await page.locator('body').innerText())) continue;
-      const before = (await inventory(page))[resource];
-      await page.getByRole('button', { name: `Gather ${resource}` }).click();
-      await page.waitForTimeout(300);
-      if ((await inventory(page))[resource] > before) return;
+  for (const position of canvasProbePositions(bounds.width, bounds.height)) {
+    await canvas.dispatchEvent('pointerup', {
+      clientX: bounds.x + position.x,
+      clientY: bounds.y + position.y,
+      pointerId: 1,
+    });
+    if (!selected.test(await page.locator('body').innerText())) continue;
+    const before = (await inventory(page))[resource];
+    await page.getByRole('button', { name: `Gather ${resource}` }).click();
+    await page.waitForTimeout(300);
+    if ((await inventory(page))[resource] > before) {
+      await expect(canvas).toHaveAttribute(
+        'aria-description',
+        /Resource remaining: \d+\/10.*Reachable for gathering/,
+      );
+      return;
     }
+  }
   throw new Error(`Could not gather an available ${resource} deposit`);
 };
 
 const gatherTo = async (page: Page, resource: 'ore' | 'wood', minimum: number) => {
   if ((await inventory(page))[resource] >= minimum) return;
   await gatherResource(page, resource);
+  const canvas = page.locator('canvas');
   while ((await inventory(page))[resource] < minimum) {
     const before = (await inventory(page))[resource];
+    const remainingBefore = Number(
+      (await canvas.getAttribute('aria-description'))?.match(/Resource remaining: (\d+)\/10/)?.[1],
+    );
     await page.getByRole('button', { name: `Gather ${resource}` }).click();
     await page.waitForTimeout(300);
     if ((await inventory(page))[resource] === before) await gatherResource(page, resource);
+    else
+      await expect(canvas).toHaveAttribute(
+        'aria-description',
+        new RegExp(`Resource remaining: ${remainingBefore - 1}/10`),
+      );
   }
 };
 
@@ -88,6 +113,11 @@ test('loads onboarding accessibly at the supported viewport and input surface', 
     pointerId: 1,
   });
   await expect(page.getByText('Selected building: settlement-center')).toBeVisible();
+  await canvas.hover({ position: { x: bounds.width / 2, y: bounds.height / 2 } });
+  await expect(canvas).toHaveAttribute(
+    'aria-description',
+    /Tile .*(Grassland|Timber grove|Ore deposit).*Your territory.*settlement center.*Not buildable/,
+  );
   await expect(page.getByText(/Next: Gather ore and wood/)).toBeVisible();
   await page.keyboard.press('Tab');
   await expect(page.locator(':focus')).toBeVisible();

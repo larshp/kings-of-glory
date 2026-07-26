@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
-import { recipes } from '@kings/content';
+import { recipes, resources as resourceDefinitions } from '@kings/content';
 import type { TerrainTile } from '@kings/protocol';
-import { type Building, type LogisticsLink, type Threat } from '@kings/simulation';
+import { GATHER_RANGE, type Building, type LogisticsLink, type Threat } from '@kings/simulation';
 import type { CameraBindings } from './preferences.js';
 import { drawSprite, type RenderAssets, type SpriteId } from './render-assets.js';
 import {
@@ -92,6 +92,68 @@ export const initialCameraFocus = (
     ? { x: plot.x + Math.floor(plot.size / 2), y: plot.y + Math.floor(plot.size / 2) }
     : { x: 0, y: 0 };
 };
+
+export const tileHoverLines = ({
+  tile,
+  terrain,
+  minedAmount,
+  resourceReachable,
+  territoryOwner,
+  playerId,
+  placementValid,
+  building,
+  threat,
+}: {
+  readonly tile: { readonly x: number; readonly y: number };
+  readonly terrain: TerrainTile | undefined;
+  readonly minedAmount: number;
+  readonly resourceReachable: boolean;
+  readonly territoryOwner: string | undefined;
+  readonly playerId: string;
+  readonly placementValid: boolean;
+  readonly building: Building | undefined;
+  readonly threat: Threat | undefined;
+}) => {
+  const terrainLabel =
+    terrain === 'ore'
+      ? 'Ore deposit'
+      : terrain === 'wood'
+        ? 'Timber grove'
+        : terrain === 'water'
+          ? 'Water'
+          : terrain === 'grass'
+            ? 'Grassland'
+            : 'Unexplored';
+  const territoryLabel = territoryOwner
+    ? territoryOwner === playerId
+      ? 'Your territory'
+      : 'Claimed territory'
+    : 'Unclaimed territory';
+  const lines = [`Tile ${tile.x}, ${tile.y}`, `${terrainLabel} · ${territoryLabel}`];
+  if (terrain === 'ore' || terrain === 'wood')
+    lines.push(
+      `Resource remaining: ${Math.max(0, resourceDefinitions[terrain].yield - minedAmount)}/${resourceDefinitions[terrain].yield}`,
+      resourceReachable ? 'Reachable for gathering' : 'Out of gathering range',
+    );
+  if (building)
+    lines.push(
+      `${building.kind.replaceAll('-', ' ')} · ${building.constructionTicks > 0 ? 'under construction' : `health ${building.health}/${building.maxHealth}`}`,
+    );
+  if (threat) lines.push(`Raider threat · health ${threat.health}`);
+  lines.push(placementValid ? 'Buildable' : 'Not buildable');
+  return lines;
+};
+
+export const resourceIsReachable = (
+  tile: { readonly x: number; readonly y: number },
+  plot: { readonly x: number; readonly y: number; readonly size: number } | undefined,
+) =>
+  Boolean(
+    plot &&
+    Math.abs(plot.x + Math.floor(plot.size / 2) - tile.x) +
+      Math.abs(plot.y + Math.floor(plot.size / 2) - tile.y) <=
+      GATHER_RANGE,
+  );
 
 /** Threats render above buildings, so they win a click on the same tile. */
 export const entityAtTile = (
@@ -196,11 +258,15 @@ export const WorldCanvas = ({
   buildings,
   threats,
   terrain,
+  minedTiles,
   territory,
   logisticsLinks,
   operationsOverlay,
   focus,
+  playerId,
+  playerPlot,
   cameraBindings,
+  hoveredTile,
   selectedTile,
   placementPreview,
   onSelectTile,
@@ -215,11 +281,15 @@ export const WorldCanvas = ({
   buildings: readonly Building[];
   threats: readonly Threat[];
   terrain: Readonly<Record<string, TerrainTile>>;
+  minedTiles: Readonly<Record<string, number>>;
   territory: Readonly<Record<string, string>>;
   logisticsLinks: readonly LogisticsLink[];
   operationsOverlay: OperationsOverlay;
   focus: { x: number; y: number };
+  playerId: string;
+  playerPlot: { readonly x: number; readonly y: number; readonly size: number } | undefined;
   cameraBindings: CameraBindings;
+  hoveredTile: { x: number; y: number } | undefined;
   selectedTile: { x: number; y: number } | undefined;
   placementPreview: { tile: { x: number; y: number }; valid: boolean } | undefined;
   onSelectTile?: (tile: { x: number; y: number }) => void;
@@ -236,11 +306,15 @@ export const WorldCanvas = ({
   const latestBuildings = useRef(buildings);
   const latestThreats = useRef(threats);
   const latestTerrain = useRef(terrain);
+  const latestMinedTiles = useRef(minedTiles);
   const latestTerritory = useRef(territory);
   const latestLogisticsLinks = useRef(logisticsLinks);
   const latestOperationsOverlay = useRef(operationsOverlay);
   const latestFocus = useRef(focus);
+  const latestPlayerId = useRef(playerId);
+  const latestPlayerPlot = useRef(playerPlot);
   const latestCameraBindings = useRef(cameraBindings);
+  const latestHoveredTile = useRef(hoveredTile);
   const latestSelectedTile = useRef(selectedTile);
   const latestPlacementPreview = useRef(placementPreview);
   const latestSelectTile = useRef(onSelectTile);
@@ -254,11 +328,15 @@ export const WorldCanvas = ({
   latestBuildings.current = buildings;
   latestThreats.current = threats;
   latestTerrain.current = terrain;
+  latestMinedTiles.current = minedTiles;
   latestTerritory.current = territory;
   latestLogisticsLinks.current = logisticsLinks;
   latestOperationsOverlay.current = operationsOverlay;
   latestFocus.current = focus;
+  latestPlayerId.current = playerId;
+  latestPlayerPlot.current = playerPlot;
   latestCameraBindings.current = cameraBindings;
+  latestHoveredTile.current = hoveredTile;
   latestSelectedTile.current = selectedTile;
   latestPlacementPreview.current = placementPreview;
   latestSelectTile.current = onSelectTile;
@@ -299,6 +377,7 @@ export const WorldCanvas = ({
       Math.abs(tileBounds.maxY - tileBounds.center.y),
     );
     const origin = cameraOrigin(width, height);
+    context.save();
     context.translate(origin.x + view.panX, origin.y + view.panY);
     context.scale(view.scale, view.scale);
 
@@ -523,6 +602,65 @@ export const WorldCanvas = ({
           context.fillText(`chunk ${chunk.x}:${chunk.y}`, point.x + 34, point.y + 28);
         }
     }
+    context.restore();
+
+    const hovered = latestHoveredTile.current;
+    if (hovered) {
+      const tilePoint = worldToScreen({
+        x: hovered.x - latestFocus.current.x,
+        y: hovered.y - latestFocus.current.y,
+      });
+      const screenPoint = {
+        x: origin.x + view.panX + (tilePoint.x + TILE_WIDTH / 2) * view.scale,
+        y: origin.y + view.panY + (tilePoint.y + TILE_HEIGHT / 2) * view.scale,
+      };
+      const territoryOwner =
+        latestTerritory.current[`${Math.floor(hovered.x / 8)}:${Math.floor(hovered.y / 8)}`];
+      const lines = tileHoverLines({
+        tile: hovered,
+        terrain: latestTerrain.current[`${hovered.x}:${hovered.y}`],
+        minedAmount: latestMinedTiles.current[`${hovered.x}:${hovered.y}`] ?? 0,
+        resourceReachable: resourceIsReachable(hovered, latestPlayerPlot.current),
+        territoryOwner,
+        playerId: latestPlayerId.current,
+        placementValid:
+          latestPlacementPreview.current?.tile.x === hovered.x &&
+          latestPlacementPreview.current.tile.y === hovered.y &&
+          latestPlacementPreview.current.valid,
+        building: latestBuildings.current.find(
+          (candidate) => candidate.x === hovered.x && candidate.y === hovered.y,
+        ),
+        threat: latestThreats.current.find(
+          (candidate) => candidate.x === hovered.x && candidate.y === hovered.y,
+        ),
+      });
+      const hoverDescription = lines.join('. ');
+      if (element.getAttribute('aria-description') !== hoverDescription)
+        element.setAttribute('aria-description', hoverDescription);
+      context.font = '12px system-ui';
+      const padding = 9;
+      const lineHeight = 17;
+      const boxWidth =
+        Math.max(...lines.map((line) => context.measureText(line).width)) + padding * 2;
+      const boxHeight = lines.length * lineHeight + padding * 2;
+      const preferredY = screenPoint.y - boxHeight - 18;
+      const boxX = Math.max(8, Math.min(width - boxWidth - 8, screenPoint.x + 18));
+      const boxY =
+        preferredY >= 8 ? preferredY : Math.min(height - boxHeight - 8, screenPoint.y + 18);
+      context.fillStyle = 'rgba(12, 20, 32, 0.96)';
+      context.strokeStyle = '#86a997';
+      context.lineWidth = 1;
+      context.beginPath();
+      context.roundRect(boxX, boxY, boxWidth, boxHeight, 5);
+      context.fill();
+      context.stroke();
+      lines.forEach((line, index) => {
+        context.font = index === 0 ? 'bold 12px system-ui' : '12px system-ui';
+        context.fillStyle = index === lines.length - 1 ? '#d9c27a' : '#f4f0df';
+        context.fillText(line, boxX + padding, boxY + padding + lineHeight * (index + 0.78));
+      });
+    } else if (element.hasAttribute('aria-description'))
+      element.removeAttribute('aria-description');
   };
 
   useEffect(() => {

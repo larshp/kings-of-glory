@@ -14,6 +14,7 @@ import {
   recipes,
   resources as resourceDefinitions,
   technologies,
+  threats as threatDefinitions,
   type TechnologyId,
 } from '@kings/content';
 import {
@@ -619,6 +620,32 @@ export const App = () => {
         building.kind,
       ) && canRouteItems(building),
   );
+  /** Water and mountains block construction, exactly as the server rules do. */
+  const isOpenTerrain = (x: number, y: number) => {
+    const terrain = terrainAt(x, y);
+    return terrain !== undefined && terrain !== 'water' && terrain !== 'mountain';
+  };
+  /**
+   * Mirrors the authoritative protected-area rules the client can see: a settlement keeps
+   * a westward access lane from its centre, and every settlement keeps a buffer around its
+   * plot. Without this the HUD would call tiles buildable that the server then rejects. The
+   * server stays the judge: it also knows settlements this client cannot see.
+   */
+  const ownCenter = state?.buildings[`center-${playerId}`];
+  const isProtectedArea = (x: number, y: number) => {
+    if (plot && ownCenter && y === ownCenter.y && x >= plot.x && x < ownCenter.x) return true;
+    const buffer = threatDefinitions['raider-swarm'].settlementBufferTiles;
+    // Every plot is the same size and puts its centre two tiles inside the far corner, so a
+    // visible foreign centre is enough to reconstruct that settlement's buffered plot.
+    const size = plot?.size ?? 8;
+    const offset = size - 2;
+    return Object.values(state?.buildings ?? {}).some((building) => {
+      if (building.kind !== 'settlement-center' || building.ownerId === playerId) return false;
+      const minX = building.x - offset - buffer;
+      const minY = building.y - offset - buffer;
+      return x >= minX && y >= minY && x < minX + size + buffer * 2 && y < minY + size + buffer * 2;
+    });
+  };
   const fallbackPlacement = plot
     ? Array.from({ length: plot.size }, (_, x) =>
         Array.from({ length: plot.size }, (_, y) => ({ x: plot.x + x, y: plot.y + y })),
@@ -626,8 +653,8 @@ export const App = () => {
         .flat()
         .find(
           (tile) =>
-            terrainAt(tile.x, tile.y) !== undefined &&
-            terrainAt(tile.x, tile.y) !== 'water' &&
+            isOpenTerrain(tile.x, tile.y) &&
+            !isProtectedArea(tile.x, tile.y) &&
             !Object.values(state?.buildings ?? {}).some(
               (building) => building.x === tile.x && building.y === tile.y,
             ),
@@ -640,8 +667,8 @@ export const App = () => {
       : '';
     return candidate &&
       player?.territoryCells[territory] &&
-      terrainAt(candidate.x, candidate.y) !== undefined &&
-      terrainAt(candidate.x, candidate.y) !== 'water' &&
+      isOpenTerrain(candidate.x, candidate.y) &&
+      !isProtectedArea(candidate.x, candidate.y) &&
       !Object.values(state?.buildings ?? {}).some(
         (building) => building.x === candidate.x && building.y === candidate.y,
       )
@@ -953,6 +980,7 @@ export const App = () => {
         buildings={Object.values(state?.buildings ?? {})}
         threats={Object.values(state?.threats ?? {})}
         terrain={state?.terrain ?? {}}
+        elevation={state?.elevation ?? {}}
         minedTiles={state?.minedTiles ?? {}}
         territory={state?.territory ?? {}}
         logisticsLinks={logisticsLinks}

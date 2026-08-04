@@ -23,6 +23,7 @@ import {
   recipes,
   socialRules,
   technologies,
+  terrainRules,
   threats as threatDefinitions,
   worldRetention,
   type TechnologyId,
@@ -364,16 +365,53 @@ const resourceNodeAt = (seed: number, x: number, y: number): 'ore' | 'wood' | un
   if (localX === woodX && localY === woodY) return 'wood';
   return undefined;
 };
+/**
+ * Height of a mountain range at a tile, in levels. Ranges are ridges rather than
+ * isolated spikes: the noise is sampled on a coarse grid and smoothed between two
+ * neighbouring samples, so tiles form connected walls with taller cores.
+ */
+const ridgeStrength = (seed: number, x: number, y: number) => {
+  const scale = terrainRules.mountain.ridgeScale;
+  const ridgeX = Math.floor(x / scale);
+  const ridgeY = Math.floor(y / scale);
+  const sample = (offsetX: number, offsetY: number) =>
+    coordinateNoise(seed ^ 0x51ed270b, ridgeX + offsetX, ridgeY + offsetY) % 23;
+  // Averaging with the next sample in each axis removes the hard grid seams a single
+  // coarse sample would leave, without needing a full interpolated noise field.
+  return Math.round((sample(0, 0) * 2 + sample(1, 0) + sample(0, 1)) / 4);
+};
+
+/**
+ * Tile elevation in levels. Only mountains rise above level zero, which keeps every
+ * gameplay rule on flat ground while the map still has real height.
+ */
+export const elevationAt = (seed: number, x: number, y: number): number => {
+  if (resourceNodeAt(seed, x, y) || terrainNoise(seed, x, y) === 0) return 0;
+  const { threshold, maxLevel } = terrainRules.mountain;
+  const strength = ridgeStrength(seed, x, y);
+  if (strength < threshold) return 0;
+  return Math.min(maxLevel, strength - threshold + 1);
+};
+
 export const terrainAt = (
   seed: number,
   x: number,
   y: number,
-): 'grass' | 'water' | 'ore' | 'wood' => {
+): 'grass' | 'water' | 'ore' | 'wood' | 'mountain' => {
   const resource = resourceNodeAt(seed, x, y);
   if (resource) return resource;
   const value = terrainNoise(seed, x, y);
   if (value === 0) return 'water';
-  return 'grass';
+  return elevationAt(seed, x, y) > 0 ? 'mountain' : 'grass';
+};
+
+/**
+ * Water and mountains block construction and movement alike. Every rule that used to
+ * test for water goes through this predicate so the two stay in step.
+ */
+export const isOpenTile = (seed: number, x: number, y: number) => {
+  const terrain = terrainAt(seed, x, y);
+  return terrain !== 'water' && terrain !== 'mountain';
 };
 /** Finds a deterministic reachable ore deposit around a point, if one exists within the range. */
 export const nearestOreTile = (seed: number, x: number, y: number, range: number) => {
@@ -623,8 +661,23 @@ const plotsOverlap = (left: Plot, right: Plot) =>
   left.y + left.size > right.y;
 
 /**
+ * A starter plot has to hold a whole settlement, so most of it must be open ground.
+ * Lakes and ranges may still edge into it; they shape where a player builds rather than
+ * whether they can build at all.
+ */
+const MIN_OPEN_PLOT_FRACTION = 0.875;
+const isSettleablePlot = (seed: number, plot: Plot) => {
+  let open = 0;
+  for (let x = plot.x; x < plot.x + plot.size; x += 1)
+    for (let y = plot.y; y < plot.y + plot.size; y += 1) if (isOpenTile(seed, x, y)) open += 1;
+  return open >= plot.size ** 2 * MIN_OPEN_PLOT_FRACTION;
+};
+
+/**
  * Allocates the next unclaimed radial plot with a buildable center. The scan is
- * deterministic and the 12-tile spacing keeps the 8×8 settlement plots apart.
+ * deterministic and the 12-tile spacing keeps the 8×8 settlement plots apart. Plots
+ * walled in by water or mountains are skipped so a new player never spawns somewhere
+ * they cannot build.
  */
 const plotFor = (state: WorldState): Plot => {
   const claimed = Object.values(state.players).map((player) => player.plot);
@@ -633,7 +686,8 @@ const plotFor = (state: WorldState): Plot => {
     const centerX = candidate.x + candidate.size - 2;
     const centerY = candidate.y + candidate.size - 2;
     if (
-      terrainAt(state.seed, centerX, centerY) !== 'water' &&
+      isOpenTile(state.seed, centerX, centerY) &&
+      isSettleablePlot(state.seed, candidate) &&
       !claimed.some((plot) => plotsOverlap(plot, candidate))
     )
       return candidate;
@@ -857,7 +911,7 @@ const threatSpawnPosition = (state: WorldState, target: Building) => {
     ];
     const candidate = candidates.find(
       (tile) =>
-        terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
+        isOpenTile(state.seed, tile.x, tile.y) &&
         !isForeignSettlementProtectedAt(state, target.ownerId, tile.x, tile.y) &&
         !Object.values(state.buildings).some(
           (building) => building.x === tile.x && building.y === tile.y,
@@ -1079,8 +1133,7 @@ export const applyCommand = (
     if (scout.ownerId !== player.id) return reject('unauthorized');
     if (Math.abs(scout.x - command.x) + Math.abs(scout.y - command.y) > 64)
       return reject('out-of-range');
-    if (terrainAt(state.seed, command.x, command.y) === 'water')
-      return reject('tile-not-buildable');
+    if (!isOpenTile(state.seed, command.x, command.y)) return reject('tile-not-buildable');
     scout.target = { x: command.x, y: command.y };
     return accept([]);
   }
@@ -1194,8 +1247,7 @@ export const applyCommand = (
       isForeignSettlementProtectedAt(state, owner.id, command.x, command.y)
     )
       return reject('protected-area');
-    if (terrainAt(state.seed, command.x, command.y) === 'water')
-      return reject('tile-not-buildable');
+    if (!isOpenTile(state.seed, command.x, command.y)) return reject('tile-not-buildable');
     if (
       Object.values(state.buildings).some(
         (candidate) => candidate.x === command.x && candidate.y === command.y,
@@ -1577,8 +1629,7 @@ export const applyCommand = (
       isForeignSettlementProtectedAt(state, player.id, command.x, command.y)
     )
       return reject('protected-area');
-    if (terrainAt(state.seed, command.x, command.y) === 'water')
-      return reject('tile-not-buildable');
+    if (!isOpenTile(state.seed, command.x, command.y)) return reject('tile-not-buildable');
     if (
       Object.values(state.buildings).some(
         (candidate) => candidate.x === command.x && candidate.y === command.y,
@@ -1828,7 +1879,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
       },
       isPassable: (tile) =>
         (tile.x === target.x && tile.y === target.y) ||
-        (terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
+        (isOpenTile(state.seed, tile.x, tile.y) &&
           !Object.values(state.buildings).some(
             (building) => building.x === tile.x && building.y === tile.y,
           )),
@@ -2126,7 +2177,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
               isChunkPassable: () => true,
               isPassable: (tile) =>
                 (tile.x === target.x && tile.y === target.y) ||
-                (terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
+                (isOpenTile(state.seed, tile.x, tile.y) &&
                   !isForeignSettlementProtectedAt(state, target.ownerId, tile.x, tile.y) &&
                   !occupiedBuildingTiles.has(tileKey(tile.x, tile.y))),
             })
@@ -2142,7 +2193,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
               },
               isPassable: (tile) =>
                 (tile.x === target.x && tile.y === target.y) ||
-                (terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
+                (isOpenTile(state.seed, tile.x, tile.y) &&
                   !isForeignSettlementProtectedAt(state, target.ownerId, tile.x, tile.y) &&
                   !occupiedBuildingTiles.has(tileKey(tile.x, tile.y))),
             })

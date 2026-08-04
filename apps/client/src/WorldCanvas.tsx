@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import {
   recipes,
   resources as resourceDefinitions,
+  terrainRules,
   threats as threatDefinitions,
 } from '@kings/content';
 import type { TerrainTile } from '@kings/protocol';
@@ -9,6 +10,8 @@ import { GATHER_RANGE, type Building, type LogisticsLink, type Threat } from '@k
 import type { CameraBindings } from './preferences.js';
 import { drawSprite, type RenderAssets, type SpriteId } from './render-assets.js';
 import {
+  ELEVATION_STEP,
+  screenToRaisedTile,
   screenToTile,
   screenToWorld,
   TILE_HEIGHT,
@@ -100,6 +103,7 @@ export const initialCameraFocus = (
 export const tileHoverLines = ({
   tile,
   terrain,
+  elevation,
   minedAmount,
   resourceReachable,
   territoryOwner,
@@ -110,6 +114,7 @@ export const tileHoverLines = ({
 }: {
   readonly tile: { readonly x: number; readonly y: number };
   readonly terrain: TerrainTile | undefined;
+  readonly elevation: number;
   readonly minedAmount: number;
   readonly resourceReachable: boolean;
   readonly territoryOwner: string | undefined;
@@ -125,9 +130,11 @@ export const tileHoverLines = ({
         ? 'Timber grove'
         : terrain === 'water'
           ? 'Water'
-          : terrain === 'grass'
-            ? 'Grassland'
-            : 'Unexplored';
+          : terrain === 'mountain'
+            ? `Mountain · height ${elevation}`
+            : terrain === 'grass'
+              ? 'Grassland'
+              : 'Unexplored';
   const territoryLabel = territoryOwner
     ? territoryOwner === playerId
       ? 'Your territory'
@@ -264,6 +271,17 @@ const TILE_PALETTES = {
   rock: ['#5b6472', '#55606c', '#4f5966'],
   grove: ['#2f5c3c', '#2c5738', '#295234'],
   unexplored: ['#20362d', '#1d3129', '#1a2c25'],
+  /** Mountain plateaus, lighter than an outcrop patch so relief reads against grass. */
+  summit: ['#7d8694', '#77808e', '#6f7887', '#69727f', '#828b99'],
+  /** Only the tallest level is capped, so a range has visible peaks rather than one tone. */
+  snow: ['#e4ebf2', '#dae2ec', '#cfd9e4'],
+  /** Cliff faces: the south-west wall catches the light, the south-east wall does not. */
+  cliffLit: ['#5f6877', '#5a6371'],
+  cliffShaded: ['#3f4653', '#3a414d'],
+  /** Facets broken into a plateau so a range does not read as one flat slab. */
+  outcrop: ['#8d96a4', '#616a78'],
+  /** A capped peak needs shaded snow, not bare rock, or the facet reads as a hole. */
+  snowFacet: ['#c3ceda', '#eef3f8'],
 } as const;
 
 const shadeFrom = (palette: readonly string[], x: number, y: number, salt = 0) =>
@@ -282,6 +300,23 @@ export const tileShade = (terrain: TerrainTile | undefined, x: number, y: number
             : TILE_PALETTES.unexplored;
   return shadeFrom(palette, x, y);
 };
+
+export const MAX_ELEVATION = terrainRules.mountain.maxLevel;
+
+/** Top and wall colours for a raised tile, so mountains shade consistently. */
+export const summitColors = (x: number, y: number, level: number) => ({
+  top:
+    level >= MAX_ELEVATION
+      ? shadeFrom(TILE_PALETTES.snow, x, y)
+      : shadeFrom(TILE_PALETTES.summit, x, y),
+  lit: shadeFrom(TILE_PALETTES.cliffLit, x, y),
+  shaded: shadeFrom(TILE_PALETTES.cliffShaded, x, y),
+  /** Present on a deterministic third of tiles, so facets scatter across a range. */
+  facet:
+    tileNoise(x, y) % 3 === 0
+      ? shadeFrom(level >= MAX_ELEVATION ? TILE_PALETTES.snowFacet : TILE_PALETTES.outcrop, x, y, 2)
+      : undefined,
+});
 
 export interface TileLayers {
   readonly base: string;
@@ -346,6 +381,7 @@ export const WorldCanvas = ({
   buildings,
   threats,
   terrain,
+  elevation,
   minedTiles,
   territory,
   logisticsLinks,
@@ -369,6 +405,7 @@ export const WorldCanvas = ({
   buildings: readonly Building[];
   threats: readonly Threat[];
   terrain: Readonly<Record<string, TerrainTile>>;
+  elevation: Readonly<Record<string, number>>;
   minedTiles: Readonly<Record<string, number>>;
   territory: Readonly<Record<string, string>>;
   logisticsLinks: readonly LogisticsLink[];
@@ -394,6 +431,7 @@ export const WorldCanvas = ({
   const latestBuildings = useRef(buildings);
   const latestThreats = useRef(threats);
   const latestTerrain = useRef(terrain);
+  const latestElevation = useRef(elevation);
   const latestMinedTiles = useRef(minedTiles);
   const latestTerritory = useRef(territory);
   const latestLogisticsLinks = useRef(logisticsLinks);
@@ -416,6 +454,7 @@ export const WorldCanvas = ({
   latestBuildings.current = buildings;
   latestThreats.current = threats;
   latestTerrain.current = terrain;
+  latestElevation.current = elevation;
   latestMinedTiles.current = minedTiles;
   latestTerritory.current = territory;
   latestLogisticsLinks.current = logisticsLinks;
@@ -554,13 +593,24 @@ export const WorldCanvas = ({
       context.fillRect(barX, barY, Math.max(1, Math.round(width * ratio)), 4);
     };
     const terrainAt = (x: number, y: number) => latestTerrain.current[`${x}:${y}`];
+    const levelAt = (x: number, y: number) => latestElevation.current[`${x}:${y}`] ?? 0;
     const sectorOwnerAt = (x: number, y: number) =>
       latestTerritory.current[`${Math.floor(x / 8)}:${Math.floor(y / 8)}`];
     const chunks = visibleRenderChunks(tileBounds);
-    // Pass 1: the ground, plus the inset pond or outcrop surface where a tile has one.
+    /**
+     * Raised tiles overlap whatever is behind them, so they cannot be drawn in the flat
+     * pass. They join the depth-sorted pass with buildings and threats instead.
+     */
+    const raisedTiles: Array<{ x: number; y: number; level: number }> = [];
+    // Pass 1: flat ground, plus the inset pond or outcrop surface where a tile has one.
     for (const chunk of chunks)
       for (let x = chunk.minX; x <= chunk.maxX; x += 1)
         for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
+          const level = levelAt(x, y);
+          if (level > 0) {
+            raisedTiles.push({ x, y, level });
+            continue;
+          }
           const point = tilePoint(x, y);
           const layers = tileLayers(terrainAt(x, y), x, y);
           diamond(point, layers.base);
@@ -641,26 +691,106 @@ export const WorldCanvas = ({
             context.fillText(resource === 'ore' ? 'Ore' : 'Wood', point.x + 23, point.y + 21);
           }
     }
-    for (const building of visibleByIsometricDepth(
+    /**
+     * One depth-sorted pass for everything that stands above the ground. Mountains have
+     * to share it with entities: a range must hide what is behind it and be hidden by
+     * what stands in front of it, which separate passes cannot express.
+     */
+    const drawMountain = (x: number, y: number, level: number) => {
+      const point = tilePoint(x, y);
+      const top = { x: point.x, y: point.y - level * ELEVATION_STEP };
+      const colors = summitColors(x, y, level);
+      const west = { x: top.x, y: top.y + TILE_HEIGHT / 2 };
+      const east = { x: top.x + TILE_WIDTH, y: top.y + TILE_HEIGHT / 2 };
+      const south = { x: top.x + TILE_WIDTH / 2, y: top.y + TILE_HEIGHT };
+      // Walls are drawn towards the viewer only, and only as far down as the neighbour.
+      const wall = (from: { x: number; y: number }, to: { x: number; y: number }, drop: number) => {
+        if (drop <= 0) return;
+        context.beginPath();
+        context.moveTo(from.x, from.y);
+        context.lineTo(to.x, to.y);
+        context.lineTo(to.x, to.y + drop);
+        context.lineTo(from.x, from.y + drop);
+        context.closePath();
+        context.fill();
+      };
+      context.fillStyle = colors.lit;
+      wall(west, south, (level - levelAt(x, y + 1)) * ELEVATION_STEP);
+      context.fillStyle = colors.shaded;
+      wall(south, east, (level - levelAt(x + 1, y)) * ELEVATION_STEP);
+      diamondPath(top);
+      context.fillStyle = colors.top;
+      context.fill();
+      if (colors.facet) {
+        diamondPath({ x: top.x + 6, y: top.y - 3 }, 9);
+        context.fillStyle = colors.facet;
+        context.fill();
+      }
+      // Outline the silhouette of a range, not every tile inside it, so plateaus read as
+      // one landform instead of a grid.
+      const edges = borderSides(x, y, (tileX, tileY) =>
+        levelAt(tileX, tileY) === level ? `level-${level}` : undefined,
+      );
+      if (edges.length === 0) return;
+      context.beginPath();
+      for (const side of edges) addSide(top, side);
+      context.strokeStyle = 'rgba(20, 29, 46, 0.55)';
+      context.lineWidth = 1.5;
+      context.stroke();
+    };
+    const raised = raisedTiles.map((tile) => ({
+      depth: tile.x + tile.y,
+      y: tile.y,
+      order: 0,
+      draw: () => drawMountain(tile.x, tile.y, tile.level),
+    }));
+    const buildingDrawables = visibleByIsometricDepth(
       latestBuildings.current,
       tileBounds.center,
       visibleRadius,
-    )) {
-      drawContactShadow(building.x, building.y, building.kind === 'watchtower' ? 14 : 20);
-      drawEntitySprite(
-        building.constructionTicks > 0 ? 'construction' : building.kind,
-        building.x,
-        building.y,
-      );
-      if (building.constructionTicks === 0 && building.health < building.maxHealth)
-        drawHealthBar(building.x, building.y, building.health / building.maxHealth);
-      if (latestDebug.current?.enabled && latestDebug.current.showEntityIds) {
-        const position = tilePoint(building.x, building.y);
-        context.fillStyle = '#f4f0df';
-        context.font = '10px system-ui';
-        context.fillText(building.id, position.x + TILE_WIDTH / 2, position.y - 8);
-      }
-    }
+    ).map((building) => ({
+      depth: building.x + building.y,
+      y: building.y,
+      order: 1,
+      draw: () => {
+        drawContactShadow(building.x, building.y, building.kind === 'watchtower' ? 14 : 20);
+        drawEntitySprite(
+          building.constructionTicks > 0 ? 'construction' : building.kind,
+          building.x,
+          building.y,
+        );
+        if (building.constructionTicks === 0 && building.health < building.maxHealth)
+          drawHealthBar(building.x, building.y, building.health / building.maxHealth);
+        if (latestDebug.current?.enabled && latestDebug.current.showEntityIds) {
+          const position = tilePoint(building.x, building.y);
+          context.fillStyle = '#f4f0df';
+          context.font = '10px system-ui';
+          context.fillText(building.id, position.x + TILE_WIDTH / 2, position.y - 8);
+        }
+      },
+    }));
+    const threatDrawables = visibleByIsometricDepth(
+      latestThreats.current,
+      tileBounds.center,
+      visibleRadius,
+    ).map((threat) => ({
+      depth: threat.x + threat.y,
+      y: threat.y,
+      order: 2,
+      draw: () => {
+        drawContactShadow(threat.x, threat.y, 12);
+        drawEntitySprite('raider', threat.x, threat.y);
+        drawHealthBar(
+          threat.x,
+          threat.y,
+          Math.max(0, Math.min(1, threat.health / threatDefinitions['raider-swarm'].health)),
+        );
+      },
+    }));
+    for (const drawable of [...raised, ...buildingDrawables, ...threatDrawables].sort(
+      (left, right) => left.depth - right.depth || left.y - right.y || left.order - right.order,
+    ))
+      drawable.draw();
     const operationsOverlay = latestOperationsOverlay.current;
     if (operationsOverlay === 'logistics') {
       const buildingsById = new Map(
@@ -710,19 +840,6 @@ export const WorldCanvas = ({
             : building.productionState.replaceAll('-', ' ');
         context.fillText(label, point.x + TILE_WIDTH / 2, point.y - 7);
       }
-    for (const threat of visibleByIsometricDepth(
-      latestThreats.current,
-      tileBounds.center,
-      visibleRadius,
-    )) {
-      drawContactShadow(threat.x, threat.y, 12);
-      drawEntitySprite('raider', threat.x, threat.y);
-      drawHealthBar(
-        threat.x,
-        threat.y,
-        Math.max(0, Math.min(1, threat.health / threatDefinitions['raider-swarm'].health)),
-      );
-    }
     const debugState = latestDebug.current;
     if (debugState?.enabled) {
       context.font = '10px ui-monospace, monospace';
@@ -771,10 +888,15 @@ export const WorldCanvas = ({
 
     const hovered = latestHoveredTile.current;
     if (hovered) {
-      const hoveredPoint = worldToScreen({
+      const hoveredLevel = latestElevation.current[`${hovered.x}:${hovered.y}`] ?? 0;
+      const flatHoveredPoint = worldToScreen({
         x: hovered.x - latestFocus.current.x,
         y: hovered.y - latestFocus.current.y,
       });
+      const hoveredPoint = {
+        x: flatHoveredPoint.x,
+        y: flatHoveredPoint.y - hoveredLevel * ELEVATION_STEP,
+      };
       const screenPoint = {
         x: origin.x + view.panX + (hoveredPoint.x + TILE_WIDTH / 2) * view.scale,
         y: origin.y + view.panY + (hoveredPoint.y + TILE_HEIGHT / 2) * view.scale,
@@ -784,6 +906,7 @@ export const WorldCanvas = ({
       const lines = tileHoverLines({
         tile: hovered,
         terrain: latestTerrain.current[`${hovered.x}:${hovered.y}`],
+        elevation: latestElevation.current[`${hovered.x}:${hovered.y}`] ?? 0,
         minedAmount: latestMinedTiles.current[`${hovered.x}:${hovered.y}`] ?? 0,
         resourceReachable: resourceIsReachable(hovered, latestPlayerPlot.current),
         territoryOwner,
@@ -911,14 +1034,27 @@ export const WorldCanvas = ({
       const rectangle = element.getBoundingClientRect();
       const view = viewport.current;
       const origin = cameraOrigin(rectangle.width, rectangle.height);
-      const world = screenToTile({
+      const focus = latestFocus.current;
+      const point = {
         x: (event.clientX - rectangle.left - origin.x - view.panX) / view.scale,
         y: (event.clientY - rectangle.top - origin.y - view.panY) / view.scale,
-      });
-      return {
-        x: world.x + latestFocus.current.x,
-        y: world.y + latestFocus.current.y,
       };
+      const flat = screenToTile(point);
+      const groundTile = { x: flat.x + focus.x, y: flat.y + focus.y };
+      /**
+       * A mountain accepts no command, so rock standing in front of an entity must not
+       * swallow the click: when the ground tile under the pointer is occupied, that entity
+       * wins. Nothing is lost for the mountain and players keep access to their buildings.
+       */
+      if (entityAtTile(groundTile, latestBuildings.current, latestThreats.current))
+        return groundTile;
+      // Picking runs in focus-relative tile space, so the elevation lookup shifts too.
+      const raised = screenToRaisedTile(
+        point,
+        (x, y) => latestElevation.current[`${x + focus.x}:${y + focus.y}`] ?? 0,
+        MAX_ELEVATION,
+      );
+      return { x: raised.x + focus.x, y: raised.y + focus.y };
     };
     const onPointerDown = (event: PointerEvent) => {
       dragging = true;

@@ -1,7 +1,7 @@
 import { PLACEMENT_KINDS } from '@kings/simulation';
 import type { Command, CommandResult, WorldState } from '@kings/simulation';
 
-export type TerrainTile = 'grass' | 'water' | 'ore' | 'wood';
+export type TerrainTile = 'grass' | 'water' | 'ore' | 'wood' | 'mountain';
 export interface ChunkInterest {
   readonly x: number;
   readonly y: number;
@@ -43,6 +43,12 @@ export interface ClientWorldState extends Omit<
   'seed' | 'randomState' | 'deletedPlayers'
 > {
   readonly terrain: Record<string, TerrainTile>;
+  /**
+   * Mountain height in levels per tile, keyed like `terrain`. Every other tile is level
+   * zero. It is filtered to explored chunks exactly like terrain, so unexplored relief
+   * cannot be reconstructed.
+   */
+  readonly elevation: Record<string, number>;
   /** Public sector ownership, kept separate from private player state. */
   readonly territory: Record<string, string>;
 }
@@ -55,7 +61,7 @@ export interface ClientWorldState extends Omit<
 export type ClientWorldDelta = Partial<ClientWorldState>;
 
 /** Bump whenever a client can no longer safely interpret server state messages. */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 export const MAX_MESSAGE_BYTES = 64 * 1024;
 export const MAX_INTEREST_CHUNKS = 64;
 

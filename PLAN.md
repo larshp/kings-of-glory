@@ -39,7 +39,7 @@ These decisions affect saved data and most later systems, so settle them before 
 
 - [x] Create `GAME_DESIGN.md` with the core player loop and explicit non-goals for the first playable release.
 - [x] Decide whether the global map is finite, expandable, or procedurally unbounded.
-- [x] Define tile dimensions, elevation rules, chunk dimensions, coordinate limits, and maximum buildable footprint.
+- [x] Define tile dimensions, elevation rules, chunk dimensions, coordinate limits, and maximum buildable footprint. Elevation was later added for mountains: see the terrain decision in `GAME_DESIGN.md`.
 - [x] Decide which logistics model the first release uses: carriers, roads, belts, or a deliberately limited combination.
 - [x] Define the initial population model: individual settlers, aggregated workers, or a hybrid.
 - [x] Define the first production chain from raw resource to useful finished item.
@@ -193,6 +193,7 @@ Exit criteria:
 
 - [x] Generate deterministic terrain and one mineable resource type by chunk.
 - [x] Implement collision and buildability data for terrain tiles.
+- [x] Add mountain ranges with deterministic elevation: impassable, unbuildable, sent per explored tile, rendered with cliff faces and snow-capped peaks, and pickable by their raised surface.
 - [x] Create a safe player-spawn algorithm that reserves space in the one global world.
 - [x] Give each new player a minimal settlement center and starting inventory.
 - [x] Implement one gathering action with server-side range, ownership, capacity, and availability checks.

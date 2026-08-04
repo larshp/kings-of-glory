@@ -13,11 +13,38 @@ export const screenToWorld = (point: Point): Point => ({
   y: (point.y / (TILE_HEIGHT / 2) - point.x / (TILE_WIDTH / 2)) / 2,
 });
 
-/** Converts a pointer position to the nearest rendered diamond tile. */
+/**
+ * Screen pixels a tile rises per elevation level. Kept below a building's sprite height
+ * so a range beside a settlement reads as relief without swallowing the settlement.
+ */
+export const ELEVATION_STEP = 12;
+
+/** Converts a pointer position to the nearest rendered diamond tile on flat ground. */
 export const screenToTile = (point: Point): Point => {
   const world = screenToWorld({
     x: point.x - TILE_WIDTH / 2,
     y: point.y - TILE_HEIGHT / 2,
   });
   return { x: Math.round(world.x), y: Math.round(world.y) };
+};
+
+/**
+ * Converts a pointer position to the topmost tile surface under it. A tile at level L is
+ * drawn L steps higher than flat ground, so the tile whose top face covers a point is the
+ * flat tile that many steps below it. Testing from the tallest level down therefore
+ * returns the surface a player sees, and falls back to flat ground when nothing is raised.
+ *
+ * Cliff faces are deliberately not pickable: they belong to a tile whose top is elsewhere,
+ * and raised tiles are mountains, which accept no commands.
+ */
+export const screenToRaisedTile = (
+  point: Point,
+  levelAt: (x: number, y: number) => number,
+  maxLevel: number,
+): Point => {
+  for (let level = maxLevel; level > 0; level -= 1) {
+    const candidate = screenToTile({ x: point.x, y: point.y + level * ELEVATION_STEP });
+    if (levelAt(candidate.x, candidate.y) === level) return candidate;
+  }
+  return screenToTile(point);
 };

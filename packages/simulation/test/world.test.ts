@@ -3,6 +3,7 @@ import {
   buildings as buildingDefinitions,
   extractors,
   resources,
+  terrainRules,
   worldRetention,
 } from '@kings/content';
 import { findPath } from '@kings/pathfinding';
@@ -15,9 +16,11 @@ import {
   deserializeWorld,
   FixedStepRunner,
   diffWorld,
+  elevationAt,
   extractableTile,
   indexEntitiesByChunk,
   inspectWorld,
+  isOpenTile,
   joinPlayer,
   MAX_ACTIVE_CONSTRUCTIONS_PER_PLAYER,
   nearestOreTile,
@@ -74,6 +77,93 @@ const placeExtractor = (
 };
 
 describe('world simulation', () => {
+  it('raises only mountains and keeps every other tile at ground level', () => {
+    for (const seed of [1, 47, 20260719]) {
+      let mountains = 0;
+      let open = 0;
+      const levels = new Set<number>();
+      for (let x = -40; x < 40; x += 1)
+        for (let y = -40; y < 40; y += 1) {
+          const terrain = terrainAt(seed, x, y);
+          const level = elevationAt(seed, x, y);
+          // Elevation and mountain terrain are one fact expressed two ways.
+          expect(level > 0).toBe(terrain === 'mountain');
+          expect(level).toBeLessThanOrEqual(terrainRules.mountain.maxLevel);
+          expect(Number.isInteger(level)).toBe(true);
+          expect(isOpenTile(seed, x, y)).toBe(terrain !== 'water' && terrain !== 'mountain');
+          if (terrain === 'mountain') {
+            mountains += 1;
+            levels.add(level);
+          } else open += 1;
+          // Deposits are never buried, so a sector always keeps its ore and timber.
+          if (terrain === 'ore' || terrain === 'wood') expect(level).toBe(0);
+        }
+      // Ranges are a real feature of the landscape without walling the world off.
+      const share = mountains / (mountains + open);
+      expect(share).toBeGreaterThan(0.05);
+      expect(share).toBeLessThan(0.3);
+      expect(levels.size).toBeGreaterThan(1);
+    }
+  });
+
+  it('gives every starter plot enough open ground to build on', () => {
+    for (const seed of [1, 47]) {
+      const world = createWorld(seed);
+      for (let index = 0; index < 8; index += 1) {
+        joinPlayer(world, `player-${index}`);
+        const plot = world.players[`player-${index}`]!.plot;
+        let open = 0;
+        for (let x = plot.x; x < plot.x + plot.size; x += 1)
+          for (let y = plot.y; y < plot.y + plot.size; y += 1)
+            if (isOpenTile(world.seed, x, y)) open += 1;
+        expect(open).toBeGreaterThanOrEqual(plot.size ** 2 * 0.875);
+        const center = world.buildings[`center-player-${index}`]!;
+        expect(isOpenTile(world.seed, center.x, center.y)).toBe(true);
+      }
+      expect(inspectWorld(world)).toEqual([]);
+    }
+  });
+
+  it('refuses construction and scout movement on mountains', () => {
+    const world = createWorld(47);
+    joinPlayer(world, 'player-a');
+    const player = world.players['player-a']!;
+    player.inventory.wood = 40;
+    // A protected plot is nearly clear ground, so claim the sector holding a nearby range.
+    const mountain = (() => {
+      for (let x = player.plot.x - 16; x < player.plot.x + player.plot.size + 16; x += 1)
+        for (let y = player.plot.y - 16; y < player.plot.y + player.plot.size + 16; y += 1)
+          if (terrainAt(world.seed, x, y) === 'mountain') return { x, y };
+      return undefined;
+    })();
+    if (!mountain) throw new Error('Expected a mountain range near the seeded starter plot');
+    player.territoryCells[`${Math.floor(mountain.x / 8)}:${Math.floor(mountain.y / 8)}`] = true;
+
+    expect(
+      applyCommand(world, {
+        id: 'build-on-mountain',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'placeStorage',
+        ...mountain,
+      }).result,
+    ).toMatchObject({ accepted: false, code: 'tile-not-buildable' });
+    expect(player.inventory.wood).toBe(40);
+
+    const scout = Object.values(world.scouts ?? {}).find((entry) => entry.ownerId === 'player-a')!;
+    expect(
+      applyCommand(world, {
+        id: 'scout-mountain',
+        playerId: 'player-a' as never,
+        sequence: 1,
+        type: 'moveScout',
+        scoutId: scout.id,
+        ...mountain,
+      }).result,
+    ).toMatchObject({ code: 'tile-not-buildable' });
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
   it('publishes the deterministic tick pipeline order', () => {
     expect(TICK_PIPELINE).toEqual([
       'advance-clock',
@@ -863,19 +953,19 @@ describe('world simulation', () => {
     void _contentVersion;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 26 });
     expect(migrated.schemaVersion).toBe(28);
-    expect(migrated.contentVersion).toBe(1);
+    expect(migrated.contentVersion).toBe(2);
   });
 
   it('rejects a current-schema snapshot written for incompatible content', () => {
-    expect(() => deserializeWorld({ ...createWorld(47), contentVersion: 2 })).toThrow(
-      'Unsupported world content version: 2; expected 1',
+    expect(() => deserializeWorld({ ...createWorld(47), contentVersion: 3 })).toThrow(
+      'Unsupported world content version: 3; expected 2',
     );
   });
 
   it('rejects a version 27 snapshot written for incompatible content', () => {
     expect(() =>
-      deserializeWorld({ ...createWorld(48), schemaVersion: 27, contentVersion: 2 }),
-    ).toThrow('Unsupported world content version: 2; expected 1');
+      deserializeWorld({ ...createWorld(48), schemaVersion: 27, contentVersion: 3 }),
+    ).toThrow('Unsupported world content version: 3; expected 2');
   });
 
   it('trims version 27 idempotency and transfer ledgers onto their retention windows', () => {

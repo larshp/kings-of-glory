@@ -14,6 +14,7 @@ import {
   advanceTick,
   chunkKeyFor,
   createWorld,
+  isOpenTile,
   joinPlayer,
   nearestOreTile,
   terrainAt,
@@ -28,6 +29,17 @@ const connection = (): Connection & { messages: string[] } => ({
   },
   close() {},
 });
+/** Open plot tiles for a fixture to build on, independent of the seeded geography. */
+const buildTilesFor = (host: GlobalWorldHost, count: number, playerId = 'player-a') => {
+  const plot = host.world.players[playerId]!.plot;
+  const tiles: Array<{ x: number; y: number }> = [];
+  for (let x = plot.x; x < plot.x + plot.size && tiles.length < count; x += 1)
+    for (let y = plot.y; y < plot.y + plot.size && tiles.length < count; y += 1)
+      if (isOpenTile(host.world.seed, x, y)) tiles.push({ x, y });
+  if (tiles.length < count)
+    throw new Error(`Only ${tiles.length} open tiles in the ${playerId} plot`);
+  return tiles;
+};
 const oreTileFor = (host: GlobalWorldHost, playerId = 'player-a') => {
   const player = host.world.players[playerId]!;
   const tile = nearestOreTile(
@@ -591,7 +603,10 @@ describe('durable world recovery', () => {
     joinPlayer(world, 'player-b');
     const player = world.players['player-a']!;
     player.exploredChunks['2:0'] = true;
+    // The fixture needs an explored chunk that is explicitly not in sight, whatever the
+    // seeded geography puts inside a player's viewport.
     player.visibleChunks = { ...player.visibleChunks };
+    delete player.visibleChunks['2:0'];
     world.players['player-b']!.territoryCells['4:0'] = true;
     const foreign = {
       ...world.buildings['center-player-b']!,
@@ -791,13 +806,13 @@ describe('durable world recovery', () => {
     const bob = connection();
     await host.connect(alice, 'player-a');
     await host.connect(bob, 'player-b');
+    const [smelterTile, towerTile] = buildTilesFor(host, 2);
     await host.command(alice, {
       id: 'build-smelter',
       playerId: 'player-a' as never,
       sequence: 1,
       type: 'placeSmelter',
-      x: 12,
-      y: 0,
+      ...smelterTile!,
     });
     host.world.players['player-a']!.inventory.ingot = 1;
     await host.command(alice, {
@@ -816,8 +831,7 @@ describe('durable world recovery', () => {
       playerId: 'player-a' as never,
       sequence: 3,
       type: 'placeWatchtower',
-      x: 13,
-      y: 0,
+      ...towerTile!,
     });
     await host.command(alice, {
       id: 'gather',

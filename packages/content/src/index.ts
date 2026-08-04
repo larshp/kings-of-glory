@@ -1,5 +1,5 @@
 /** Content schemas deliberately use plain data so the same definitions work in builds and on the server. */
-export const CONTENT_VERSION = 1 as const;
+export const CONTENT_VERSION = 2 as const;
 
 export interface ItemDefinition {
   readonly id: string;
@@ -89,6 +89,19 @@ export const resources = {
   ore: { id: 'ore', terrain: 'ore', item: 'ore', yield: 10, renewable: false },
   wood: { id: 'wood', terrain: 'wood', item: 'wood', yield: 10, renewable: false },
 } as const satisfies Readonly<Record<string, ResourceNodeDefinition>>;
+
+/**
+ * Mountain generation. Only mountains carry elevation: every other tile stays at level
+ * zero, so construction, logistics, population, and combat keep working on flat ground
+ * while ranges give the world a readable silhouette and block movement.
+ *
+ * `ridgeScale` sizes a range, `threshold` selects how much of the world it covers, and
+ * `maxLevel` caps how tall a peak can be. Raising `threshold` shrinks the mountains.
+ */
+export const terrainRules = {
+  /** Measured coverage at these values is 13-15% of tiles, most of them low foothills. */
+  mountain: { ridgeScale: 6, threshold: 16, maxLevel: 3 },
+} as const;
 
 export const recipes = {
   smeltOre: { id: 'smelt-ore', input: { ore: 1 }, output: { ingot: 1 }, ticks: 3 },
@@ -459,6 +472,18 @@ export const validateContent = (): string[] => {
   for (const [name, bound] of Object.entries(worldRetention))
     if (!Number.isSafeInteger(bound) || bound < 1)
       errors.push(`world retention bound ${name} is invalid`);
+  const mountain = terrainRules.mountain;
+  if (
+    !Number.isInteger(mountain.ridgeScale) ||
+    mountain.ridgeScale < 1 ||
+    !Number.isInteger(mountain.maxLevel) ||
+    mountain.maxLevel < 1 ||
+    !Number.isInteger(mountain.threshold) ||
+    mountain.threshold < 1 ||
+    // A threshold that admits every tile would wall the whole world off.
+    mountain.threshold > 22
+  )
+    errors.push('mountain terrain rules are invalid');
   for (const producer of Object.values(producers)) {
     if (!buildings[producer.buildingId as keyof typeof buildings])
       errors.push(`producer references unknown building ${producer.buildingId}`);

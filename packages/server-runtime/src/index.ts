@@ -16,6 +16,7 @@ import {
   diffWorld,
   joinPlayer,
   snapshot,
+  elevationAt,
   terrainAt,
   TICK_PIPELINE,
   type TickPhase,
@@ -85,7 +86,13 @@ export const worldMapPageFor = (
     for (const sector of Object.keys(owner.territoryCells)) territory.set(sector, owner.id);
   const chunks = selected.map(({ x: chunkX, y: chunkY }) => {
     const currentlyVisible = Boolean(player.visibleChunks?.[`${chunkX}:${chunkY}`]);
-    const terrain: Record<TerrainTile, number> = { grass: 0, water: 0, ore: 0, wood: 0 };
+    const terrain: Record<TerrainTile, number> = {
+      grass: 0,
+      water: 0,
+      ore: 0,
+      wood: 0,
+      mountain: 0,
+    };
     for (let localX = 0; localX < 16; localX += 1)
       for (let localY = 0; localY < 16; localY += 1)
         terrain[terrainAt(state.seed, chunkX * 16 + localX, chunkY * 16 + localY)] += 1;
@@ -578,7 +585,7 @@ export class GlobalWorldHost {
       void seed;
       void randomState;
       void deletedPlayers;
-      return { ...visibleState, terrain: {}, territory: {} };
+      return { ...visibleState, terrain: {}, elevation: {}, territory: {} };
     }
     const visibleChunks = requestedChunks ?? new Set(Object.keys(player.exploredChunks));
     const relevantChunks = new Set(
@@ -688,6 +695,7 @@ export class GlobalWorldHost {
         : {};
     state.social.reports = [];
     const terrain: Record<string, TerrainTile> = {};
+    const elevation: Record<string, number> = {};
     for (const chunk of relevantChunks) {
       const [xText, yText] = chunk.split(':');
       const chunkX = Number(xText);
@@ -697,13 +705,14 @@ export class GlobalWorldHost {
           const x = chunkX * 16 + localX;
           const y = chunkY * 16 + localY;
           terrain[`${x}:${y}`] = terrainAt(this.#world.seed, x, y);
+          elevation[`${x}:${y}`] = elevationAt(this.#world.seed, x, y);
         }
     }
     const { seed, randomState, deletedPlayers, ...visibleState } = state;
     void seed;
     void randomState;
     void deletedPlayers;
-    return { ...visibleState, terrain, territory };
+    return { ...visibleState, terrain, elevation, territory };
   }
 
   /** Builds and clones only one player's authorized view instead of cloning the full world. */
@@ -825,7 +834,9 @@ export class GlobalWorldHost {
         return previousTerrain[`${Number(xText) * 16}:${Number(yText) * 16}`] !== undefined;
       });
     const terrain: Record<string, TerrainTile> = canReuseTerrain ? previousTerrain : {};
-    if (!canReuseTerrain)
+    const elevation: Record<string, number> =
+      canReuseTerrain && previous?.elevation ? previous.elevation : {};
+    if (!canReuseTerrain || elevation !== previous?.elevation)
       for (const chunk of relevantChunks) {
         const [xText, yText] = chunk.split(':');
         const chunkX = Number(xText);
@@ -834,7 +845,8 @@ export class GlobalWorldHost {
           for (let localY = 0; localY < 16; localY += 1) {
             const x = chunkX * 16 + localX;
             const y = chunkY * 16 + localY;
-            terrain[`${x}:${y}`] = terrainAt(source.seed, x, y);
+            if (!canReuseTerrain) terrain[`${x}:${y}`] = terrainAt(source.seed, x, y);
+            elevation[`${x}:${y}`] = elevationAt(source.seed, x, y);
           }
       }
     const territory: Record<string, string> = Object.fromEntries(
@@ -887,8 +899,8 @@ export class GlobalWorldHost {
         }),
       ),
       territory,
-    } as Omit<ClientWorldState, 'terrain'>;
-    return this.stabilizedStateFor({ ...visibleState, terrain }, previous);
+    } as Omit<ClientWorldState, 'terrain' | 'elevation'>;
+    return this.stabilizedStateFor({ ...visibleState, terrain, elevation }, previous);
   }
 
   /** Retains immutable client subtrees when their serialized content is unchanged. */

@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   borderSides,
   cameraOrigin,
+  MAX_ELEVATION,
   entityAtTile,
   initialCameraFocus,
   logisticsStatusColor,
   productionRateLabel,
   resourceDecorationSprite,
   resourceIsReachable,
+  summitColors,
   tileHoverLines,
   tileLayers,
   tileNoise,
@@ -18,6 +20,14 @@ import {
   visibleTileBounds,
 } from './WorldCanvas.js';
 import { spriteFrames } from './render-assets.js';
+import {
+  ELEVATION_STEP,
+  screenToRaisedTile,
+  screenToTile,
+  TILE_HEIGHT,
+  TILE_WIDTH,
+  worldToScreen,
+} from './projection.js';
 
 describe('visibleByIsometricDepth', () => {
   it('places the focused tile diamond at the viewport center', () => {
@@ -50,6 +60,7 @@ describe('visibleByIsometricDepth', () => {
       tileHoverLines({
         tile: { x: 4, y: 7 },
         terrain: 'grass',
+        elevation: 0,
         minedAmount: 0,
         resourceReachable: true,
         territoryOwner: 'player',
@@ -76,6 +87,7 @@ describe('visibleByIsometricDepth', () => {
       tileHoverLines({
         tile: { x: 2, y: 3 },
         terrain: 'ore',
+        elevation: 0,
         minedAmount: 4,
         resourceReachable: true,
         territoryOwner: undefined,
@@ -89,6 +101,7 @@ describe('visibleByIsometricDepth', () => {
       tileHoverLines({
         tile: { x: 2, y: 3 },
         terrain: 'wood',
+        elevation: 0,
         minedAmount: 99,
         resourceReachable: false,
         territoryOwner: undefined,
@@ -204,6 +217,55 @@ describe('visibleByIsometricDepth', () => {
       expect(deposit.patch?.sheen).toBeUndefined();
     }
     expect(tileLayers(undefined, 4, 4)).toEqual({ base: tileShade(undefined, 4, 4) });
+  });
+
+  it('caps only the tallest mountain level with snow and lights its walls consistently', () => {
+    const foothill = summitColors(3, 4, 1);
+    const peak = summitColors(3, 4, MAX_ELEVATION);
+    expect(foothill.top).not.toBe(peak.top);
+    // The south-west wall faces the light, so it must never be the darker of the pair.
+    expect(foothill.lit).not.toBe(foothill.shaded);
+    expect(summitColors(3, 4, 1)).toEqual(foothill);
+    for (const color of [foothill.top, foothill.lit, foothill.shaded, peak.top])
+      expect(color).toMatch(/^#[0-9a-f]{6}$/);
+  });
+
+  it('picks the topmost mountain surface under the pointer, not the ground behind it', () => {
+    // A single level-2 tile at (0, 0); everything else is flat.
+    const levelAt = (x: number, y: number) => (x === 0 && y === 0 ? 2 : 0);
+    const flatCentre = worldToScreen({ x: 0, y: 0 });
+    const centre = {
+      x: flatCentre.x + TILE_WIDTH / 2,
+      y: flatCentre.y + TILE_HEIGHT / 2 - 2 * ELEVATION_STEP,
+    };
+    // Over the raised top face the raised tile wins; the flat reading is a different tile.
+    expect(screenToRaisedTile(centre, levelAt, MAX_ELEVATION)).toEqual({ x: 0, y: 0 });
+    expect(screenToTile(centre)).not.toEqual({ x: 0, y: 0 });
+    // Away from the mountain, picking is unchanged from flat ground.
+    const distant = worldToScreen({ x: 6, y: 6 });
+    const distantCentre = { x: distant.x + TILE_WIDTH / 2, y: distant.y + TILE_HEIGHT / 2 };
+    expect(screenToRaisedTile(distantCentre, levelAt, MAX_ELEVATION)).toEqual(
+      screenToTile(distantCentre),
+    );
+    // With no relief at all the elevation-aware pick degenerates to the flat pick.
+    expect(screenToRaisedTile(centre, () => 0, MAX_ELEVATION)).toEqual(screenToTile(centre));
+  });
+
+  it('names a mountain and its height when hovered', () => {
+    expect(
+      tileHoverLines({
+        tile: { x: 9, y: 9 },
+        terrain: 'mountain',
+        elevation: 3,
+        minedAmount: 0,
+        resourceReachable: false,
+        territoryOwner: undefined,
+        playerId: 'player',
+        placementValid: false,
+        building: undefined,
+        threat: undefined,
+      }),
+    ).toEqual(['Tile 9, 9', 'Mountain · height 3 · Unclaimed territory', 'Not buildable']);
   });
 
   it('shows remaining deposit yield through the drawn clutter', () => {

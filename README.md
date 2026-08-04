@@ -111,7 +111,7 @@ Or start both with `npm run dev`; the npm wrapper uses the Windows command shim 
 
 The server listens on `http://127.0.0.1:3001/health` and WebSocket clients connect on port 3001. Vite serves the client at `http://127.0.0.1:5173`. By default the client connects to the same hostname as the page, so local `127.0.0.1` and LAN development addresses work; set `VITE_SERVER_URL` to override it. Development can fall back to a stable per-tab identity. Production obtains an anonymous account through `POST /session`; the server issues a signed, 30-day, HTTP-only, `SameSite=Strict`, `Secure` cookie and derives WebSocket identity from that cookie instead of trusting the client-supplied player ID.
 
-The current JSON WebSocket protocol is version 3. A client sends `hello`, then receives a `welcome` handshake acknowledgement and a filtered `worldBootstrap`. Newly relevant viewport chunks receive a replacement `chunkSnapshot`; ordinary changes use ordered `stateDelta` messages. Commands receive either `commandAcknowledged` or `commandRejected`, while `ping`/`pong`, `resync`, `maintenance`, and `error` cover connection health and recovery.
+The current JSON WebSocket protocol is version 4. A client sends `hello`, then receives a `welcome` handshake acknowledgement and a filtered `worldBootstrap`. Newly relevant viewport chunks receive a replacement `chunkSnapshot`; ordinary changes use ordered `stateDelta` messages. Commands receive either `commandAcknowledged` or `commandRejected`, while `ping`/`pong`, `resync`, `maintenance`, and `error` cover connection health and recovery.
 
 Players can contribute tools from separate settlements to the global Frontier Beacon objective. The
 server records every contribution, completes the objective at its exact target, and permits one
@@ -144,6 +144,11 @@ Development runs migrations on startup by default. Staging and production must s
 `MIGRATE_ON_STARTUP=false`, run `npm --prefix apps/server run migrate` with the dedicated migration
 credential, and start the world host with a separate runtime credential. Production startup rejects
 `MIGRATE_ON_STARTUP=true`; see [the deployment architecture](docs/deployment.md).
+
+Adding mountains changed deterministic world generation, so content version 2 rejects any snapshot
+written for content version 1: `deserializeWorld` throws `Unsupported world content version`, and the
+server refuses to restore that world rather than silently moving terrain under existing settlements.
+Development worlds must be reset, which the reset policy permits; no persistent world exists yet.
 
 `PERSISTENCE=memory` remains the default for local UI work. PostgreSQL mode journals accepted commands before applying them, saves a completed checkpoint every 300 ticks, retains the newest three completed checkpoints with replayable journal history, and writes one final checkpoint during graceful shutdown. See [001_initial.sql](packages/server-runtime/migrations/001_initial.sql) for the initial schema.
 
@@ -189,6 +194,28 @@ the whole ore → ingot → tool chain without a single gather click. Storage is
 raw output can be buffered; storage-to-storage links are rejected. Placing an extractor where no deposit
 with remaining yield is in range is rejected with `no-deposit-in-range`, and the build menu disables the
 button and explains why before the command is sent.
+
+### Mountains and terrain height
+
+The map has relief, and only mountains carry it. Ridge noise raises 13-15% of tiles to height 1, 2, or
+3 and marks them `mountain`; every other tile, including every ore deposit and timber grove, stays at
+height zero. Mountains block construction and movement through the same `isOpenTile` rule that blocks
+water, so ranges wall off raider paths and scout routes while all production, logistics, population,
+research, and combat continue on flat ground. A starter plot must be at least 87.5% open ground, so a
+range may edge into a new player's plot but can never wall them in.
+
+Height is a pure function of the world seed. Because clients never receive the seed, the server sends
+`elevation` per tile beside `terrain`, filtered to explored chunks, so unexplored relief cannot be
+reconstructed. The renderer raises each tile by its height, draws the cliff walls facing the viewer down
+to whatever the lower neighbour is, caps the tallest level with snow, and scatters deterministic rock
+facets so a plateau does not read as one slab. Ranges are drawn in the same depth-sorted pass as
+buildings and raiders, so a range hides what is behind it and is hidden by what stands in front of it.
+
+Picking follows the relief: a tile raised `L` levels is drawn `L` steps higher, so the tile whose top
+face covers a point is the flat tile that many steps below it, tested from the tallest level down.
+Cliff walls are deliberately not pickable — they belong to a tile whose top is elsewhere. One exception
+keeps play sane: when the ground tile under the pointer holds a building or raider, that entity wins the
+click even if rock is drawn in front of it. A mountain accepts no command, so nothing is lost.
 
 ### World rendering
 

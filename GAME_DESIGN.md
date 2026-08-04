@@ -7,7 +7,8 @@ Players enter one shared, persistent world at a protected settlement plot. They 
 ## Fixed decisions
 
 - The world is procedurally generated and conceptually unbounded. Coordinates are signed 32-bit tile coordinates; generation is deterministic from a world seed.
-- Tiles are diamond isometric tiles, 64 by 32 screen pixels, with no elevation in the first slice. Chunks are 16 by 16 tiles; buildings may occupy at most 2 by 2 tiles.
+- Tiles are diamond isometric tiles, 64 by 32 screen pixels. Chunks are 16 by 16 tiles; buildings may occupy at most 2 by 2 tiles.
+- Terrain has height, and only mountains carry it. Ridge noise raises 13-15% of tiles to levels 1-3 and marks them `mountain`; every other tile, including every resource deposit, stays at level zero. Mountains are impassable and unbuildable, so construction, logistics, population, research, and combat all continue to work on flat ground while ranges give the world relief and block movement. Elevation is a pure function of the world seed, and the server sends it per explored tile alongside terrain so unexplored relief cannot be reconstructed. A starter plot must be at least 87.5% open ground, so a new player is never walled in.
 - Logistics uses internal building inventories plus deterministic, recipe-validated links. Completed storage, extractors, and producers send configured-throughput inputs into completed producers or storage buffers; storage-to-storage links are rejected because they would only shuffle items between buffers. Priority ordering reserves source and target capacity per tick, preserves output space for active batches, and reports congestion or recipe reconfiguration. Carriers, roads, belts, and routing remain future work.
 - Population uses an aggregated-worker model. A settlement starts with two settlers; completed housing increases its capacity, settlers arrive gradually when capacity is available, and active producers consume deterministic worker slots according to player-set priorities. Satisfaction is derived from shelter, assigned work, and a completed hearth service. Every 200 ticks, healthy settlements gain a settler if they have room; unsatisfied settlements above their protected starting population lose one. Employment, available-worker counts, and actionable housing/work/wellbeing alerts are visible in the HUD. Individual home-to-work walking is deliberately not simulated in the first release; construction-worker ticks and material-delivery state represent required travel and transport, while scouts and threats use explicit bounded paths.
 - Every 8 by 8 terrain sector has one deterministic, finite ore deposit and one finite timber grove. The initial chain is ore -> ingot in a smelter, then ingot + wood -> tool in a metallurgy-locked workshop. Tools pay for Territorial Charters. Each player starts with enough wood to build one smelter and can gather more from timber groves.
@@ -33,7 +34,7 @@ Players enter one shared, persistent world at a protected settlement plot. They 
 
 ## Non-goals
 
-This increment does not include production accounts, combat, terrain elevation, roads, belt logistics, trade offers, or mobile support. It targets current desktop Chrome, Firefox, Edge, and Safari at a minimum 1024 by 768 viewport.
+This increment does not include production accounts, combat, roads, belt logistics, trade offers, or mobile support. Elevation applies to mountains only: no playable tile is raised, and there is no ramp, bridge, or line-of-sight rule. It targets current desktop Chrome, Firefox, Edge, and Safari at a minimum 1024 by 768 viewport.
 
 ## Initial budgets
 

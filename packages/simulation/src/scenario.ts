@@ -5,10 +5,10 @@ import {
   createWorld,
   deserializeWorld,
   inspectWorld,
+  isOpenTile,
   joinPlayer,
   nearestOreTile,
   stateHash,
-  terrainAt,
   type Building,
   type LogisticsLink,
   type TickPhase,
@@ -146,7 +146,7 @@ export const createBotWorkload = ({
       .flat()
       .filter(
         (tile) =>
-          terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
+          isOpenTile(state.seed, tile.x, tile.y) &&
           !(
             tile.y === playerState.plot.y + playerState.plot.size - 2 &&
             tile.x < playerState.plot.x + playerState.plot.size - 2

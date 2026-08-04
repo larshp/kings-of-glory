@@ -145,8 +145,9 @@ Development runs migrations on startup by default. Staging and production must s
 credential, and start the world host with a separate runtime credential. Production startup rejects
 `MIGRATE_ON_STARTUP=true`; see [the deployment architecture](docs/deployment.md).
 
-Adding mountains changed deterministic world generation, so content version 2 rejects any snapshot
-written for content version 1: `deserializeWorld` throws `Unsupported world content version`, and the
+Mountain generation has changed deterministic world generation twice: version 2 added mountains, and
+version 3 moved them onto Perlin ridge noise with taller peaks. Each bump rejects any snapshot written
+for an earlier content version: `deserializeWorld` throws `Unsupported world content version`, and the
 server refuses to restore that world rather than silently moving terrain under existing settlements.
 Development worlds must be reset, which the reset policy permits; no persistent world exists yet.
 
@@ -197,9 +198,13 @@ button and explains why before the command is sent.
 
 ### Mountains and terrain height
 
-The map has relief, and only mountains carry it. Ridge noise raises 13-15% of tiles to height 1, 2, or
-3 and marks them `mountain`; every other tile, including every ore deposit and timber grove, stays at
-height zero. Mountains block construction and movement through the same `isOpenTile` rule that blocks
+The map has relief, and only mountains carry it. Ridged fractal Perlin noise raises 13-15% of tiles to
+heights 1 through 5 and marks them `mountain`; every other tile, including every ore deposit and timber
+grove, stays at height zero. Folding the noise at zero turns its crossings into crest lines, so ranges
+come out as connected chains that climb from level-one foothills to a summit, and roughly two thirds of
+mountain tiles stand above level one. The noise cell is deliberately coarse — 32 tiles — because at a
+fine cell the same coverage breaks into isolated speckle instead of ranges.
+Mountains block construction and movement through the same `isOpenTile` rule that blocks
 water, so ranges wall off raider paths and scout routes while all production, logistics, population,
 research, and combat continue on flat ground. A starter plot must be at least 87.5% open ground, so a
 range may edge into a new player's plot but can never wall them in.
@@ -208,7 +213,9 @@ Height is a pure function of the world seed. Because clients never receive the s
 `elevation` per tile beside `terrain`, filtered to explored chunks, so unexplored relief cannot be
 reconstructed. The renderer raises each tile by its height, draws the cliff walls facing the viewer down
 to whatever the lower neighbour is, caps the tallest level with snow, and scatters deterministic rock
-facets so a plateau does not read as one slab. Ranges are drawn in the same depth-sorted pass as
+facets so a plateau does not read as one slab. One height level is a whole tile block rather than a
+shallow ledge: in this 2:1 projection a cube's vertical edge is half the tile width, so a raised tile is
+as tall as the tile it stands on and a five-level summit towers over nearby buildings. Ranges are drawn in the same depth-sorted pass as
 buildings and raiders, so a range hides what is behind it and is hidden by what stands in front of it.
 
 Picking follows the relief: a tile raised `L` levels is drawn `L` steps higher, so the tile whose top

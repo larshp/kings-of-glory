@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildings as buildingDefinitions,
+  CONTENT_VERSION,
   extractors,
   resources,
   terrainRules,
@@ -12,7 +13,7 @@ import {
   advanceTick,
   chunkCoordinate,
   chunkCoordinateFor,
-  createWorld,
+  createWorld as createWorldWithSeed,
   deserializeWorld,
   FixedStepRunner,
   diffWorld,
@@ -37,6 +38,17 @@ import {
   tileCoordinate,
   worldId,
 } from '../src/index.js';
+
+/**
+ * These fixtures address tiles by absolute coordinate and expect player-a to take the
+ * first radial plot candidate, the 8x8 at (12, 0), then walk outward along +x for the
+ * exploration and territory cases. Terrain decides which candidates are settleable, so
+ * the suite pins a seed whose first candidate is clear ground. Re-deriving every
+ * coordinate from wherever a plot lands would also mean recomputing the chunk keys the
+ * assertions name, which would obscure what each case is actually checking.
+ */
+const TEST_SEED = 117;
+const createWorld = (seed = TEST_SEED, peaceful = true) => createWorldWithSeed(seed, peaceful);
 
 const oreTileFor = (world: ReturnType<typeof createWorld>, playerId = 'player-a') => {
   const player = world.players[playerId]!;
@@ -953,19 +965,27 @@ describe('world simulation', () => {
     void _contentVersion;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 26 });
     expect(migrated.schemaVersion).toBe(28);
-    expect(migrated.contentVersion).toBe(2);
+    expect(migrated.contentVersion).toBe(CONTENT_VERSION);
   });
 
   it('rejects a current-schema snapshot written for incompatible content', () => {
-    expect(() => deserializeWorld({ ...createWorld(47), contentVersion: 3 })).toThrow(
-      'Unsupported world content version: 3; expected 2',
+    expect(() =>
+      deserializeWorld({ ...createWorld(47), contentVersion: CONTENT_VERSION + 1 }),
+    ).toThrow(
+      `Unsupported world content version: ${CONTENT_VERSION + 1}; expected ${CONTENT_VERSION}`,
     );
   });
 
   it('rejects a version 27 snapshot written for incompatible content', () => {
     expect(() =>
-      deserializeWorld({ ...createWorld(48), schemaVersion: 27, contentVersion: 3 }),
-    ).toThrow('Unsupported world content version: 3; expected 2');
+      deserializeWorld({
+        ...createWorld(48),
+        schemaVersion: 27,
+        contentVersion: CONTENT_VERSION + 1,
+      }),
+    ).toThrow(
+      `Unsupported world content version: ${CONTENT_VERSION + 1}; expected ${CONTENT_VERSION}`,
+    );
   });
 
   it('trims version 27 idempotency and transfer ledgers onto their retention windows', () => {
@@ -1238,7 +1258,7 @@ describe('world simulation', () => {
   });
 
   it('spawns PvE raids against assets and lets watchtowers defeat them automatically', () => {
-    const world = createWorld(1, false);
+    const world = createWorld(TEST_SEED, false);
     joinPlayer(world, 'player-a');
     expect(
       applyCommand(world, {
@@ -1380,7 +1400,7 @@ describe('world simulation', () => {
   });
 
   it('navigates raiders toward their target before they can deal damage', () => {
-    const world = createWorld(1, false);
+    const world = createWorld(TEST_SEED, false);
     joinPlayer(world, 'player-a');
     applyCommand(world, {
       id: 'smelter',
@@ -1465,8 +1485,10 @@ describe('world simulation', () => {
     const target = world.buildings['center-player-a']!;
     for (let index = 0; index < 8; index += 1) {
       const y = index * 2;
-      const x = Array.from({ length: 16 }, (_, offset) => -24 + offset).find(
-        (candidate) => terrainAt(world.seed, candidate, y) !== 'water',
+      // A wave has to start on ground a raider can actually leave, so this needs the
+      // shared open-tile predicate: mountains block movement exactly as water does.
+      const x = Array.from({ length: 16 }, (_, offset) => -24 + offset).find((candidate) =>
+        isOpenTile(world.seed, candidate, y),
       );
       if (x === undefined) throw new Error('Expected a passable deterministic wave spawn tile.');
       world.threats[`budget-raider-${index}`] = {
@@ -1545,7 +1567,9 @@ describe('world simulation', () => {
   });
 
   it('preserves settlement buffers and an unbuildable access lane', () => {
-    const world = createWorld(41);
+    // This case needs two plots arranged so the cell west of player-b's is inside its
+    // buffer, which is a property of where terrain lets those plots land.
+    const world = createWorld(44);
     joinPlayer(world, 'player-a');
     joinPlayer(world, 'player-b');
     const player = world.players['player-a']!;

@@ -1,5 +1,5 @@
 /** Content schemas deliberately use plain data so the same definitions work in builds and on the server. */
-export const CONTENT_VERSION = 2 as const;
+export const CONTENT_VERSION = 3 as const;
 
 export interface ItemDefinition {
   readonly id: string;
@@ -95,12 +95,22 @@ export const resources = {
  * zero, so construction, logistics, population, and combat keep working on flat ground
  * while ranges give the world a readable silhouette and block movement.
  *
- * `ridgeScale` sizes a range, `threshold` selects how much of the world it covers, and
- * `maxLevel` caps how tall a peak can be. Raising `threshold` shrinks the mountains.
+ * Heights come from ridged fractal Perlin noise, so ranges are connected chains with
+ * tall cores and foothill fringes rather than isolated spikes on a grid.
+ *
+ * `ridgeScale` is how many tiles span one noise cell, so it sets how long a range runs.
+ * `octaves` layers finer detail over that base shape. `threshold` is the normalised ridge
+ * strength a tile must reach to rise at all, so raising it shrinks the mountains. The band
+ * between `threshold` and full strength is mapped onto whole levels up to `maxLevel`.
  */
 export const terrainRules = {
-  /** Measured coverage at these values is 13-15% of tiles, most of them low foothills. */
-  mountain: { ridgeScale: 6, threshold: 16, maxLevel: 3 },
+  /**
+   * Measured coverage at these values is 13-15% of tiles, matching the footprint ranges
+   * had before, with roughly two thirds of them above level one and crests reaching
+   * `maxLevel`. A coarse cell is what makes ranges connect: at a cell of 14 the same
+   * coverage broke into speckle, because a high threshold keeps only crest fragments.
+   */
+  mountain: { ridgeScale: 32, octaves: 2, threshold: 0.81, maxLevel: 5 },
 } as const;
 
 export const recipes = {
@@ -475,13 +485,18 @@ export const validateContent = (): string[] => {
   const mountain = terrainRules.mountain;
   if (
     !Number.isInteger(mountain.ridgeScale) ||
-    mountain.ridgeScale < 1 ||
+    mountain.ridgeScale < 2 ||
+    !Number.isInteger(mountain.octaves) ||
+    mountain.octaves < 1 ||
+    // Octaves past the tile grid only add noise finer than a tile can show.
+    mountain.octaves > 8 ||
     !Number.isInteger(mountain.maxLevel) ||
     mountain.maxLevel < 1 ||
-    !Number.isInteger(mountain.threshold) ||
-    mountain.threshold < 1 ||
-    // A threshold that admits every tile would wall the whole world off.
-    mountain.threshold > 22
+    !Number.isFinite(mountain.threshold) ||
+    // A threshold at or below zero would wall the whole world off; one at or above one
+    // would leave no mountains at all.
+    mountain.threshold <= 0 ||
+    mountain.threshold >= 1
   )
     errors.push('mountain terrain rules are invalid');
   for (const producer of Object.values(producers)) {

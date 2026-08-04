@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
+import { isOpenTile } from '@kings/simulation';
 import { GlobalWorldHost, MemoryWorldPersistence, type Connection } from '../src/index.js';
+
+/**
+ * First buildable tile inside a player's plot. Terrain decides where a plot lands, so a
+ * fixed coordinate would only work for the seeds whose ranges happen to miss it.
+ */
+const plotSite = (host: GlobalWorldHost, playerId: string) => {
+  const plot = host.world.players[playerId]!.plot;
+  for (let x = plot.x; x < plot.x + plot.size; x += 1)
+    for (let y = plot.y; y < plot.y + plot.size; y += 1)
+      if (isOpenTile(host.world.seed, x, y)) return { x, y };
+  throw new Error(`Expected an open tile inside the plot of ${playerId}`);
+};
 
 const connection = (): Connection & { messages: string[] } => ({
   messages: [],
@@ -189,8 +202,7 @@ describe('serialized world conflicts', () => {
         playerId: 'player-a' as never,
         sequence: 1,
         type: 'placeSmelter',
-        x: 12,
-        y: 0,
+        ...plotSite(host, 'player-a'),
       });
       await host.command(owner, {
         id: 'permission-invite',

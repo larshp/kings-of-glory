@@ -14,10 +14,13 @@ export const screenToWorld = (point: Point): Point => ({
 });
 
 /**
- * Screen pixels a tile rises per elevation level. Kept below a building's sprite height
- * so a range beside a settlement reads as relief without swallowing the settlement.
+ * Screen pixels a tile rises per elevation level. One level is a whole tile block rather
+ * than a shallow ledge: in this 2:1 projection a cube's vertical edge is half the tile
+ * width, so a raised tile is as tall as the tile it stands on and a summit several levels
+ * up reads as a mountain instead of a plateau. Ranges do tower over nearby buildings,
+ * which is the intent — height is what separates a mountain from rough ground.
  */
-export const ELEVATION_STEP = 12;
+export const ELEVATION_STEP = TILE_WIDTH / 2;
 
 /** Converts a pointer position to the nearest rendered diamond tile on flat ground. */
 export const screenToTile = (point: Point): Point => {

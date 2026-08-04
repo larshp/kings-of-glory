@@ -366,31 +366,93 @@ const resourceNodeAt = (seed: number, x: number, y: number): 'ore' | 'wood' | un
   return undefined;
 };
 /**
- * Height of a mountain range at a tile, in levels. Ranges are ridges rather than
- * isolated spikes: the noise is sampled on a coarse grid and smoothed between two
- * neighbouring samples, so tiles form connected walls with taller cores.
+ * One lattice corner's unit gradient, dotted with the offset from that corner to the
+ * sample point. Perlin noise normally indexes a shuffled permutation table; hashing the
+ * coordinates instead keeps the field stateless, so any tile can be sampled directly
+ * without generating the world in order.
+ *
+ * The dot product is folded in here rather than returning a vector: terrain is sampled
+ * per tile on the pathfinding and state-sync paths, and a returned pair would allocate
+ * four short-lived objects per noise sample.
+ */
+const gradientDot = (
+  seed: number,
+  cellX: number,
+  cellY: number,
+  deltaX: number,
+  deltaY: number,
+) => {
+  let hash = Math.imul(cellX, 0x27d4eb2d) ^ Math.imul(cellY, 0x165667b1) ^ seed;
+  hash = Math.imul(hash ^ (hash >>> 15), 0x2c1b3c6d);
+  hash = Math.imul(hash ^ (hash >>> 12), 0x297a2d39);
+  hash ^= hash >>> 15;
+  // >>> 0 reads the hash as unsigned so the angle covers the whole circle.
+  const angle = (hash >>> 0) * ((Math.PI * 2) / 4294967296);
+  return Math.cos(angle) * deltaX + Math.sin(angle) * deltaY;
+};
+
+/** Perlin's quintic ease curve. Its zero first and second derivatives hide cell seams. */
+const fade = (t: number) => t * t * t * (t * (t * 6 - 15) + 10);
+
+/**
+ * 2D Perlin gradient noise, in roughly -1 to 1. Only multiplication, addition, and the
+ * integer hash above are involved, so every platform running the simulation agrees on the
+ * result bit for bit and a seed always rebuilds the same terrain.
+ */
+const perlin = (seed: number, x: number, y: number) => {
+  const cellX = Math.floor(x);
+  const cellY = Math.floor(y);
+  const corner = (offsetX: number, offsetY: number) =>
+    gradientDot(seed, cellX + offsetX, cellY + offsetY, x - cellX - offsetX, y - cellY - offsetY);
+  const easeX = fade(x - cellX);
+  const easeY = fade(y - cellY);
+  const north = corner(0, 0) + easeX * (corner(1, 0) - corner(0, 0));
+  const south = corner(0, 1) + easeX * (corner(1, 1) - corner(0, 1));
+  // 2D Perlin peaks near ±1/sqrt(2); scaling up spends the full -1 to 1 range.
+  return (north + easeY * (south - north)) * Math.SQRT2;
+};
+
+/**
+ * Normalised mountain strength at a tile, from 0 on open ground to 1 on a summit.
+ *
+ * Plain Perlin noise makes rolling hills, not mountains. Folding it at zero with
+ * `1 - |noise|` turns the crossings into sharp crest lines, and squaring the result thins
+ * those crests further, so octaves sum into connected ranges with genuinely tall cores.
  */
 const ridgeStrength = (seed: number, x: number, y: number) => {
-  const scale = terrainRules.mountain.ridgeScale;
-  const ridgeX = Math.floor(x / scale);
-  const ridgeY = Math.floor(y / scale);
-  const sample = (offsetX: number, offsetY: number) =>
-    coordinateNoise(seed ^ 0x51ed270b, ridgeX + offsetX, ridgeY + offsetY) % 23;
-  // Averaging with the next sample in each axis removes the hard grid seams a single
-  // coarse sample would leave, without needing a full interpolated noise field.
-  return Math.round((sample(0, 0) * 2 + sample(1, 0) + sample(0, 1)) / 4);
+  const { ridgeScale, octaves } = terrainRules.mountain;
+  let frequency = 1 / ridgeScale;
+  let amplitude = 1;
+  let total = 0;
+  let maximum = 0;
+  for (let octave = 0; octave < octaves; octave += 1) {
+    const ridge =
+      1 - Math.abs(perlin(seed ^ Math.imul(octave + 1, 0x9e3779b9), x * frequency, y * frequency));
+    total += ridge * ridge * amplitude;
+    maximum += amplitude;
+    // Each octave halves the wavelength and its contribution, the usual fBm progression.
+    frequency *= 2;
+    amplitude *= 0.5;
+  }
+  return total / maximum;
 };
 
 /**
  * Tile elevation in levels. Only mountains rise above level zero, which keeps every
  * gameplay rule on flat ground while the map still has real height.
+ *
+ * Strength above the threshold is mapped onto whole levels, so a range climbs through
+ * foothills to a summit instead of every mountain tile standing the same height.
  */
 export const elevationAt = (seed: number, x: number, y: number): number => {
   if (resourceNodeAt(seed, x, y) || terrainNoise(seed, x, y) === 0) return 0;
   const { threshold, maxLevel } = terrainRules.mountain;
   const strength = ridgeStrength(seed, x, y);
   if (strength < threshold) return 0;
-  return Math.min(maxLevel, strength - threshold + 1);
+  const climb = (strength - threshold) / (1 - threshold);
+  // ceil keeps the faintest qualifying tile at level 1; clamping guards the summit itself,
+  // where climb reaches exactly 1.
+  return Math.max(1, Math.min(maxLevel, Math.ceil(climb * maxLevel)));
 };
 
 export const terrainAt = (

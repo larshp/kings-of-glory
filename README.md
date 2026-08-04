@@ -213,9 +213,9 @@ Height is a pure function of the world seed. Because clients never receive the s
 `elevation` per tile beside `terrain`, filtered to explored chunks, so unexplored relief cannot be
 reconstructed. The renderer raises each tile by its height, draws the cliff walls facing the viewer down
 to whatever the lower neighbour is, caps the tallest level with snow, and scatters deterministic rock
-facets so a plateau does not read as one slab. One height level is a whole tile block rather than a
-shallow ledge: in this 2:1 projection a cube's vertical edge is half the tile width, so a raised tile is
-as tall as the tile it stands on and a five-level summit towers over nearby buildings. Ranges are drawn in the same depth-sorted pass as
+facets so a plateau does not read as one slab. One height level rises half a tile block, a quarter of the
+tile width in this 2:1 projection, so levels stack into real relief and a five-level summit reads as a
+mountain while a range beside a settlement stays low enough not to swallow it. Ranges are drawn in the same depth-sorted pass as
 buildings and raiders, so a range hides what is behind it and is hidden by what stands in front of it.
 
 Picking follows the relief: a tile raised `L` levels is drawn `L` steps higher, so the tile whose top

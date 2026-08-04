@@ -52,7 +52,15 @@ import {
 } from './preferences.js';
 import './style.css';
 
-const defaultServerUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname || 'localhost'}:3001`;
+// The dev server binds port 3001 on the IPv6 wildcard, and WSL only relays that
+// to the Windows host as `::1` — so a page opened at the `127.0.0.1:5173` URL Vite
+// prints would dial an unreachable `127.0.0.1:3001`. `localhost` resolves to a
+// relayed address on both sides, so dev always dials it regardless of page host.
+// Built clients keep following the page hostname so LAN and deployed hosts work.
+const defaultServerHost = import.meta.env.DEV
+  ? 'localhost'
+  : window.location.hostname || 'localhost';
+const defaultServerUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${defaultServerHost}:3001`;
 const serverUrl = import.meta.env.VITE_SERVER_URL ?? defaultServerUrl;
 const sessionUrl = new URL(serverUrl);
 sessionUrl.protocol = sessionUrl.protocol === 'wss:' ? 'https:' : 'http:';

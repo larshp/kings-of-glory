@@ -190,6 +190,20 @@ raw output can be buffered; storage-to-storage links are rejected. Placing an ex
 with remaining yield is in range is rejected with `no-deposit-in-range`, and the build menu disables the
 button and explains why before the command is sent.
 
+### World rendering
+
+The map is drawn from one texture atlas authored in 64×64 design cells and stored at 2×, so sprites
+stay crisp on high-density displays; every frame declares its ground-contact origin, and the renderer
+scales atlas pixels down to design pixels when drawing. Terrain shading is picked from a per-terrain
+palette by a coordinate hash, which gives organic variation that is identical on every client and
+reload. Ponds and deposits are drawn as surfaces inset into the tile so a ring of ground remains
+visible around them instead of a hard-edged tile of another colour, and each deposit carries clutter —
+boulders or conifers — whose stage shows the remaining yield on the map rather than only in the hover
+tooltip. Sector ownership is drawn as a border along the sides where the owner changes, in green for
+your own claim, so the terrain underneath stays readable. Buildings and raiders get a contact shadow,
+damaged buildings and wounded raiders get a health bar, and tile markers are painted on the ground so
+sprites occlude them correctly.
+
 ### Interface layout
 
 The HUD keeps identity, connection status, the resource bar, and the next onboarding step in a header

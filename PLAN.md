@@ -125,6 +125,7 @@ Exit criteria:
 - [x] Add a React HUD shell with connection status, selected-object details, resources, notifications, and a build menu placeholder.
 - [x] Create an asset manifest and loading screen with progress and error handling.
 - [x] Use texture atlases and establish asset naming, scale, origin, and animation conventions.
+- [x] Render terrain, deposits, ownership, and entity condition legibly: hash-varied ground shades, inset ponds and outcrops, deposit clutter that shows remaining yield, sector borders instead of a colour wash, contact shadows, and health bars.
 - [x] Add debug overlays for coordinates, chunks, entity IDs, paths, frame time, and visible-object count.
 - [x] Add rendering tests for projection math and lightweight browser tests for camera and selection behavior.
 

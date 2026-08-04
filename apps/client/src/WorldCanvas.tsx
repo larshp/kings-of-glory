@@ -1,5 +1,9 @@
 import { useEffect, useRef } from 'react';
-import { recipes, resources as resourceDefinitions } from '@kings/content';
+import {
+  recipes,
+  resources as resourceDefinitions,
+  threats as threatDefinitions,
+} from '@kings/content';
 import type { TerrainTile } from '@kings/protocol';
 import { GATHER_RANGE, type Building, type LogisticsLink, type Threat } from '@kings/simulation';
 import type { CameraBindings } from './preferences.js';
@@ -239,20 +243,104 @@ export const visibleRenderChunks = (bounds: VisibleTileBounds) =>
     maxY: Math.min(bounds.maxY, chunk.y * 16 + 15),
   }));
 
-const terrainColor = (terrain: TerrainTile | undefined, x: number, y: number) =>
-  terrain === 'water'
-    ? '#2f6d93'
-    : terrain === 'ore'
-      ? '#6b6b79'
-      : terrain === 'wood'
-        ? '#7d5433'
-        : terrain === 'grass'
-          ? (x + y) % 2 === 0
-            ? '#3b6a48'
-            : '#315d3d'
-          : (x + y) % 2 === 0
-            ? '#29463c'
-            : '#233d34';
+/**
+ * A stable integer hash per tile. Terrain variation has to look organic but stay
+ * identical between frames, clients, and reloads, so it is derived from coordinates
+ * rather than sampled randomly.
+ */
+export const tileNoise = (x: number, y: number) => {
+  let hash = Math.imul(x | 0, 374_761_393) + Math.imul(y | 0, 668_265_263);
+  hash = Math.imul(hash ^ (hash >>> 13), 1_274_126_177);
+  return (hash ^ (hash >>> 16)) >>> 0;
+};
+
+/** Ground palettes, ordered light to dark within each surface so tiles read as one field. */
+const TILE_PALETTES = {
+  grass: ['#3c6e50', '#396949', '#366544', '#33613f', '#315d3d'],
+  /** Damp earth ringing a pond, so water is not a hard-edged blue tile on grass. */
+  bank: ['#446049', '#405a45', '#3c5541'],
+  water: ['#2a6790', '#276185', '#245b7d'],
+  sheen: ['#3d84ae', '#387ea6'],
+  rock: ['#5b6472', '#55606c', '#4f5966'],
+  grove: ['#2f5c3c', '#2c5738', '#295234'],
+  unexplored: ['#20362d', '#1d3129', '#1a2c25'],
+} as const;
+
+const shadeFrom = (palette: readonly string[], x: number, y: number, salt = 0) =>
+  palette[(tileNoise(x, y) + salt) % palette.length]!;
+
+export const tileShade = (terrain: TerrainTile | undefined, x: number, y: number) => {
+  const palette =
+    terrain === 'water'
+      ? TILE_PALETTES.water
+      : terrain === 'ore'
+        ? TILE_PALETTES.rock
+        : terrain === 'wood'
+          ? TILE_PALETTES.grove
+          : terrain === 'grass'
+            ? TILE_PALETTES.grass
+            : TILE_PALETTES.unexplored;
+  return shadeFrom(palette, x, y);
+};
+
+export interface TileLayers {
+  readonly base: string;
+  /**
+   * An inset surface drawn inside the tile. Water and deposits keep a ring of ground
+   * around them so they look like ponds and outcrops instead of replaced tiles.
+   */
+  readonly patch?: { readonly fill: string; readonly inset: number; readonly sheen?: string };
+}
+
+export const tileLayers = (terrain: TerrainTile | undefined, x: number, y: number): TileLayers => {
+  if (terrain === 'water')
+    return {
+      base: shadeFrom(TILE_PALETTES.bank, x, y),
+      patch: {
+        fill: tileShade(terrain, x, y),
+        inset: 5,
+        sheen: shadeFrom(TILE_PALETTES.sheen, x, y, 1),
+      },
+    };
+  if (terrain === 'ore' || terrain === 'wood')
+    return {
+      base: shadeFrom(TILE_PALETTES.grass, x, y),
+      patch: { fill: tileShade(terrain, x, y), inset: terrain === 'ore' ? 7 : 6 },
+    };
+  return { base: tileShade(terrain, x, y) };
+};
+
+/**
+ * Ground clutter that shows a deposit's remaining yield on the map instead of only in
+ * the hover tooltip, so a worked-out node is visible at a glance.
+ */
+export const resourceDecorationSprite = (
+  terrain: TerrainTile | undefined,
+  minedAmount: number,
+): SpriteId | undefined => {
+  if (terrain !== 'ore' && terrain !== 'wood') return undefined;
+  const total = resourceDefinitions[terrain].yield;
+  const remaining = Math.max(0, total - minedAmount);
+  const base = terrain === 'ore' ? 'ore-node' : 'timber-node';
+  if (remaining === 0) return `${base}-spent`;
+  return remaining * 2 <= total ? `${base}-low` : base;
+};
+
+/** Diamond sides whose neighbour belongs to a different region, in screen-corner order. */
+export const borderSides = (
+  x: number,
+  y: number,
+  regionAt: (x: number, y: number) => string | undefined,
+): Array<'south-east' | 'south-west' | 'north-west' | 'north-east'> => {
+  const region = regionAt(x, y);
+  if (!region) return [];
+  const sides: Array<'south-east' | 'south-west' | 'north-west' | 'north-east'> = [];
+  if (regionAt(x + 1, y) !== region) sides.push('south-east');
+  if (regionAt(x, y + 1) !== region) sides.push('south-west');
+  if (regionAt(x - 1, y) !== region) sides.push('north-west');
+  if (regionAt(x, y - 1) !== region) sides.push('north-east');
+  return sides;
+};
 
 export const WorldCanvas = ({
   buildings,
@@ -381,13 +469,23 @@ export const WorldCanvas = ({
     context.translate(origin.x + view.panX, origin.y + view.panY);
     context.scale(view.scale, view.scale);
 
-    const diamond = (point: { x: number; y: number }, fill: string, stroke?: string) => {
+    const tilePoint = (x: number, y: number) =>
+      worldToScreen({ x: x - latestFocus.current.x, y: y - latestFocus.current.y });
+    /** `inset` shrinks the diamond towards its centre in screen pixels. */
+    const diamondPath = (point: { x: number; y: number }, inset = 0) => {
+      const centerX = point.x + TILE_WIDTH / 2;
+      const centerY = point.y + TILE_HEIGHT / 2;
+      const halfWidth = TILE_WIDTH / 2 - inset * 2;
+      const halfHeight = TILE_HEIGHT / 2 - inset;
       context.beginPath();
-      context.moveTo(point.x, point.y + TILE_HEIGHT / 2);
-      context.lineTo(point.x + TILE_WIDTH / 2, point.y);
-      context.lineTo(point.x + TILE_WIDTH, point.y + TILE_HEIGHT / 2);
-      context.lineTo(point.x + TILE_WIDTH / 2, point.y + TILE_HEIGHT);
+      context.moveTo(centerX - halfWidth, centerY);
+      context.lineTo(centerX, centerY - halfHeight);
+      context.lineTo(centerX + halfWidth, centerY);
+      context.lineTo(centerX, centerY + halfHeight);
       context.closePath();
+    };
+    const diamond = (point: { x: number; y: number }, fill: string, stroke?: string) => {
+      diamondPath(point);
       context.fillStyle = fill;
       context.fill();
       if (stroke) {
@@ -396,46 +494,29 @@ export const WorldCanvas = ({
         context.stroke();
       }
     };
+    /** Adds one diamond side to the current path, using the screen-corner order. */
+    const addSide = (
+      point: { x: number; y: number },
+      side: 'south-east' | 'south-west' | 'north-west' | 'north-east',
+    ) => {
+      const west = { x: point.x, y: point.y + TILE_HEIGHT / 2 };
+      const north = { x: point.x + TILE_WIDTH / 2, y: point.y };
+      const east = { x: point.x + TILE_WIDTH, y: point.y + TILE_HEIGHT / 2 };
+      const south = { x: point.x + TILE_WIDTH / 2, y: point.y + TILE_HEIGHT };
+      const [from, to] =
+        side === 'south-east'
+          ? [south, east]
+          : side === 'south-west'
+            ? [west, south]
+            : side === 'north-west'
+              ? [north, west]
+              : [north, east];
+      context.moveTo(from.x, from.y);
+      context.lineTo(to.x, to.y);
+    };
 
-    for (const chunk of visibleRenderChunks(tileBounds)) {
-      for (let x = chunk.minX; x <= chunk.maxX; x += 1) {
-        for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
-          diamond(
-            worldToScreen({ x: x - latestFocus.current.x, y: y - latestFocus.current.y }),
-            terrainColor(latestTerrain.current[`${x}:${y}`], x, y),
-          );
-          if (latestTerritory.current[`${Math.floor(x / 8)}:${Math.floor(y / 8)}`])
-            diamond(
-              worldToScreen({ x: x - latestFocus.current.x, y: y - latestFocus.current.y }),
-              'rgba(86, 136, 217, 0.16)',
-            );
-        }
-      }
-    }
-    if (latestOperationsOverlay.current === 'resources') {
-      context.font = '10px system-ui';
-      for (const chunk of visibleRenderChunks(tileBounds))
-        for (let x = chunk.minX; x <= chunk.maxX; x += 1)
-          for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
-            const resource = latestTerrain.current[`${x}:${y}`];
-            if (resource !== 'ore' && resource !== 'wood') continue;
-            const point = worldToScreen({
-              x: x - latestFocus.current.x,
-              y: y - latestFocus.current.y,
-            });
-            diamond(
-              point,
-              resource === 'ore' ? 'rgba(159, 188, 255, 0.32)' : 'rgba(139, 216, 134, 0.28)',
-            );
-            context.fillStyle = '#f4f0df';
-            context.fillText(resource === 'ore' ? 'Ore' : 'Wood', point.x + 23, point.y + 21);
-          }
-    }
     const drawEntitySprite = (sprite: SpriteId, x: number, y: number) => {
-      const position = worldToScreen({
-        x: x - latestFocus.current.x,
-        y: y - latestFocus.current.y,
-      });
+      const position = tilePoint(x, y);
       const assets = latestAssets.current;
       if (assets)
         drawSprite(
@@ -446,21 +527,135 @@ export const WorldCanvas = ({
           position.y + TILE_HEIGHT / 2,
         );
     };
+    /** A soft contact shadow grounds a sprite on its tile instead of letting it float. */
+    const drawContactShadow = (x: number, y: number, radius: number) => {
+      const position = tilePoint(x, y);
+      context.fillStyle = 'rgba(7, 13, 22, 0.32)';
+      context.beginPath();
+      context.ellipse(
+        position.x + TILE_WIDTH / 2,
+        position.y + TILE_HEIGHT / 2 + 2,
+        radius,
+        radius / 2.2,
+        0,
+        0,
+        Math.PI * 2,
+      );
+      context.fill();
+    };
+    const drawHealthBar = (x: number, y: number, ratio: number) => {
+      const position = tilePoint(x, y);
+      const width = 26;
+      const barX = position.x + TILE_WIDTH / 2 - width / 2;
+      const barY = position.y + TILE_HEIGHT / 2 - 34;
+      context.fillStyle = 'rgba(10, 16, 26, 0.85)';
+      context.fillRect(barX - 1, barY - 1, width + 2, 6);
+      context.fillStyle = ratio > 0.6 ? '#8fd694' : ratio > 0.3 ? '#f0c060' : '#e2706a';
+      context.fillRect(barX, barY, Math.max(1, Math.round(width * ratio)), 4);
+    };
+    const terrainAt = (x: number, y: number) => latestTerrain.current[`${x}:${y}`];
+    const sectorOwnerAt = (x: number, y: number) =>
+      latestTerritory.current[`${Math.floor(x / 8)}:${Math.floor(y / 8)}`];
+    const chunks = visibleRenderChunks(tileBounds);
+    // Pass 1: the ground, plus the inset pond or outcrop surface where a tile has one.
+    for (const chunk of chunks)
+      for (let x = chunk.minX; x <= chunk.maxX; x += 1)
+        for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
+          const point = tilePoint(x, y);
+          const layers = tileLayers(terrainAt(x, y), x, y);
+          diamond(point, layers.base);
+          if (!layers.patch) continue;
+          diamondPath(point, layers.patch.inset);
+          context.fillStyle = layers.patch.fill;
+          context.fill();
+          if (!layers.patch.sheen) continue;
+          diamondPath(point, layers.patch.inset + 5);
+          context.fillStyle = layers.patch.sheen;
+          context.fill();
+        }
+    // Pass 2: sector ownership as borders rather than a wash that hides the terrain.
+    for (const own of [true, false]) {
+      context.beginPath();
+      for (const chunk of chunks)
+        for (let x = chunk.minX; x <= chunk.maxX; x += 1)
+          for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
+            const owner = sectorOwnerAt(x, y);
+            if (!owner || (owner === latestPlayerId.current) !== own) continue;
+            for (const side of borderSides(x, y, sectorOwnerAt)) addSide(tilePoint(x, y), side);
+          }
+      context.strokeStyle = own ? 'rgba(159, 226, 177, 0.95)' : 'rgba(126, 168, 232, 0.85)';
+      context.lineWidth = 2.5;
+      context.stroke();
+    }
+    // Pass 3: deposits, drawn as clutter whose density shows the remaining yield.
+    for (const chunk of chunks)
+      for (let x = chunk.minX; x <= chunk.maxX; x += 1)
+        for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
+          const decoration = resourceDecorationSprite(
+            terrainAt(x, y),
+            latestMinedTiles.current[`${x}:${y}`] ?? 0,
+          );
+          const assets = latestAssets.current;
+          if (!decoration || !assets) continue;
+          const point = tilePoint(x, y);
+          drawSprite(
+            context,
+            assets,
+            decoration,
+            point.x + TILE_WIDTH / 2,
+            point.y + TILE_HEIGHT / 2,
+          );
+        }
+    // Pass 4: the hovered tile, so the pointer target is visible on the map itself.
+    const hoveredForHighlight = latestHoveredTile.current;
+    if (hoveredForHighlight) {
+      diamondPath(tilePoint(hoveredForHighlight.x, hoveredForHighlight.y));
+      context.strokeStyle = 'rgba(255, 243, 196, 0.8)';
+      context.lineWidth = 2;
+      context.stroke();
+    }
+    // Pass 5: tile markers. They belong to the ground, so sprites correctly occlude
+    // them instead of a flat marker being painted over a building.
+    const preview = latestPlacementPreview.current;
+    if (preview)
+      diamond(
+        tilePoint(preview.tile.x, preview.tile.y),
+        preview.valid ? 'rgba(107, 190, 123, 0.35)' : 'rgba(215, 82, 82, 0.35)',
+        preview.valid ? '#9fe2b1' : '#ff9d8a',
+      );
+    const selected = latestSelectedTile.current;
+    if (selected) drawEntitySprite('selection', selected.x, selected.y);
+    if (latestOperationsOverlay.current === 'resources') {
+      context.font = '10px system-ui';
+      for (const chunk of visibleRenderChunks(tileBounds))
+        for (let x = chunk.minX; x <= chunk.maxX; x += 1)
+          for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
+            const resource = latestTerrain.current[`${x}:${y}`];
+            if (resource !== 'ore' && resource !== 'wood') continue;
+            const point = tilePoint(x, y);
+            diamond(
+              point,
+              resource === 'ore' ? 'rgba(159, 188, 255, 0.32)' : 'rgba(139, 216, 134, 0.28)',
+            );
+            context.fillStyle = '#f4f0df';
+            context.fillText(resource === 'ore' ? 'Ore' : 'Wood', point.x + 23, point.y + 21);
+          }
+    }
     for (const building of visibleByIsometricDepth(
       latestBuildings.current,
       tileBounds.center,
       visibleRadius,
     )) {
+      drawContactShadow(building.x, building.y, building.kind === 'watchtower' ? 14 : 20);
       drawEntitySprite(
         building.constructionTicks > 0 ? 'construction' : building.kind,
         building.x,
         building.y,
       );
+      if (building.constructionTicks === 0 && building.health < building.maxHealth)
+        drawHealthBar(building.x, building.y, building.health / building.maxHealth);
       if (latestDebug.current?.enabled && latestDebug.current.showEntityIds) {
-        const position = worldToScreen({
-          x: building.x - latestFocus.current.x,
-          y: building.y - latestFocus.current.y,
-        });
+        const position = tilePoint(building.x, building.y);
         context.fillStyle = '#f4f0df';
         context.font = '10px system-ui';
         context.fillText(building.id, position.x + TILE_WIDTH / 2, position.y - 8);
@@ -477,14 +672,8 @@ export const WorldCanvas = ({
         const source = buildingsById.get(link.sourceBuildingId);
         const target = buildingsById.get(link.targetBuildingId);
         if (!source || !target) continue;
-        const sourcePoint = worldToScreen({
-          x: source.x - latestFocus.current.x,
-          y: source.y - latestFocus.current.y,
-        });
-        const targetPoint = worldToScreen({
-          x: target.x - latestFocus.current.x,
-          y: target.y - latestFocus.current.y,
-        });
+        const sourcePoint = tilePoint(source.x, source.y);
+        const targetPoint = tilePoint(target.x, target.y);
         context.beginPath();
         context.moveTo(sourcePoint.x + TILE_WIDTH / 2, sourcePoint.y + TILE_HEIGHT / 2);
         context.lineTo(targetPoint.x + TILE_WIDTH / 2, targetPoint.y + TILE_HEIGHT / 2);
@@ -512,10 +701,7 @@ export const WorldCanvas = ({
           building.productionState,
         );
         if (operationsOverlay === 'bottlenecks' && !bottleneck) continue;
-        const point = worldToScreen({
-          x: building.x - latestFocus.current.x,
-          y: building.y - latestFocus.current.y,
-        });
+        const point = tilePoint(building.x, building.y);
         context.font = '11px system-ui';
         context.fillStyle = bottleneck ? '#ffd07a' : '#d7f2ff';
         const label =
@@ -524,27 +710,18 @@ export const WorldCanvas = ({
             : building.productionState.replaceAll('-', ' ');
         context.fillText(label, point.x + TILE_WIDTH / 2, point.y - 7);
       }
-    const selected = latestSelectedTile.current;
-    if (selected) {
-      drawEntitySprite('selection', selected.x, selected.y);
-    }
-    const preview = latestPlacementPreview.current;
-    if (preview) {
-      diamond(
-        worldToScreen({
-          x: preview.tile.x - latestFocus.current.x,
-          y: preview.tile.y - latestFocus.current.y,
-        }),
-        preview.valid ? 'rgba(107, 190, 123, 0.35)' : 'rgba(215, 82, 82, 0.35)',
-        preview.valid ? '#9fe2b1' : '#ff9d8a',
-      );
-    }
     for (const threat of visibleByIsometricDepth(
       latestThreats.current,
       tileBounds.center,
       visibleRadius,
     )) {
+      drawContactShadow(threat.x, threat.y, 12);
       drawEntitySprite('raider', threat.x, threat.y);
+      drawHealthBar(
+        threat.x,
+        threat.y,
+        Math.max(0, Math.min(1, threat.health / threatDefinitions['raider-swarm'].health)),
+      );
     }
     const debugState = latestDebug.current;
     if (debugState?.enabled) {
@@ -563,14 +740,8 @@ export const WorldCanvas = ({
         )) {
           const target = buildingsById.get(threat.targetBuildingId);
           if (!target) continue;
-          const from = worldToScreen({
-            x: threat.x - latestFocus.current.x,
-            y: threat.y - latestFocus.current.y,
-          });
-          const to = worldToScreen({
-            x: target.x - latestFocus.current.x,
-            y: target.y - latestFocus.current.y,
-          });
+          const from = tilePoint(threat.x, threat.y);
+          const to = tilePoint(target.x, target.y);
           context.beginPath();
           context.moveTo(from.x + TILE_WIDTH / 2, from.y + TILE_HEIGHT / 2);
           context.lineTo(to.x + TILE_WIDTH / 2, to.y + TILE_HEIGHT / 2);
@@ -582,19 +753,13 @@ export const WorldCanvas = ({
         for (const chunk of visibleRenderChunks(tileBounds))
           for (let x = chunk.minX; x <= chunk.maxX; x += 1)
             for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
-              const point = worldToScreen({
-                x: x - latestFocus.current.x,
-                y: y - latestFocus.current.y,
-              });
+              const point = tilePoint(x, y);
               context.fillStyle = 'rgba(244, 240, 223, 0.72)';
               context.fillText(`${x},${y}`, point.x + 27, point.y + 35);
             }
       if (debugState.showChunks)
         for (const chunk of visibleRenderChunks(tileBounds)) {
-          const point = worldToScreen({
-            x: chunk.x * 16 - latestFocus.current.x,
-            y: chunk.y * 16 - latestFocus.current.y,
-          });
+          const point = tilePoint(chunk.x * 16, chunk.y * 16);
           context.strokeStyle = '#80d4ff';
           context.lineWidth = 2;
           context.strokeRect(point.x + 32, point.y + 32, 1, 1);
@@ -606,13 +771,13 @@ export const WorldCanvas = ({
 
     const hovered = latestHoveredTile.current;
     if (hovered) {
-      const tilePoint = worldToScreen({
+      const hoveredPoint = worldToScreen({
         x: hovered.x - latestFocus.current.x,
         y: hovered.y - latestFocus.current.y,
       });
       const screenPoint = {
-        x: origin.x + view.panX + (tilePoint.x + TILE_WIDTH / 2) * view.scale,
-        y: origin.y + view.panY + (tilePoint.y + TILE_HEIGHT / 2) * view.scale,
+        x: origin.x + view.panX + (hoveredPoint.x + TILE_WIDTH / 2) * view.scale,
+        y: origin.y + view.panY + (hoveredPoint.y + TILE_HEIGHT / 2) * view.scale,
       };
       const territoryOwner =
         latestTerritory.current[`${Math.floor(hovered.x / 8)}:${Math.floor(hovered.y / 8)}`];

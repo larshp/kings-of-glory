@@ -1,17 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import {
+  borderSides,
   cameraOrigin,
   entityAtTile,
   initialCameraFocus,
   logisticsStatusColor,
   productionRateLabel,
+  resourceDecorationSprite,
   resourceIsReachable,
   tileHoverLines,
+  tileLayers,
+  tileNoise,
+  tileShade,
   visibleByIsometricDepth,
   visibleChunkCoordinates,
   visibleRenderChunks,
   visibleTileBounds,
 } from './WorldCanvas.js';
+import { spriteFrames } from './render-assets.js';
 
 describe('visibleByIsometricDepth', () => {
   it('places the focused tile diamond at the viewport center', () => {
@@ -157,6 +163,86 @@ describe('visibleByIsometricDepth', () => {
       { x: 1, y: 0, minX: 16, maxX: 17, minY: 14, maxY: 15 },
       { x: 1, y: 1, minX: 16, maxX: 17, minY: 16, maxY: 17 },
     ]);
+  });
+
+  it('varies terrain shading deterministically inside each terrain palette', () => {
+    expect(tileNoise(3, -4)).toBe(tileNoise(3, -4));
+    expect(tileNoise(3, -4)).not.toBe(tileNoise(-4, 3));
+    for (const [x, y] of [
+      [0, 0],
+      [1, 0],
+      [7, -3],
+      [-12, 40],
+    ] as const) {
+      expect(tileShade('grass', x, y)).toBe(tileShade('grass', x, y));
+      expect(tileShade('grass', x, y)).toMatch(/^#[0-9a-f]{6}$/);
+    }
+    // Neighbouring tiles must not repeat one alternating pair, which reads as a checkerboard.
+    const row = Array.from({ length: 24 }, (_, index) => tileShade('grass', index, 0));
+    expect(new Set(row).size).toBeGreaterThan(2);
+    // Terrains stay visually distinct even before their clutter is drawn.
+    expect(tileShade('water', 2, 2)).not.toBe(tileShade('grass', 2, 2));
+    expect(tileShade(undefined, 2, 2)).not.toBe(tileShade('grass', 2, 2));
+  });
+
+  it('insets ponds and outcrops so they are surfaces on the ground, not swapped tiles', () => {
+    const grass = tileLayers('grass', 4, 4);
+    expect(grass.patch).toBeUndefined();
+    expect(grass.base).toBe(tileShade('grass', 4, 4));
+
+    const water = tileLayers('water', 4, 4);
+    // A ring of bank stays visible around the pond, and the pond has a lighter centre.
+    expect(water.base).not.toBe(water.patch?.fill);
+    expect(water.patch?.fill).toBe(tileShade('water', 4, 4));
+    expect(water.patch?.inset).toBeGreaterThan(0);
+    expect(water.patch?.sheen).toBeDefined();
+
+    for (const terrain of ['ore', 'wood'] as const) {
+      const deposit = tileLayers(terrain, 4, 4);
+      expect(deposit.base).toBe(tileShade('grass', 4, 4));
+      expect(deposit.patch?.fill).toBe(tileShade(terrain, 4, 4));
+      expect(deposit.patch?.sheen).toBeUndefined();
+    }
+    expect(tileLayers(undefined, 4, 4)).toEqual({ base: tileShade(undefined, 4, 4) });
+  });
+
+  it('shows remaining deposit yield through the drawn clutter', () => {
+    expect(resourceDecorationSprite('ore', 0)).toBe('ore-node');
+    expect(resourceDecorationSprite('ore', 4)).toBe('ore-node');
+    expect(resourceDecorationSprite('ore', 5)).toBe('ore-node-low');
+    expect(resourceDecorationSprite('ore', 9)).toBe('ore-node-low');
+    expect(resourceDecorationSprite('ore', 10)).toBe('ore-node-spent');
+    expect(resourceDecorationSprite('ore', 99)).toBe('ore-node-spent');
+    expect(resourceDecorationSprite('wood', 0)).toBe('timber-node');
+    expect(resourceDecorationSprite('wood', 6)).toBe('timber-node-low');
+    expect(resourceDecorationSprite('wood', 10)).toBe('timber-node-spent');
+    expect(resourceDecorationSprite('grass', 0)).toBeUndefined();
+    expect(resourceDecorationSprite(undefined, 0)).toBeUndefined();
+    for (const sprite of [
+      'ore-node',
+      'ore-node-low',
+      'ore-node-spent',
+      'timber-node',
+      'timber-node-low',
+      'timber-node-spent',
+    ] as const)
+      expect(spriteFrames[sprite]).toBeDefined();
+  });
+
+  it('outlines only the sides where a region meets a different owner', () => {
+    const owners: Record<string, string> = { '0:0': 'player', '1:0': 'player', '0:1': 'rival' };
+    const ownerAt = (x: number, y: number) => owners[`${x}:${y}`];
+    // The eastern neighbour shares an owner, so that side stays open.
+    expect(borderSides(0, 0, ownerAt)).toEqual(['south-west', 'north-west', 'north-east']);
+    expect(borderSides(1, 0, ownerAt)).toEqual(['south-east', 'south-west', 'north-east']);
+    expect(borderSides(0, 1, ownerAt)).toEqual([
+      'south-east',
+      'south-west',
+      'north-west',
+      'north-east',
+    ]);
+    // Unowned tiles contribute no border at all.
+    expect(borderSides(5, 5, ownerAt)).toEqual([]);
   });
 
   it('picks a visible threat before a building on the same tile', () => {

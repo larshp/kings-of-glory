@@ -1067,8 +1067,9 @@ export const App = () => {
             Map: drag to pan, scroll to zoom, arrows to select,{' '}
             {displayKey(preferences.camera.panUp)}/{displayKey(preferences.camera.panLeft)}/
             {displayKey(preferences.camera.panDown)}/{displayKey(preferences.camera.panRight)} to
-            pan. Gray tiles are ore deposits, brown tiles are timber groves, and blue tiles are
-            public claimed sectors.
+            pan. Boulders mark ore deposits and conifers mark timber groves; both thin out as they
+            are worked. An outlined sector is claimed — green is yours, blue is another
+            settlement&apos;s.
           </p>
           {state && !player && <p>Loading world…</p>}
           {player && (

@@ -7,6 +7,10 @@ on:
         description: Deterministic soak rounds (increase for the final multi-hour run)
         required: true
         default: '25'
+      world_soak_minutes:
+        description: Continuous world soak duration in minutes (use 180 or more for release)
+        required: true
+        default: '30'
 
 permissions:
   contents: read
@@ -108,6 +112,11 @@ jobs:
         run: |
           npm --prefix apps/server run load -- 20 1000 50 | tee release-evidence/load.json
           npm --prefix apps/server run soak -- 20 1000 50 '${{ inputs.soak_rounds }}' | tee release-evidence/soak.json
+      - name: Run the continuous world soak
+        shell: bash
+        run: |
+          npm --prefix apps/server run soak:world -- '${{ inputs.world_soak_minutes }}' 20 50 10 \
+            | tee release-evidence/world-soak.json
       - name: Upload release evidence
         if: always()
         uses: actions/upload-artifact@v6

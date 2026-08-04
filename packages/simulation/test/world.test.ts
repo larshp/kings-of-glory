@@ -1,4 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import {
+  buildings as buildingDefinitions,
+  extractors,
+  resources,
+  worldRetention,
+} from '@kings/content';
 import { findPath } from '@kings/pathfinding';
 import {
   applyCommand,
@@ -9,6 +15,7 @@ import {
   deserializeWorld,
   FixedStepRunner,
   diffWorld,
+  extractableTile,
   indexEntitiesByChunk,
   inspectWorld,
   joinPlayer,
@@ -38,6 +45,32 @@ const oreTileFor = (world: ReturnType<typeof createWorld>, playerId = 'player-a'
   );
   if (!tile) throw new Error(`Expected a nearby ore deposit for ${playerId}`);
   return tile;
+};
+
+/** Places an extractor on the first accepted plot tile outside `reserved`, and returns it. */
+const placeExtractor = (
+  world: ReturnType<typeof createWorld>,
+  type: 'placeMine' | 'placeLumberCamp',
+  sequence: number,
+  reserved: readonly { x: number; y: number }[] = [],
+  playerId = 'player-a',
+) => {
+  const plot = world.players[playerId]!.plot;
+  for (let x = plot.x; x < plot.x + plot.size; x += 1)
+    for (let y = plot.y; y < plot.y + plot.size; y += 1) {
+      if (reserved.some((tile) => tile.x === x && tile.y === y)) continue;
+      const outcome = applyCommand(world, {
+        id: `${type}-${x}-${y}`,
+        playerId: playerId as never,
+        sequence,
+        type,
+        x,
+        y,
+      });
+      if (outcome.result.accepted)
+        return { building: Object.values(world.buildings).at(-1)!, x, y, outcome };
+    }
+  throw new Error(`No accepted ${type} site inside the plot of ${playerId}`);
 };
 
 describe('world simulation', () => {
@@ -587,7 +620,7 @@ describe('world simulation', () => {
     for (const player of Object.values(legacy.players)) delete player.inventory.tool;
     for (const building of Object.values(legacy.buildings)) delete building.inventory.tool;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.schemaVersion).toBe(28);
     expect(migrated.players['player-a']?.inventory.tool).toBe(0);
     expect(migrated.buildings['center-player-a']?.inventory.tool).toBe(0);
   });
@@ -597,7 +630,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 14;
     delete legacy.randomState;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.schemaVersion).toBe(28);
     expect(migrated.randomState).toBeGreaterThan(0);
     expect(inspectWorld(migrated)).toEqual([]);
   });
@@ -648,7 +681,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 16;
     for (const building of Object.values(legacy.buildings)) delete building.recipeId;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.schemaVersion).toBe(28);
     expect(migrated.buildings['center-player-a']?.recipeId).toBeNull();
     expect(
       Object.values(migrated.buildings).find((building) => building.kind === 'workshop')?.recipeId,
@@ -686,7 +719,7 @@ describe('world simulation', () => {
       priority: 1,
     };
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.schemaVersion).toBe(28);
     expect(migrated.buildings['center-player-a']?.productionState).toBe('idle');
     expect(migrated.logisticsLinks.legacy).toMatchObject({
       throughputPerTick: 1,
@@ -704,7 +737,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 18;
     for (const building of Object.values(legacy.buildings)) delete building.constructionMaterials;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.schemaVersion).toBe(28);
     expect(migrated.buildings['center-player-a']?.constructionMaterials).toEqual({
       ore: 0,
       wood: 0,
@@ -724,7 +757,7 @@ describe('world simulation', () => {
     legacy.minedTiles = { '12:0': 3 };
     const node = nearestOreTile(legacy.seed, 12, 0, 16)!;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.schemaVersion).toBe(28);
     expect(migrated.minedTiles[`${node.x}:${node.y}`]).toBe(3);
   });
 
@@ -734,7 +767,7 @@ describe('world simulation', () => {
     void _objectives;
     void _activity;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 20 });
-    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.schemaVersion).toBe(28);
     expect(migrated.cooperativeObjectives['frontier-beacon']).toMatchObject({
       totalContributed: 0,
       completedTick: null,
@@ -752,7 +785,7 @@ describe('world simulation', () => {
     void _activity;
     void _projects;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 21 });
-    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.schemaVersion).toBe(28);
     expect(migrated.playerActivity['player-a']).toEqual({
       lastActiveTick: 41,
       raidEligibleTick: 341,
@@ -766,7 +799,7 @@ describe('world simulation', () => {
     const { sharedConstructionProjects: _projects, ...legacy } = current;
     void _projects;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 22 });
-    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.schemaVersion).toBe(28);
     expect(migrated.sharedConstructionProjects).toEqual({});
     expect(migrated.playerActivity).toEqual(current.playerActivity);
     expect(inspectWorld(migrated)).toEqual([]);
@@ -779,7 +812,7 @@ describe('world simulation', () => {
     const { social: _social, ...legacy } = current;
     void _social;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 23 });
-    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.schemaVersion).toBe(28);
     expect(migrated.social).toMatchObject({
       playerNames: { 'player-a': 'Settler 1', 'player-b': 'Settler 2' },
       settlementNames: {
@@ -804,7 +837,7 @@ describe('world simulation', () => {
     void _deletedPlayers;
     void _onboardingReservations;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 24 });
-    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.schemaVersion).toBe(28);
     expect(migrated.deletedPlayers).toEqual({});
     expect(inspectWorld(migrated)).toEqual([]);
   });
@@ -815,7 +848,7 @@ describe('world simulation', () => {
     const { onboardingReservations: _onboardingReservations, ...legacy } = current;
     void _onboardingReservations;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 25 });
-    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.schemaVersion).toBe(28);
     expect(migrated.onboardingReservations['player-a']).toEqual({
       createdTick: 0,
       expiresTick: 36_000,
@@ -829,13 +862,81 @@ describe('world simulation', () => {
     const { contentVersion: _contentVersion, ...legacy } = current;
     void _contentVersion;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 26 });
-    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.schemaVersion).toBe(28);
     expect(migrated.contentVersion).toBe(1);
   });
 
   it('rejects a current-schema snapshot written for incompatible content', () => {
     expect(() => deserializeWorld({ ...createWorld(47), contentVersion: 2 })).toThrow(
       'Unsupported world content version: 2; expected 1',
+    );
+  });
+
+  it('rejects a version 27 snapshot written for incompatible content', () => {
+    expect(() =>
+      deserializeWorld({ ...createWorld(48), schemaVersion: 27, contentVersion: 2 }),
+    ).toThrow('Unsupported world content version: 2; expected 1');
+  });
+
+  it('trims version 27 idempotency and transfer ledgers onto their retention windows', () => {
+    const legacy = {
+      ...createWorld(49),
+      schemaVersion: 27,
+      processedCommands: Array.from(
+        { length: worldRetention.processedCommands + 25 },
+        (_, index) => `command-${index}`,
+      ),
+    };
+    const migrated = deserializeWorld(legacy);
+    expect(migrated.schemaVersion).toBe(28);
+    expect(migrated.processedCommands).toHaveLength(worldRetention.processedCommands);
+    expect(migrated.processedCommands.at(0)).toBe('command-25');
+    expect(migrated.processedCommands.at(-1)).toBe(
+      `command-${worldRetention.processedCommands + 24}`,
+    );
+    expect(inspectWorld(migrated)).toEqual([]);
+  });
+
+  it('keeps the idempotency window bounded while still rejecting in-flight retries', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const issue = (sequence: number) =>
+      applyCommand(world, {
+        id: `command-${sequence}`,
+        playerId: 'player-a' as never,
+        sequence,
+        type: 'explore',
+        x: sequence % 32,
+        y: 0,
+      }).result;
+    const total = worldRetention.processedCommands + 50;
+    for (let sequence = 1; sequence <= total; sequence += 1)
+      expect(issue(sequence).accepted).toBe(true);
+    expect(world.processedCommands).toHaveLength(worldRetention.processedCommands);
+    expect(world.processedCommands.at(-1)).toBe(`command-${total}`);
+    // A retry still inside the window is rejected as a duplicate.
+    expect(issue(total)).toEqual({
+      accepted: false,
+      commandId: `command-${total}`,
+      code: 'duplicate-command',
+    });
+    // A retry that has aged out of the window is still rejected, by sequence.
+    expect(issue(1)).toEqual({
+      accepted: false,
+      commandId: 'command-1',
+      code: 'out-of-order-command',
+    });
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('reports an over-retained idempotency window as an invariant failure', () => {
+    const world = createWorld();
+    world.processedCommands = Array.from(
+      { length: worldRetention.processedCommands + 1 },
+      (_, index) => `command-${index}`,
+    );
+    expect(inspectWorld(world)).toContain(
+      'world state retains too many processed command identifiers',
     );
   });
 
@@ -2460,6 +2561,236 @@ describe('world simulation', () => {
     expect(world.players['player-a']?.inventory.wood).toBe(5);
   });
 
+  it('extracts a nearby deposit into a mine without a gather command', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    world.players['player-a']!.inventory.wood = 20;
+    const { building: mine, x, y } = placeExtractor(world, 'placeMine', 1);
+    expect(mine.kind).toBe('mine');
+    expect(mine.jobPriority).toBe(1);
+    const deposit = extractableTile(world, { kind: 'mine', ownerId: 'player-a' as never, x, y })!;
+    expect(deposit).toBeDefined();
+    expect(terrainAt(world.seed, deposit.x, deposit.y)).toBe('ore');
+
+    for (let index = 0; index < buildingDefinitions.mine.constructionTicks; index += 1)
+      advanceTick(world);
+    expect(mine.constructionTicks).toBe(0);
+    expect(mine.inventory.ore).toBe(0);
+
+    const events = Array.from({ length: extractors.mine.ticksPerUnit }, () =>
+      advanceTick(world),
+    ).flat();
+    expect(mine.inventory.ore).toBe(1);
+    expect(mine.productionState).toBe('working');
+    expect(world.minedTiles[`${deposit.x}:${deposit.y}`]).toBe(1);
+    expect(events).toContainEqual({ type: 'extracted', buildingId: mine.id, playerId: 'player-a' });
+    // Extraction spends the same finite deposit that manual gathering does.
+    expect(
+      applyCommand(world, {
+        id: 'gather-same-deposit',
+        playerId: 'player-a' as never,
+        sequence: 2,
+        type: 'gather',
+        ...deposit,
+      }).result.accepted,
+    ).toBe(true);
+    expect(world.minedTiles[`${deposit.x}:${deposit.y}`]).toBe(2);
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('reports an exhausted or full mine instead of extracting', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    world.players['player-a']!.inventory.wood = 20;
+    const { building: mine, x, y } = placeExtractor(world, 'placeMine', 1);
+    for (let index = 0; index < buildingDefinitions.mine.constructionTicks; index += 1)
+      advanceTick(world);
+
+    mine.inventory.ore = mine.inventoryCapacity;
+    advanceTick(world);
+    expect(mine.productionState).toBe('blocked-output');
+    expect(mine.progress).toBe(0);
+
+    mine.inventory.ore = 0;
+    for (let offsetX = -extractors.mine.range; offsetX <= extractors.mine.range; offsetX += 1)
+      for (let offsetY = -extractors.mine.range; offsetY <= extractors.mine.range; offsetY += 1)
+        if (terrainAt(world.seed, x + offsetX, y + offsetY) === 'ore')
+          world.minedTiles[`${x + offsetX}:${y + offsetY}`] = resources.ore.yield;
+    advanceTick(world);
+    expect(mine.productionState).toBe('blocked-input');
+    expect(mine.inventory.ore).toBe(0);
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('rejects an extractor site with no deposit in range and keeps its cost', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const player = world.players['player-a']!;
+    player.inventory.wood = 20;
+    // A lumber camp cannot work an ore deposit, and this plot has no grove in range.
+    const site = { x: player.plot.x, y: player.plot.y };
+    const hasGroveInRange = extractableTile(world, {
+      kind: 'lumber-camp',
+      ownerId: 'player-a' as never,
+      ...site,
+    });
+    if (!hasGroveInRange) {
+      expect(
+        applyCommand(world, {
+          id: 'camp',
+          playerId: 'player-a' as never,
+          sequence: 1,
+          type: 'placeLumberCamp',
+          ...site,
+        }).result,
+      ).toEqual({
+        accepted: false,
+        commandId: 'camp',
+        code: 'no-deposit-in-range',
+      });
+      expect(player.inventory.wood).toBe(20);
+    }
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('feeds a smelter straight from a mine and refuses storage-to-storage links', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const player = world.players['player-a']!;
+    player.inventory.wood = 30;
+    const { building: mine } = placeExtractor(world, 'placeMine', 1, [
+      { x: 12, y: 0 },
+      { x: 13, y: 0 },
+      { x: 14, y: 0 },
+    ]);
+    for (const [sequence, type, x] of [
+      [2, 'placeSmelter', 12],
+      [3, 'placeStorage', 13],
+      [4, 'placeStorage', 14],
+    ] as const)
+      expect(
+        applyCommand(world, {
+          id: `${type}-${x}`,
+          playerId: 'player-a' as never,
+          sequence,
+          type,
+          x,
+          y: 0,
+        }).result.accepted,
+      ).toBe(true);
+    for (let index = 0; index < 20; index += 1) advanceTick(world);
+    const smelter = Object.values(world.buildings).find((building) => building.kind === 'smelter')!;
+    const [storage, secondStorage] = Object.values(world.buildings).filter(
+      (building) => building.kind === 'storage',
+    );
+    expect(smelter.constructionTicks).toBe(0);
+
+    expect(
+      applyCommand(world, {
+        id: 'mine-to-smelter',
+        playerId: 'player-a' as never,
+        sequence: 5,
+        type: 'createLogisticsLink',
+        sourceBuildingId: mine.id,
+        targetBuildingId: smelter.id,
+        item: 'ore',
+      }).result.accepted,
+    ).toBe(true);
+    expect(
+      applyCommand(world, {
+        id: 'mine-to-storage',
+        playerId: 'player-a' as never,
+        sequence: 6,
+        type: 'createLogisticsLink',
+        sourceBuildingId: mine.id,
+        targetBuildingId: storage!.id,
+        item: 'ore',
+      }).result.accepted,
+    ).toBe(true);
+    expect(
+      applyCommand(world, {
+        id: 'storage-to-storage',
+        playerId: 'player-a' as never,
+        sequence: 7,
+        type: 'createLogisticsLink',
+        sourceBuildingId: storage!.id,
+        targetBuildingId: secondStorage!.id,
+        item: 'ore',
+      }).result,
+    ).toMatchObject({ code: 'invalid-logistics-link' });
+
+    // Both links draw from the same mine, so the smelter needs the higher priority.
+    expect(
+      applyCommand(world, {
+        id: 'prefer-smelter',
+        playerId: 'player-a' as never,
+        sequence: 8,
+        type: 'setLogisticsPriority',
+        linkId: `link-${mine.id}-${smelter.id}-ore`,
+        priority: 3,
+      }).result.accepted,
+    ).toBe(true);
+    const minedTotal = () => Object.values(world.minedTiles).reduce((total, n) => total + n, 0);
+    /** Every unit taken from a deposit is ore somewhere, inside a batch, or one ingot. */
+    const heldTotal = () =>
+      mine.inventory.ore +
+      smelter.inventory.ore +
+      storage!.inventory.ore +
+      smelter.inventory.ingot +
+      (smelter.progress > 0 ? 1 : 0);
+    const minedBefore = minedTotal();
+    const heldBefore = heldTotal();
+    for (let index = 0; index < extractors.mine.ticksPerUnit * 3; index += 1) advanceTick(world);
+    const extracted = minedTotal() - minedBefore;
+    expect(extracted).toBeGreaterThan(0);
+    expect(smelter.inventory.ingot).toBeGreaterThan(0);
+    expect(heldTotal() - heldBefore).toBe(extracted);
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('shares one worker pool between extractors and recipe producers', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const player = world.players['player-a']!;
+    player.inventory.wood = 30;
+    const { building: mine } = placeExtractor(world, 'placeMine', 1, [{ x: 12, y: 0 }]);
+    expect(
+      applyCommand(world, {
+        id: 'smelter',
+        playerId: 'player-a' as never,
+        sequence: 2,
+        type: 'placeSmelter',
+        x: 12,
+        y: 0,
+      }).result.accepted,
+    ).toBe(true);
+    for (let index = 0; index < 20; index += 1) advanceTick(world);
+    const smelter = Object.values(world.buildings).find((building) => building.kind === 'smelter')!;
+    smelter.inventory.ore = 5;
+    // Settlers arrive on the 200-tick cadence, so pin the pool to one worker here.
+    player.population.total = 1;
+    advanceTick(world);
+    expect(
+      [mine.productionState, smelter.productionState].filter((state) => state === 'unassigned'),
+    ).toHaveLength(1);
+
+    // A mine deprioritized to zero leaves the settler for the smelter.
+    expect(
+      applyCommand(world, {
+        id: 'pause-mine',
+        playerId: 'player-a' as never,
+        sequence: 3,
+        type: 'setJobPriority',
+        buildingId: mine.id,
+        priority: 0,
+      }).result.accepted,
+    ).toBe(true);
+    advanceTick(world);
+    expect(mine.productionState).toBe('unassigned');
+    expect(smelter.productionState).toBe('working');
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
   it('moves storage items through deterministic logistics links without duplication', () => {
     const world = createWorld();
     joinPlayer(world, 'player-a');
@@ -2969,7 +3300,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 7;
     delete legacy.settlements;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(27);
+    expect(migrated.schemaVersion).toBe(28);
     expect(migrated.settlements['settlement-player-a']?.members['player-a']).toBe('owner');
   });
 
@@ -3078,6 +3409,8 @@ describe('world simulation', () => {
     expect(result.invariantErrors).toEqual([]);
   });
 
+  // These two scenarios run the target-density workload twice, so they need more than
+  // the default per-test budget on a loaded machine.
   it('supports a target-density bot workload without changing its deterministic result', () => {
     const first = runBotScenario(20, 500, 50);
     const second = runBotScenario(20, 500, 50);
@@ -3085,7 +3418,7 @@ describe('world simulation', () => {
     expect(Object.keys(first.state.buildings)).toHaveLength(1_000);
     expect(first.botActions.defend).toBeGreaterThan(0);
     expect(first.invariantErrors).toEqual([]);
-  });
+  }, 30_000);
 
   it('keeps a multi-settlement simulation stable through a long headless run', () => {
     const first = runBotScenario(4, 1_000, 50);
@@ -3103,7 +3436,7 @@ describe('world simulation', () => {
         .filter((building) => building.kind === 'workshop')
         .reduce((total, building) => total + building.inventory.tool, 0),
     ).toBeGreaterThan(0);
-  });
+  }, 30_000);
 
   it('runs a deterministic thousand-pair logistics stress scenario without loss or invariant errors', () => {
     const first = runInfrastructureStressScenario();

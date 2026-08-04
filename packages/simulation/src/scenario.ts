@@ -32,12 +32,54 @@ export interface PhaseProfile {
   result: ScenarioResult;
 }
 
+export interface BotWorkloadOptions {
+  readonly playerCount: number;
+  readonly targetBuildingsPerPlayer?: number;
+  /** Rebuilds world state from its own snapshot after the given zero-based tick. */
+  readonly reconnectAfterTick?: (tick: number) => boolean;
+  /**
+   * Issues one always-valid command per player per tick. Long runs need it so the
+   * accepted-command path, activity tracking, and the idempotency window stay
+   * exercised after the starter deposits are exhausted.
+   */
+  readonly keepPlayersActive?: boolean;
+}
+
+/**
+ * A resumable bot workload. Batch scenarios drive it to a tick count; the soak
+ * runner drives it against a wall clock for as long as the run lasts.
+ */
+export interface BotWorkload {
+  readonly state: WorldState;
+  readonly tick: number;
+  readonly commandCount: number;
+  readonly botActions: Readonly<Record<BotActionKind, number>>;
+  /** Issues the commands due this tick, advances the simulation, and reconnects when asked. */
+  step(): void;
+  result(): ScenarioResult;
+}
+
 /** Deterministic bot workload used by CI tests and the server load runner. */
 export const runBotScenario = (
   playerCount: number,
   ticks: number,
   targetBuildingsPerPlayer = 5,
 ): ScenarioResult => {
+  const workload = createBotWorkload({
+    playerCount,
+    targetBuildingsPerPlayer,
+    reconnectAfterTick: (tick) => ticks > 1 && tick === Math.floor(ticks / 2),
+  });
+  for (let tick = 0; tick < ticks; tick += 1) workload.step();
+  return workload.result();
+};
+
+export const createBotWorkload = ({
+  playerCount,
+  targetBuildingsPerPlayer = 5,
+  reconnectAfterTick,
+  keepPlayersActive = false,
+}: BotWorkloadOptions): BotWorkload => {
   if (!Number.isInteger(targetBuildingsPerPlayer) || targetBuildingsPerPlayer < 5)
     throw new Error('Bot scenarios require at least five buildings per player.');
   let state = createWorld(20260719, false);
@@ -131,7 +173,8 @@ export const runBotScenario = (
     if (!oreTile) throw new Error(`No reachable ore deposit for ${player}`);
     oreTiles.set(player, oreTile);
   }
-  for (let tick = 0; tick < ticks; tick += 1) {
+  let tick = 0;
+  const step = () => {
     if (tick === 1 && playerCount > 1)
       requireIssue('bot-0', {
         type: 'transferToPlayer',
@@ -273,18 +316,43 @@ export const runBotScenario = (
     for (const target of Object.values(state.buildings))
       if (target.health < target.maxHealth)
         requireIssue(target.ownerId, { type: 'repair', buildingId: target.id });
+    if (keepPlayersActive)
+      for (const player of Object.keys(state.players)) {
+        const playerState = state.players[player]!;
+        requireIssue(player, {
+          type: 'explore',
+          x: playerState.plot.x + (tick % playerState.plot.size),
+          y: playerState.plot.y,
+        });
+      }
     advanceTick(state);
-    if (ticks > 1 && tick === Math.floor(ticks / 2)) {
+    if (reconnectAfterTick?.(tick)) {
       state = deserializeWorld(state);
       botActions.reconnect += Object.keys(state.players).length;
     }
-  }
+    tick += 1;
+  };
   return {
-    state,
-    hash: stateHash(state),
-    commandCount,
-    invariantErrors: inspectWorld(state),
-    botActions,
+    get state() {
+      return state;
+    },
+    get tick() {
+      return tick;
+    },
+    get commandCount() {
+      return commandCount;
+    },
+    get botActions() {
+      return botActions;
+    },
+    step,
+    result: () => ({
+      state,
+      hash: stateHash(state),
+      commandCount,
+      invariantErrors: inspectWorld(state),
+      botActions,
+    }),
   };
 };
 

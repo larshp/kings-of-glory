@@ -128,7 +128,7 @@ New starter land and nearby resource reservations are temporary until the player
 
 The deterministic headless load clients exercise the complete progression loop: gathering, construction, both research tiers, inter-player trade, territory expansion, snapshot reconnect/restore, automated production, watchtower defense, and repairs in response to damage. Load output includes per-behavior action counts so a scenario cannot silently stop covering one of those paths while still producing ticks.
 
-Runtime safety limits are explicit and tested: inbound messages are capped at 64 KiB, each viewport may subscribe to at most 64 chunks, each player may have at most 64 active construction jobs, shared settlements may have three active projects, the global threat path budget is 128 visits per tick, the server accepts at most 256 pending commands, and connections exceeding 1 MiB of buffered outbound data are closed for backpressure. Concurrent joins and commands share one authoritative mutation queue; a 20-client hot-chunk test covers simultaneous observation and writes.
+Runtime safety limits are explicit and tested: inbound messages are capped at 64 KiB, each viewport may subscribe to at most 64 chunks, each player may have at most 64 active construction jobs, shared settlements may have three active projects, the global threat path budget is 128 visits per tick, the server accepts at most 256 pending commands, and connections exceeding 1 MiB of buffered outbound data are closed for backpressure. Authoritative world ledgers are bounded so a permanent world reaches a steady state: the duplicate-command window retains the newest 1,024 accepted command IDs and the transfer ledger the newest 1,000 transfers. Retries older than the idempotency window are still rejected, by the per-player command sequence rather than as duplicates. World snapshot schema 28 trims both ledgers when restoring an older world. Concurrent joins and commands share one authoritative mutation queue; a 20-client hot-chunk test covers simultaneous observation and writes.
 
 Conflicting world commands are serialized through one authoritative queue. Regression matrices cover both command orderings for transfer-capacity contention, duplicate transfer retries, permission revocation, invitation acceptance/removal, and ownership transfer/removal. The resulting state conserves resources, applies at most one duplicate retry, observes the permissions valid at each command's linearization point, clears invitations consistently, and retains exactly one settlement owner.
 
@@ -168,6 +168,8 @@ Set `POSTGRES_TEST_URL` to run the migration suite against a disposable schema i
 instance; without it, the external-database migration test is reported as skipped while adapter tests
 still exercise ordering, rollback, and compatibility rejection.
 
+Run the continuous world soak with `npm --prefix apps/server run soak:world -- [minutes] [players] [buildings-per-player] [tick-hz]`. It advances one world against a wall clock at the design tick rate and exits nonzero on tick overruns, event-loop stalls, dropped ticks, snapshot hash drift, invariant failures, or sustained heap growth. Growth is the least-squares slope of post-warmup samples and is reported as unmeasured for runs shorter than the growth window.
+
 Run the deterministic bot baseline with `npm --prefix apps/server run load -- [players] [ticks] [buildings-per-player]`. It reports duration, tick throughput, command count, entity count, final state hash, and end-of-run memory with deltas; record these values when evaluating performance changes.
 For a dense logistics fixture, run `npm --prefix apps/server run profile -- [pairs>=1000] [ticks]`; it reports total and per-tick time for each authoritative simulation phase.
 See [the current first-slice baseline](docs/performance-baseline.md) for a reproducible 20-player run.
@@ -175,3 +177,26 @@ See [the current first-slice baseline](docs/performance-baseline.md) for a repro
 ## Current vertical slice
 
 This increment provides a strict TypeScript workspace, a platform-independent deterministic simulation, a versioned JSON WebSocket handshake, a single authoritative world host, durable checkpoint/journal foundations, and a React/Canvas 2D isometric map. Players gather finite ore deposits (gray map tiles) and timber groves (brown map tiles), construct smelters, workshops, storage, housing, and hearths, turn ore into ingots and ingots plus wood into tools, and build recipe-validated links that automate storage-to-smelter and smelter-to-workshop delivery. The HUD explains a producer's actual recipe duration and missing inputs; housing, jobs, and a completed hearth determine settlement wellbeing. Players repair damage from acid rain or raiders. Tests cover deterministic replay, command rejection, resource conservation, content validation, protocol shape validation, snapshot migration, and checkpoint recovery.
+
+### Automated extraction
+
+Mines and lumber camps automate the gathering step. Place one within four tiles of a deposit that still
+has yield and, while a settler is assigned to it, it takes one ore or wood into its own inventory every
+four ticks. Extractors spend the same finite deposits as a manual gather, respect the same starting-plot
+resource reservations, share the settlement worker pool and job priorities with smelters and workshops,
+and can be the source of a logistics link. Linking a mine to a smelter and a smelter to a workshop runs
+the whole ore → ingot → tool chain without a single gather click. Storage is also a valid link target so
+raw output can be buffered; storage-to-storage links are rejected. Placing an extractor where no deposit
+with remaining yield is in range is rejected with `no-deposit-in-range`, and the build menu disables the
+button and explains why before the command is sent.
+
+### Interface layout
+
+The HUD keeps identity, connection status, the resource bar, and the next onboarding step in a header
+that stays visible, and groups everything else into keyboard-navigable **Build**, **Settlement**,
+**World**, **Co-op**, and **Settings** tabs. Build is the default so construction and building management
+are the first thing a new player sees; accessibility options, control rebinding, renderer diagnostics,
+and performance counters live under Settings. The tab strip is a standard ARIA tablist: arrow keys move
+between tabs and Home/End jump to the ends. The build menu is generated from content definitions and
+states the exact reason a placement is unavailable — missing wood, a locked technology, no selected tile,
+or no deposit in range.

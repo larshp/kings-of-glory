@@ -10,5 +10,7 @@
     <g transform="translate(192 64)"><path fill="#a57843" d="M20 52 25 25h14l5 27Z"/><path fill="#efd18b" d="M16 27 32 10l16 17Z"/><path fill="#fff2bf" d="M23 48h18v4H23z"/></g>
     <g transform="translate(0 128)"><path fill="#dc4e4e" d="m14 42 8-18 10 9 10-9 8 18-8 10H22Z"/><circle fill="#fff1d6" cx="26" cy="39" r="3"/><circle fill="#fff1d6" cx="38" cy="39" r="3"/></g>
     <g transform="translate(64 128)" fill="none" stroke="#f6d365" stroke-width="4"><path d="m8 38 24-16 24 16-24 16Z"/><path d="m16 38 16-10 16 10-16 10Z"/></g>
+    <g transform="translate(128 128)"><path fill="#7c848f" d="M9 51 32 14l23 37Z"/><path fill="#2b323c" d="M23 51V38a9 9 0 0 1 18 0v13Z"/><path fill="#b5822f" d="M19 44h26v5H19z"/></g>
+    <g transform="translate(192 128)"><path fill="#3f7d43" d="M32 8 44 30H20Z"/><path fill="#7a5230" d="M11 51V38h42v13Z"/><circle fill="#d0a06a" cx="20" cy="38" r="6"/><circle fill="#d0a06a" cx="33" cy="38" r="6"/><circle fill="#d0a06a" cx="46" cy="38" r="6"/></g>
   </g>
 </svg>

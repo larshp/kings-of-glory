@@ -170,3 +170,45 @@ npm.cmd --prefix apps/server run soak -- 20 1000 50 10
 
 The command returns a nonzero exit code on any invariant failure or hash drift and records peak/final
 heap and RSS values for the complete run.
+
+## Continuous world soak
+
+The repeated check above restarts the world each round, so it cannot observe wall-clock behaviour. The
+continuous soak advances one world against a real clock at the design tick rate and gates the run on
+tick overruns, event-loop stalls, dropped ticks, snapshot hash drift, invariant failures, and sustained
+memory growth. Arguments are minutes, players, buildings per player, and tick rate.
+
+```powershell
+npm.cmd --prefix apps/server run soak:world -- 480 20 50 10
+```
+
+Growth is the least-squares slope of post-warmup heap samples, reported as bytes per hour and left
+unmeasured for runs shorter than the growth window, so a short run cannot report allocator noise as a
+leak. The runner enables `--expose-gc` so each sample follows a collection.
+
+An eight-minute run at the target load (20 players, 1,000 entities, 10 Hz) on the reference machine:
+
+```json
+{
+  "ticks": 4800,
+  "droppedTicks": 0,
+  "ticksPerSecond": 9.997,
+  "commandCount": 117546,
+  "processedCommands": 1024,
+  "tickDurationMs": { "mean": 5.89, "p99": 13.2, "max": 41.49 },
+  "eventLoopDelayMs": { "mean": 16.74, "p99": 25.72, "max": 123.4 },
+  "verifications": 9,
+  "hashFailures": [],
+  "invariantFailures": [],
+  "largestSnapshotBytes": 417005,
+  "heapGrowthBytesPerHour": 1047711,
+  "rssGrowthBytesPerHour": 7184469,
+  "failures": []
+}
+```
+
+Tick p99 is 66% of the 20 ms first-slice budget and 13% of the 100 ms design budget, and heap growth is
+6% of the 16 MiB/hour regression gate. `processedCommands` staying at its 1,024-entry retention window
+across 117,546 accepted commands is the measurable result of bounding that ledger: before the bound it
+grew with every accepted command and was scanned linearly on each new one. The release soak must run for
+multiple hours; this shorter run is the reproducible local reference.

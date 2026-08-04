@@ -6,7 +6,20 @@ export type ChunkCoordinate = readonly [number, number] & { readonly __brand: 'C
 export type TileCoordinate = readonly [number, number] & { readonly __brand: 'TileCoordinate' };
 export type SettlementRole = 'owner' | 'builder' | 'logistics' | 'member';
 export type SharedProjectBuildingKind =
-  'smelter' | 'workshop' | 'storage' | 'housing' | 'hearth' | 'watchtower';
+  'smelter' | 'workshop' | 'storage' | 'housing' | 'hearth' | 'watchtower' | 'mine' | 'lumber-camp';
+
+/** Maps every placement command onto the building kind it creates. */
+export const PLACEMENT_KINDS = {
+  placeSmelter: 'smelter',
+  placeWorkshop: 'workshop',
+  placeStorage: 'storage',
+  placeHousing: 'housing',
+  placeHearth: 'hearth',
+  placeWatchtower: 'watchtower',
+  placeMine: 'mine',
+  placeLumberCamp: 'lumber-camp',
+} as const satisfies Readonly<Record<string, SharedProjectBuildingKind>>;
+export type PlacementCommandType = keyof typeof PLACEMENT_KINDS;
 
 export const playerId = (value: string): PlayerId => value as PlayerId;
 export const buildingId = (value: string): BuildingId => value as BuildingId;
@@ -82,6 +95,22 @@ export type Command =
       readonly playerId: PlayerId;
       readonly sequence: number;
       readonly type: 'placeWatchtower';
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'placeMine';
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'placeLumberCamp';
       readonly x: number;
       readonly y: number;
     }
@@ -368,6 +397,7 @@ export type RejectionCode =
   | 'building-destroyed'
   | 'persistence-failed'
   | 'resource-depleted'
+  | 'no-deposit-in-range'
   | 'tile-not-buildable'
   | 'inventory-full'
   | 'construction-incomplete'

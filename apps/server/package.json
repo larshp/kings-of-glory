@@ -10,6 +10,7 @@
     "profile": "node dist/profile.js",
     "profile:fanout": "node dist/fanout-profile.js",
     "soak": "node dist/soak.js",
+    "soak:world": "node --expose-gc dist/world-soak.js",
     "backup": "node dist/backup.js",
     "restore:drill": "node dist/restore-drill.js",
     "restore:latest": "node dist/restore-latest.js",

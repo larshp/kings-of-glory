@@ -216,6 +216,7 @@ Exit criteria:
 - [x] Define data schemas for items, resources, recipes, buildings, producers, storage, and logistics links.
 - [x] Validate all content at build time and server startup, including references and recipe cycles.
 - [x] Implement multiple resource nodes with finite or renewable behavior according to the game design.
+- [x] Automate raw extraction with mines and lumber camps so the production chain does not depend on a manual gather command, using the same finite deposits, reservations, and worker pool.
 - [x] Implement the chosen logistics model from Phase 0.
 - [x] Implement input and output buffers, reservation rules, throughput, congestion, and blocked-machine states.
 - [x] Implement storage buildings and controlled resource-transfer priorities.
@@ -325,7 +326,8 @@ Exit criteria:
 - [x] Build an onboarding flow that teaches camera movement, gathering, construction, production, logistics, settlement needs, research, and threats in the global world.
 - [x] Ensure onboarding cannot reserve unlimited land or resources through abandoned accounts.
 - [x] Build searchable construction, recipe, inventory, population, research, defense, and alert interfaces.
-- [x] Provide actionable explanations for rejected commands and stalled systems.
+- [x] Group the interface so play actions come before settings: a persistent header with connection, resources, and the next step, plus keyboard-navigable Build, Settlement, World, Co-op, and Settings tabs.
+- [x] Provide actionable explanations for rejected commands and stalled systems, including why a specific building cannot be placed on the selected tile.
 - [x] Add notification grouping and severity so large settlements do not overwhelm players.
 - [x] Add keyboard navigation and remappable controls for primary actions.
 - [x] Avoid relying on color alone and provide readable contrast and scalable UI text.
@@ -355,7 +357,8 @@ Exit criteria:
 - [x] Consider Node.js worker threads only for measured CPU-heavy tasks with clear ownership and bounded message costs.
 - [x] Move high-volume protocol messages from JSON to a versioned binary format only if bandwidth or parsing exceeds its budget. The measured target workload remains on JSON at 720 bytes/s/player and 11.0 ms/full server tick, so no binary migration is warranted.
 - [x] Establish hard safety limits for message size, subscriptions, queued paths, construction commands, and outbound buffers.
-- [ ] Run multi-hour soak tests and investigate memory growth, event-loop stalls, tick overruns, and state-hash failures.
+- [x] Build a continuous world-soak harness that gates on memory growth, event-loop stalls, tick overruns, dropped ticks, and state-hash failures, and record a target-load reference run. It found and forced a fix for an unbounded duplicate-command ledger that also made command validation linear in world age.
+- [ ] Run the multi-hour release soak with `world_soak_minutes` raised and attach its report to the release checklist.
 - [x] Document the measured threshold at which one Node.js process no longer meets the world target. Do not introduce sharding prematurely; any future partition must preserve one logical world.
 
 Exit criteria:

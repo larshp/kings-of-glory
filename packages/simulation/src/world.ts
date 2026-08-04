@@ -3,7 +3,9 @@ import {
   type BuildingId,
   type Command,
   type CommandResult,
+  PLACEMENT_KINDS,
   playerId,
+  type PlacementCommandType,
   type PlayerId,
   type SettlementRole,
   type SharedProjectBuildingKind,
@@ -13,6 +15,7 @@ import {
   CONTENT_VERSION,
   cooperativeObjectives as cooperativeObjectiveDefinitions,
   environmentalEvents,
+  extractors as extractorDefinitions,
   logisticsLinks as logisticsDefinitions,
   onboardingRules,
   producers as producerDefinitions,
@@ -21,6 +24,7 @@ import {
   socialRules,
   technologies,
   threats as threatDefinitions,
+  worldRetention,
   type TechnologyId,
   type CooperativeObjectiveId,
 } from '@kings/content';
@@ -68,7 +72,15 @@ export interface PlayerState {
 export interface Building {
   id: BuildingId;
   kind:
-    'settlement-center' | 'smelter' | 'workshop' | 'storage' | 'housing' | 'hearth' | 'watchtower';
+    | 'settlement-center'
+    | 'smelter'
+    | 'workshop'
+    | 'storage'
+    | 'housing'
+    | 'hearth'
+    | 'watchtower'
+    | 'mine'
+    | 'lumber-camp';
   ownerId: PlayerId;
   x: number;
   y: number;
@@ -227,7 +239,7 @@ export interface OnboardingReservation {
   securedTick: number | null;
 }
 export interface WorldState {
-  schemaVersion: 27;
+  schemaVersion: 28;
   contentVersion: typeof CONTENT_VERSION;
   seed: number;
   /** When true, no PvE threats spawn. Peaceful worlds stay threat-free. */
@@ -261,6 +273,7 @@ export interface WorldEvent {
     | 'buildingCancelled'
     | 'buildingDemolished'
     | 'smelted'
+    | 'extracted'
     | 'repaired'
     | 'hazard'
     | 'threatSpawned'
@@ -441,8 +454,27 @@ const recipeFor = (building: Building): ProductionRecipe | undefined =>
     ? recipesById[building.recipeId]
     : undefined;
 const isProducer = (kind: Building['kind']) => Boolean(producerFor(kind));
+const extractorFor = (kind: Building['kind']) =>
+  extractorDefinitions[kind as keyof typeof extractorDefinitions];
+const isExtractor = (kind: Building['kind']) => Boolean(extractorFor(kind));
+/** Producers and extractors both occupy a settler, so they share one job pool. */
+const needsWorker = (kind: Building['kind']) => isProducer(kind) || isExtractor(kind);
 const acceptsRecipeInput = (building: Building, item: ItemId) =>
   Boolean(recipeFor(building)?.input[item]);
+const isStorageBuilding = (kind: Building['kind']) => kind === 'storage';
+/** Producers accept only configured recipe inputs; storage buffers any item. */
+const acceptsLogisticsItem = (building: Building, item: ItemId) =>
+  isStorageBuilding(building.kind)
+    ? building.inventoryCapacity > 0
+    : acceptsRecipeInput(building, item);
+const acceptedLinkSource = (kind: Building['kind']) =>
+  (logisticsDefinitions.internalInventory.acceptedSourceKinds as readonly string[]).includes(kind);
+const acceptedLinkTarget = (kind: Building['kind']) =>
+  (logisticsDefinitions.internalInventory.acceptedTargetKinds as readonly string[]).includes(kind);
+const isPlacementCommand = <T extends { readonly type: string }>(
+  command: T,
+): command is T & { readonly type: PlacementCommandType; readonly x: number; readonly y: number } =>
+  command.type in PLACEMENT_KINDS;
 const hasRecipeInputs = (building: Building, recipe: ProductionRecipe) =>
   Object.entries(recipe.input).every(
     ([item, amount]) => building.inventory[item as ItemId] >= (amount ?? 0),
@@ -526,6 +558,37 @@ const reservedResourceOwner = (state: WorldState, x: number, y: number): PlayerI
       (left, right) =>
         left.distance - right.distance || left.player.id.localeCompare(right.player.id),
     )[0]?.player.id;
+/**
+ * The deposit an extractor works, scanned in the same deterministic ring order as
+ * manual gathering. Exhausted deposits and deposits reserved for a nearer starting
+ * settlement are skipped, so automation cannot take what a click could not.
+ */
+export const extractableTile = (
+  state: WorldState,
+  building: Pick<Building, 'kind' | 'ownerId' | 'x' | 'y'>,
+): { x: number; y: number } | undefined => {
+  const extractor = extractorFor(building.kind);
+  if (!extractor) return undefined;
+  for (let distance = 0; distance <= extractor.range; distance += 1)
+    for (let offsetX = -distance; offsetX <= distance; offsetX += 1) {
+      const offsetY = distance - Math.abs(offsetX);
+      const candidateX = building.x + offsetX;
+      for (const candidateY of offsetY === 0
+        ? [building.y]
+        : [building.y - offsetY, building.y + offsetY]) {
+        if (terrainAt(state.seed, candidateX, candidateY) !== extractor.terrain) continue;
+        if (
+          (state.minedTiles[tileKey(candidateX, candidateY)] ?? 0) >=
+          resourceDefinitions[extractor.terrain].yield
+        )
+          continue;
+        const reserved = reservedResourceOwner(state, candidateX, candidateY);
+        if (reserved !== undefined && reserved !== building.ownerId) continue;
+        return { x: candidateX, y: candidateY };
+      }
+    }
+  return undefined;
+};
 const activityFor = (state: WorldState, ownerId: PlayerId): PlayerActivity =>
   state.playerActivity[ownerId] ?? { lastActiveTick: state.tick, raidEligibleTick: state.tick };
 const isRaidEligible = (state: WorldState, ownerId: PlayerId) =>
@@ -596,7 +659,7 @@ const initialCooperativeObjectives = (): WorldState['cooperativeObjectives'] =>
   ) as unknown as WorldState['cooperativeObjectives'];
 
 export const createWorld = (seed = 1, peaceful = true): WorldState => ({
-  schemaVersion: 27,
+  schemaVersion: 28,
   contentVersion: CONTENT_VERSION,
   seed,
   peaceful,
@@ -827,7 +890,7 @@ const createBuildingRecord = (
     inventory: emptyInventory(),
     inventoryCapacity: definition.inventoryCapacity,
     populationCapacity: definition.populationCapacity,
-    jobPriority: isProducer(kind) ? 1 : 0,
+    jobPriority: needsWorker(kind) ? 1 : 0,
     recipeId: defaultRecipeIdFor(kind),
     productionState: definition.constructionTicks > 0 ? 'constructing' : 'idle',
   };
@@ -985,6 +1048,10 @@ export const applyCommand = (
     if (reservation?.securedTick === null)
       reservation.expiresTick = state.tick + onboardingRules.abandonedReservationTicks;
     state.processedCommands.push(command.id);
+    // A permanent world cannot keep every command ID: the oldest entries leave the
+    // idempotency window, where the per-player sequence check still rejects retries.
+    while (state.processedCommands.length > worldRetention.processedCommands)
+      state.processedCommands.shift();
     return { result: { accepted: true as const, commandId: command.id }, events };
   };
   if (command.type === 'gather') {
@@ -1327,7 +1394,7 @@ export const applyCommand = (
       amount: command.amount,
       tick: state.tick,
     });
-    if (state.transfers.length > 1_000) state.transfers.shift();
+    while (state.transfers.length > worldRetention.transfers) state.transfers.shift();
     return accept([
       { type: 'resourceTransferred', playerId: player.id, targetPlayerId: target.id },
     ]);
@@ -1413,9 +1480,11 @@ export const applyCommand = (
     if (!source || !target) return reject('unknown-building');
     if (
       source.id === target.id ||
-      (source.kind !== 'storage' && !isProducer(source.kind)) ||
-      !isProducer(target.kind) ||
-      !acceptsRecipeInput(target, command.item) ||
+      !acceptedLinkSource(source.kind) ||
+      !acceptedLinkTarget(target.kind) ||
+      // Storage-to-storage links would only shuffle items between buffers.
+      (isStorageBuilding(source.kind) && isStorageBuilding(target.kind)) ||
+      !acceptsLogisticsItem(target, command.item) ||
       source.constructionTicks > 0 ||
       target.constructionTicks > 0
     )
@@ -1494,23 +1563,8 @@ export const applyCommand = (
     target.jobPriority = source.jobPriority;
     return accept([]);
   }
-  const isPlacement =
-    command.type === 'placeSmelter' ||
-    command.type === 'placeWorkshop' ||
-    command.type === 'placeStorage' ||
-    command.type === 'placeHousing' ||
-    command.type === 'placeHearth' ||
-    command.type === 'placeWatchtower';
-  const building =
-    command.type === 'placeSmelter' ||
-    command.type === 'placeWorkshop' ||
-    command.type === 'placeStorage' ||
-    command.type === 'placeHousing' ||
-    command.type === 'placeHearth' ||
-    command.type === 'placeWatchtower'
-      ? undefined
-      : state.buildings[command.buildingId];
-  if (isPlacement) {
+  if (isPlacementCommand(command)) {
+    const placementKind = PLACEMENT_KINDS[command.type];
     if (
       Object.values(state.buildings).filter(
         (candidate) => candidate.ownerId === player.id && candidate.constructionTicks > 0,
@@ -1535,26 +1589,27 @@ export const applyCommand = (
       )
     )
       return reject('occupied');
-    const kind =
-      command.type === 'placeSmelter'
-        ? 'smelter'
-        : command.type === 'placeWorkshop'
-          ? 'workshop'
-          : command.type === 'placeStorage'
-            ? 'storage'
-            : command.type === 'placeHousing'
-              ? 'housing'
-              : command.type === 'placeHearth'
-                ? 'hearth'
-                : 'watchtower';
-    const definition = buildingDefinitions[kind];
+    const definition = buildingDefinitions[placementKind];
     if (definition.requiredTechnology && !player.research.unlocked[definition.requiredTechnology])
       return reject('technology-locked');
-    if (!canAffordConstruction(player.inventory, kind)) return reject('insufficient-wood');
-    deductConstructionCost(player.inventory, kind);
-    const placed = createBuildingRecord(state, player.id, kind, command.x, command.y);
+    // An extractor with no deposit in range would never produce, so refuse the site
+    // instead of silently taking the wood for a building that cannot work.
+    if (
+      isExtractor(placementKind) &&
+      !extractableTile(state, {
+        kind: placementKind,
+        ownerId: player.id,
+        x: command.x,
+        y: command.y,
+      })
+    )
+      return reject('no-deposit-in-range');
+    if (!canAffordConstruction(player.inventory, placementKind)) return reject('insufficient-wood');
+    deductConstructionCost(player.inventory, placementKind);
+    const placed = createBuildingRecord(state, player.id, placementKind, command.x, command.y);
     return accept([{ type: 'buildingPlaced', playerId: player.id, buildingId: placed.id }]);
   }
+  const building = state.buildings[command.buildingId];
   if (!building) return reject('unknown-building');
   if (building.ownerId !== player.id) {
     const role = settlementRoleFor(state, player.id, building.ownerId);
@@ -1593,7 +1648,7 @@ export const applyCommand = (
     return accept([{ type: 'buildingDemolished', playerId: player.id, buildingId: building.id }]);
   }
   if (command.type === 'setJobPriority') {
-    if (!isProducer(building.kind)) return reject('wrong-building');
+    if (!needsWorker(building.kind)) return reject('wrong-building');
     building.jobPriority = command.priority;
     return accept([]);
   }
@@ -1727,7 +1782,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
     }
     const producers = fairJobOrder(
       completedBuildings.filter(
-        (building) => isProducer(building.kind) && building.jobPriority > 0,
+        (building) => needsWorker(building.kind) && building.jobPriority > 0,
       ),
       state.tick,
     );
@@ -1823,6 +1878,38 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
       }
       continue;
     }
+    const extractor = extractorFor(building.kind);
+    if (extractor) {
+      if (building.health !== building.maxHealth) building.productionState = 'damaged';
+      else if (!staffedSmelters.has(building.id)) building.productionState = 'unassigned';
+      else if (
+        !canStore(building.inventory, building.inventoryCapacity, extractor.item as ItemId, 1)
+      ) {
+        building.productionState = 'blocked-output';
+        building.progress = 0;
+      } else {
+        const deposit = extractableTile(state, building);
+        if (!deposit) {
+          building.productionState = 'blocked-input';
+          building.progress = 0;
+        } else {
+          building.productionState = 'working';
+          if (building.progress === 0) building.progress = extractor.ticksPerUnit;
+          building.progress -= 1;
+          if (building.progress === 0) {
+            state.minedTiles[tileKey(deposit.x, deposit.y)] =
+              (state.minedTiles[tileKey(deposit.x, deposit.y)] ?? 0) + 1;
+            building.inventory[extractor.item as ItemId] += 1;
+            events.push({
+              type: 'extracted',
+              buildingId: building.id,
+              playerId: building.ownerId,
+            });
+          }
+        }
+      }
+      continue;
+    }
     const recipe = recipeFor(building);
     if (!recipe) {
       building.productionState = 'idle';
@@ -1907,7 +1994,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
       link.status = 'constructing';
       continue;
     }
-    if (!acceptsRecipeInput(target, link.item)) {
+    if (!acceptsLogisticsItem(target, link.item)) {
       link.status = 'target-reconfigured';
       continue;
     }
@@ -2304,7 +2391,10 @@ interface Version24World extends Omit<
 > {
   schemaVersion: 24;
 }
-interface Version26World extends Omit<WorldState, 'schemaVersion' | 'contentVersion'> {
+interface Version27World extends Omit<WorldState, 'schemaVersion'> {
+  schemaVersion: 27;
+}
+interface Version26World extends Omit<Version27World, 'schemaVersion' | 'contentVersion'> {
   schemaVersion: 26;
 }
 interface Version25World extends Omit<Version26World, 'schemaVersion' | 'onboardingReservations'> {
@@ -2494,11 +2584,19 @@ const onboardingReservationsForExistingWorld = (
       ];
     }),
   );
-const migrateVersion26 = (state: Version26World): WorldState => ({
+/** Version 27 worlds kept every command ID ever accepted; trim them to the retention window. */
+const migrateVersion27 = (state: Version27World): WorldState => ({
   ...state,
-  schemaVersion: 27,
-  contentVersion: CONTENT_VERSION,
+  schemaVersion: 28,
+  processedCommands: state.processedCommands.slice(-worldRetention.processedCommands),
+  transfers: state.transfers.slice(-worldRetention.transfers),
 });
+const migrateVersion26 = (state: Version26World): WorldState =>
+  migrateVersion27({
+    ...state,
+    schemaVersion: 27,
+    contentVersion: CONTENT_VERSION,
+  });
 const migrateVersion25 = (state: Version25World): WorldState =>
   migrateVersion26({
     ...state,
@@ -2616,13 +2714,17 @@ const migrateToCurrentSchema = (state: unknown): WorldState => {
 /** Forward-only snapshot migration kept inside the platform-independent simulation. */
 export const deserializeWorld = (raw: unknown): WorldState => {
   const candidate = structuredClone(raw) as { schemaVersion?: number; contentVersion?: number };
-  if (candidate.schemaVersion === 27) {
-    if (candidate.contentVersion !== CONTENT_VERSION)
-      throw new Error(
-        `Unsupported world content version: ${String(candidate.contentVersion)}; expected ${CONTENT_VERSION}`,
-      );
-    return candidate as WorldState;
-  }
+  // Snapshots from version 27 onwards record the content version they were written for.
+  if (
+    candidate.schemaVersion !== undefined &&
+    candidate.schemaVersion >= 27 &&
+    candidate.contentVersion !== CONTENT_VERSION
+  )
+    throw new Error(
+      `Unsupported world content version: ${String(candidate.contentVersion)}; expected ${CONTENT_VERSION}`,
+    );
+  if (candidate.schemaVersion === 28) return candidate as WorldState;
+  if (candidate.schemaVersion === 27) return migrateVersion27(candidate as Version27World);
   if (candidate.schemaVersion === 26) return migrateVersion26(candidate as Version26World);
   if (candidate.schemaVersion === 25) return migrateVersion25(candidate as Version25World);
   if (candidate.schemaVersion === 24) return migrateVersion24(candidate as Version24World);
@@ -2982,6 +3084,8 @@ export const inspectWorld = (state: WorldState): string[] => {
     if (!Number.isSafeInteger(threat.x) || !Number.isSafeInteger(threat.y))
       errors.push(`threat ${id} has invalid coordinates`);
   }
+  if (state.transfers.length > worldRetention.transfers)
+    errors.push('world state retains too many resource transfers');
   const transferIds = new Set<string>();
   for (const transfer of state.transfers) {
     if (transferIds.has(transfer.id)) errors.push(`duplicate transfer ${transfer.id}`);
@@ -2993,6 +3097,8 @@ export const inspectWorld = (state: WorldState): string[] => {
     if (!isNonNegativeInteger(transfer.tick))
       errors.push(`transfer ${transfer.id} has an invalid tick`);
   }
+  if (state.processedCommands.length > worldRetention.processedCommands)
+    errors.push('world state retains too many processed command identifiers');
   const processedCommandIds = new Set<string>();
   for (const id of state.processedCommands) {
     if (processedCommandIds.has(id)) errors.push(`duplicate processed command ${id}`);
@@ -3102,9 +3208,10 @@ export const inspectWorld = (state: WorldState): string[] => {
     if (
       !source ||
       !target ||
-      (source.kind !== 'storage' && !isProducer(source.kind)) ||
-      !isProducer(target.kind) ||
-      !acceptsRecipeInput(target, link.item)
+      !acceptedLinkSource(source.kind) ||
+      !acceptedLinkTarget(target.kind) ||
+      (isStorageBuilding(source.kind) && isStorageBuilding(target.kind)) ||
+      !acceptsLogisticsItem(target, link.item)
     )
       errors.push(`logistics link ${id} has invalid endpoints`);
     if (!Number.isInteger(link.priority) || link.priority < 0 || link.priority > 3)

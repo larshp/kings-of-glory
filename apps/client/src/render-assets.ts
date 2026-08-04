@@ -16,6 +16,8 @@ export type SpriteId =
   | 'housing'
   | 'hearth'
   | 'watchtower'
+  | 'mine'
+  | 'lumber-camp'
   | 'construction'
   | 'raider'
   | 'selection';
@@ -51,6 +53,8 @@ export const spriteFrames: Readonly<Record<SpriteId, SpriteFrame>> = {
   construction: frame(192, 64),
   raider: frame(0, 128),
   selection: frame(64, 128),
+  mine: frame(128, 128),
+  'lumber-camp': frame(192, 128),
 };
 
 export type RenderAssets = Readonly<Record<keyof typeof spriteAtlasManifest, HTMLImageElement>>;

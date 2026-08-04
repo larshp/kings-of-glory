@@ -1,3 +1,4 @@
+import { PLACEMENT_KINDS } from '@kings/simulation';
 import type { Command, CommandResult, WorldState } from '@kings/simulation';
 
 export type TerrainTile = 'grass' | 'water' | 'ore' | 'wood';
@@ -113,13 +114,9 @@ const isIdentifier = (value: unknown): value is string =>
   typeof value === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(value);
 const isItem = (value: unknown): value is 'ore' | 'wood' | 'ingot' | 'tool' =>
   value === 'ore' || value === 'wood' || value === 'ingot' || value === 'tool';
+const sharedBuildingKinds: readonly string[] = Object.values(PLACEMENT_KINDS);
 const isSharedBuildingKind = (value: unknown) =>
-  value === 'smelter' ||
-  value === 'workshop' ||
-  value === 'storage' ||
-  value === 'housing' ||
-  value === 'hearth' ||
-  value === 'watchtower';
+  typeof value === 'string' && sharedBuildingKinds.includes(value);
 const isBoundedText = (value: unknown, maxLength: number): value is string =>
   typeof value === 'string' && value.length <= maxLength;
 const isChunkInterest = (value: unknown): value is readonly ChunkInterest[] =>
@@ -143,14 +140,9 @@ const isCommand = (value: unknown): value is Command => {
     return false;
   if (
     value.type === 'gather' ||
-    value.type === 'placeSmelter' ||
-    value.type === 'placeWorkshop' ||
-    value.type === 'placeStorage' ||
-    value.type === 'placeHousing' ||
-    value.type === 'placeHearth' ||
-    value.type === 'placeWatchtower' ||
     value.type === 'explore' ||
-    value.type === 'claimTerritory'
+    value.type === 'claimTerritory' ||
+    value.type in PLACEMENT_KINDS
   )
     return Number.isSafeInteger(value.x) && Number.isSafeInteger(value.y);
   if (value.type === 'moveScout')

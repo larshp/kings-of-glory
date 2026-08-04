@@ -48,6 +48,19 @@ export interface StorageDefinition {
   readonly buildingId: string;
   readonly capacity: number;
 }
+/**
+ * An extractor automates a gathering action: a staffed, completed extractor pulls
+ * from the nearest deposit in range instead of requiring one click per item. Deposits
+ * stay finite, so extractors change the effort a chain costs, not the world's supply.
+ */
+export interface ExtractorDefinition {
+  readonly buildingId: string;
+  readonly terrain: 'ore' | 'wood';
+  readonly item: string;
+  /** Manhattan tiles searched around the extractor for a deposit with yield left. */
+  readonly range: number;
+  readonly ticksPerUnit: number;
+}
 export interface LogisticsLinkDefinition {
   readonly id: string;
   readonly acceptedSourceKinds: readonly string[];
@@ -168,6 +181,26 @@ export const buildings = {
     defenseDamage: 1,
     requiredTechnology: 'metallurgy',
   },
+  mine: {
+    id: 'mine',
+    displayName: 'Mine',
+    cost: { wood: 4 },
+    inventoryCapacity: 20,
+    populationCapacity: 0,
+    maxHealth: 10,
+    constructionTicks: 8,
+    requiredTechnology: null,
+  },
+  'lumber-camp': {
+    id: 'lumber-camp',
+    displayName: 'Lumber camp',
+    cost: { wood: 3 },
+    inventoryCapacity: 20,
+    populationCapacity: 0,
+    maxHealth: 10,
+    constructionTicks: 8,
+    requiredTechnology: null,
+  },
 } as const satisfies Readonly<Record<string, BuildingDefinition>>;
 
 export const producers = {
@@ -183,11 +216,22 @@ export const storage = {
   storage: { buildingId: 'storage', capacity: 200 },
 } as const satisfies Readonly<Record<string, StorageDefinition>>;
 
+export const extractors = {
+  mine: { buildingId: 'mine', terrain: 'ore', item: 'ore', range: 4, ticksPerUnit: 4 },
+  'lumber-camp': {
+    buildingId: 'lumber-camp',
+    terrain: 'wood',
+    item: 'wood',
+    range: 4,
+    ticksPerUnit: 4,
+  },
+} as const satisfies Readonly<Record<string, ExtractorDefinition>>;
+
 export const logisticsLinks = {
   internalInventory: {
     id: 'internal-inventory',
-    acceptedSourceKinds: ['storage', 'smelter', 'workshop'],
-    acceptedTargetKinds: ['smelter', 'workshop'],
+    acceptedSourceKinds: ['storage', 'smelter', 'workshop', 'mine', 'lumber-camp'],
+    acceptedTargetKinds: ['smelter', 'workshop', 'storage'],
     throughputPerTick: 1,
   },
 } as const satisfies Readonly<Record<string, LogisticsLinkDefinition>>;
@@ -257,6 +301,22 @@ export const socialRules = {
   retainedMessages: 500,
   retainedReports: 1_000,
   moderatedTerms: ['admin', 'moderator', 'system'],
+} as const;
+
+/**
+ * Bounds the authoritative ledgers that would otherwise grow for the lifetime of
+ * a permanent world. Every bound must exceed the matching runtime safety limit so
+ * a full tick of pending work still fits inside its window.
+ */
+export const worldRetention = {
+  /**
+   * Command-ID window used to reject duplicate retries. Retries older than the
+   * window are still rejected by the per-player command sequence, so the window
+   * only has to cover the commands a client can still have in flight.
+   */
+  processedCommands: 1_024,
+  /** Completed player-to-player transfers retained for auditing. */
+  transfers: 1_000,
 } as const;
 
 /**
@@ -396,6 +456,9 @@ export const validateContent = (): string[] => {
     !buildings[onboardingRules.securingBuildingKind]
   )
     errors.push('onboarding rules are invalid');
+  for (const [name, bound] of Object.entries(worldRetention))
+    if (!Number.isSafeInteger(bound) || bound < 1)
+      errors.push(`world retention bound ${name} is invalid`);
   for (const producer of Object.values(producers)) {
     if (!buildings[producer.buildingId as keyof typeof buildings])
       errors.push(`producer references unknown building ${producer.buildingId}`);
@@ -404,6 +467,27 @@ export const validateContent = (): string[] => {
     for (const recipeId of producer.recipeIds)
       if (!Object.values(recipes).some((recipe) => recipe.id === recipeId))
         errors.push(`producer references unknown recipe ${recipeId}`);
+  }
+  for (const extractor of Object.values(extractors)) {
+    const building = buildings[extractor.buildingId as keyof typeof buildings];
+    if (!building) errors.push(`extractor references unknown building ${extractor.buildingId}`);
+    else if (building.inventoryCapacity < 1)
+      errors.push(`extractor ${extractor.buildingId} has no inventory to extract into`);
+    if (producers[extractor.buildingId as keyof typeof producers])
+      errors.push(`extractor ${extractor.buildingId} must not also be a recipe producer`);
+    const resource = resources[extractor.terrain];
+    if (!resource) errors.push(`extractor ${extractor.buildingId} references unknown terrain`);
+    else if (resource.item !== extractor.item)
+      errors.push(
+        `extractor ${extractor.buildingId} does not extract the ${extractor.terrain} item`,
+      );
+    if (
+      !Number.isInteger(extractor.range) ||
+      extractor.range < 1 ||
+      !Number.isInteger(extractor.ticksPerUnit) ||
+      extractor.ticksPerUnit < 1
+    )
+      errors.push(`extractor ${extractor.buildingId} has invalid extraction values`);
   }
   for (const entry of Object.values(storage)) {
     const building = buildings[entry.buildingId as keyof typeof buildings];

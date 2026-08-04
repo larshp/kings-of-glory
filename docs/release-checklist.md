@@ -3,7 +3,9 @@
 Copy this file for each release candidate and replace every `PENDING` field with an immutable CI URL,
 artifact digest, drill report, or signed operator record. A checkbox without evidence does not pass.
 The manual `release candidate` workflow generates the baseline load, soak, lifecycle, PostgreSQL,
-backup, and restore artifacts; the final run must increase `soak_rounds` enough to last multiple hours.
+backup, and restore artifacts; the final run must increase `soak_rounds` and `world_soak_minutes`
+enough to last multiple hours. `world-soak.json` carries the memory, event-loop, tick, and hash
+analysis and fails the job when any budget in `soakBudgets` is exceeded.
 
 ## Candidate identity
 
@@ -24,7 +26,9 @@ backup, and restore artifacts; the final run must increase `soak_rounds` enough 
 - Off-host backup manifest and checksum: PENDING
 - Isolated restore report, state hash, smoke test, measured RPO/RTO: PENDING
 - Interrupted checkpoint/deployment and application rollback exercises: PENDING
-- Multi-hour soak report including memory, event-loop, tick, and hash analysis: PENDING
+- Multi-hour soak report including memory, event-loop, tick, and hash analysis: PENDING (harness and
+  budgets in place; an 8-minute target-load reference run is recorded in `docs/performance-baseline.md`,
+  and the release run must be multi-hour)
 - Dashboards, alerts, on-call route, status page, and maintenance notice: PENDING
 
 ## Product and policy

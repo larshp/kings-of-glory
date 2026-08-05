@@ -44,6 +44,25 @@ export const WorldPanel = ({
         >
           Claim frontier sector
         </button>
+        <section aria-labelledby="discoveries-title">
+          <h2 id="discoveries-title">Landmark discoveries</h2>
+          {Object.values(player.discoveries).length === 0 ? (
+            <p>Explore new chunks to uncover ruins, fertile groves, and mountain passes.</p>
+          ) : (
+            <ul>
+              {Object.values(player.discoveries).map((discovery) => (
+                <li key={`${discovery.x}:${discovery.y}`}>
+                  {discovery.kind.replaceAll('-', ' ')} at {discovery.x}, {discovery.y} —{' '}
+                  {Object.keys(discovery.reward).length > 0
+                    ? Object.entries(discovery.reward)
+                        .map(([item, amount]) => `${amount} ${item}`)
+                        .join(', ')
+                    : 'discovered while inventory was full'}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
         <section className="strategic-map" aria-labelledby="strategic-map-title">
           <h2 id="strategic-map-title">Strategic world map</h2>
           <p>

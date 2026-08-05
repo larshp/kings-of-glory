@@ -4,7 +4,9 @@ import {
   logisticsLinks,
   onboardingRules,
   producers,
+  renewers,
   resources,
+  roadRules,
   socialRules,
   storage,
   threats,
@@ -17,6 +19,13 @@ describe('content definitions', () => {
   it('has valid item and recipe references', () => expect(validateContent()).toEqual([]));
   it('declares resource, producer, storage, and logistics schemas for the active production chain', () => {
     expect(resources.ore).toMatchObject({ item: 'ore', yield: 10, renewable: false });
+    expect(resources.wood).toMatchObject({ item: 'wood', yield: 10, renewable: true });
+    expect(renewers.forester).toMatchObject({
+      buildingId: 'forester',
+      terrain: 'wood',
+      ticksPerUnit: 20,
+    });
+    expect(roadRules.engineeringTilesPerTick).toBeGreaterThan(roadRules.baseTilesPerTick);
     expect(producers.smelter).toMatchObject({
       buildingId: 'smelter',
       recipeIds: ['smelt-ore'],

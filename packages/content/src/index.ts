@@ -1,5 +1,5 @@
 /** Content schemas deliberately use plain data so the same definitions work in builds and on the server. */
-export const CONTENT_VERSION = 3 as const;
+export const CONTENT_VERSION = 4 as const;
 
 export interface ItemDefinition {
   readonly id: string;
@@ -31,6 +31,8 @@ export interface TechnologyDefinition {
   readonly prerequisites: readonly string[];
   readonly cost: Readonly<Record<string, number>>;
   readonly ticks: number;
+  /** Technologies in the same group are mutually exclusive permanent choices. */
+  readonly exclusiveGroup?: string;
 }
 export interface ResourceNodeDefinition {
   readonly id: string;
@@ -67,6 +69,13 @@ export interface LogisticsLinkDefinition {
   readonly acceptedTargetKinds: readonly string[];
   readonly throughputPerTick: number;
 }
+export interface RenewerDefinition {
+  readonly buildingId: string;
+  readonly terrain: 'wood';
+  readonly range: number;
+  readonly ticksPerUnit: number;
+  readonly waterBonusTicksPerUnit: number;
+}
 export interface CooperativeObjectiveDefinition {
   readonly id: string;
   readonly displayName: string;
@@ -87,7 +96,7 @@ export type ItemId = keyof typeof items;
 
 export const resources = {
   ore: { id: 'ore', terrain: 'ore', item: 'ore', yield: 10, renewable: false },
-  wood: { id: 'wood', terrain: 'wood', item: 'wood', yield: 10, renewable: false },
+  wood: { id: 'wood', terrain: 'wood', item: 'wood', yield: 10, renewable: true },
 } as const satisfies Readonly<Record<string, ResourceNodeDefinition>>;
 
 /**
@@ -111,7 +120,29 @@ export const terrainRules = {
    * coverage broke into speckle, because a high threshold keeps only crest fragments.
    */
   mountain: { ridgeScale: 32, octaves: 2, threshold: 0.81, maxLevel: 5 },
+  movement: { roughTerrainDelayTicks: 1 },
+  watchtower: { mountainRangeBonus: 2 },
 } as const;
+
+export const landmarks = {
+  'ancient-ruin': {
+    id: 'ancient-ruin',
+    displayName: 'Ancient ruin',
+    description: 'Recovered knowledge grants one ingot when first discovered.',
+  },
+  'fertile-grove': {
+    id: 'fertile-grove',
+    displayName: 'Fertile grove',
+    description: 'Foresters in this chunk restore timber twice as quickly.',
+  },
+  'mountain-pass': {
+    id: 'mountain-pass',
+    displayName: 'Mountain pass',
+    description: 'Survey supplies grant one tool when first discovered.',
+  },
+} as const;
+
+export type LandmarkId = keyof typeof landmarks;
 
 export const recipes = {
   smeltOre: { id: 'smelt-ore', input: { ore: 1 }, output: { ingot: 1 }, ticks: 3 },
@@ -224,6 +255,16 @@ export const buildings = {
     constructionTicks: 8,
     requiredTechnology: null,
   },
+  forester: {
+    id: 'forester',
+    displayName: 'Forester',
+    cost: { wood: 4 },
+    inventoryCapacity: 0,
+    populationCapacity: 0,
+    maxHealth: 12,
+    constructionTicks: 8,
+    requiredTechnology: 'stewardship',
+  },
 } as const satisfies Readonly<Record<string, BuildingDefinition>>;
 
 export const producers = {
@@ -250,6 +291,16 @@ export const extractors = {
   },
 } as const satisfies Readonly<Record<string, ExtractorDefinition>>;
 
+export const renewers = {
+  forester: {
+    buildingId: 'forester',
+    terrain: 'wood',
+    range: 4,
+    ticksPerUnit: 20,
+    waterBonusTicksPerUnit: 10,
+  },
+} as const satisfies Readonly<Record<string, RenewerDefinition>>;
+
 export const logisticsLinks = {
   internalInventory: {
     id: 'internal-inventory',
@@ -258,6 +309,13 @@ export const logisticsLinks = {
     throughputPerTick: 1,
   },
 } as const satisfies Readonly<Record<string, LogisticsLinkDefinition>>;
+
+export const roadRules = {
+  woodCost: 1,
+  baseTilesPerTick: 4,
+  engineeringTilesPerTick: 6,
+  roadDistanceDiscount: 1,
+} as const;
 
 export const technologies = {
   metallurgy: {
@@ -273,6 +331,22 @@ export const technologies = {
     prerequisites: ['metallurgy'],
     cost: { tool: 2 },
     ticks: 20,
+  },
+  engineering: {
+    id: 'engineering',
+    displayName: 'Engineering',
+    prerequisites: ['metallurgy'],
+    cost: { tool: 1 },
+    ticks: 15,
+    exclusiveGroup: 'development-path',
+  },
+  stewardship: {
+    id: 'stewardship',
+    displayName: 'Stewardship',
+    prerequisites: ['metallurgy'],
+    cost: { tool: 1 },
+    ticks: 15,
+    exclusiveGroup: 'development-path',
   },
 } as const satisfies Readonly<Record<string, TechnologyDefinition>>;
 
@@ -529,6 +603,33 @@ export const validateContent = (): string[] => {
     )
       errors.push(`extractor ${extractor.buildingId} has invalid extraction values`);
   }
+  for (const renewer of Object.values(renewers)) {
+    if (!buildings[renewer.buildingId as keyof typeof buildings])
+      errors.push(`renewer references unknown building ${renewer.buildingId}`);
+    if (!resources[renewer.terrain]?.renewable)
+      errors.push(`renewer ${renewer.buildingId} references a finite resource`);
+    if (
+      !Number.isInteger(renewer.range) ||
+      renewer.range < 1 ||
+      !Number.isInteger(renewer.ticksPerUnit) ||
+      renewer.ticksPerUnit < 1 ||
+      !Number.isInteger(renewer.waterBonusTicksPerUnit) ||
+      renewer.waterBonusTicksPerUnit < 1 ||
+      renewer.waterBonusTicksPerUnit > renewer.ticksPerUnit
+    )
+      errors.push(`renewer ${renewer.buildingId} has invalid renewal values`);
+  }
+  if (
+    !Number.isInteger(roadRules.woodCost) ||
+    roadRules.woodCost < 1 ||
+    !Number.isInteger(roadRules.baseTilesPerTick) ||
+    roadRules.baseTilesPerTick < 1 ||
+    !Number.isInteger(roadRules.engineeringTilesPerTick) ||
+    roadRules.engineeringTilesPerTick < roadRules.baseTilesPerTick ||
+    !Number.isInteger(roadRules.roadDistanceDiscount) ||
+    roadRules.roadDistanceDiscount < 1
+  )
+    errors.push('road rules are invalid');
   for (const entry of Object.values(storage)) {
     const building = buildings[entry.buildingId as keyof typeof buildings];
     if (!building) errors.push(`storage references unknown building ${entry.buildingId}`);

@@ -130,10 +130,13 @@ describe('durable world recovery', () => {
     const chunk = chunkKeyFor(center.x, center.y);
     world.minedTiles[`${center.x}:${center.y}`] = 1;
     world.minedTiles['-32:0'] = 1;
+    world.roads[`${center.x + 1}:${center.y}`] = center.ownerId;
+    world.roads['-32:0'] = center.ownerId;
     const chunkSnapshot = snapshotDirtyChunk(world, chunk);
     expect(chunkSnapshot.buildings).toEqual({ [center.id]: center });
     expect(chunkSnapshot.minedTiles).toEqual({ [`${center.x}:${center.y}`]: 1 });
     expect(chunkSnapshot.threats).toEqual({});
+    expect(chunkSnapshot.roads).toEqual({ [`${center.x + 1}:${center.y}`]: center.ownerId });
   });
 
   it('records dirty chunks with a completed checkpoint', async () => {

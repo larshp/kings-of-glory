@@ -470,6 +470,7 @@ export class GlobalWorldHost {
       state.threats = {};
       state.scouts = {};
       state.logisticsLinks = {};
+      state.roads = {};
       state.sharedConstructionProjects = {};
       state.cooperativeObjectives = Object.fromEntries(
         Object.entries(state.cooperativeObjectives).map(([id, objective]) => [
@@ -552,6 +553,12 @@ export class GlobalWorldHost {
         ([, link]) =>
           state.buildings[link.sourceBuildingId] && state.buildings[link.targetBuildingId],
       ),
+    );
+    state.roads = Object.fromEntries(
+      Object.entries(state.roads).filter(([key]) => {
+        const [xText, yText] = key.split(':');
+        return relevantChunks.has(chunkKeyFor(Number(xText), Number(yText)));
+      }),
     );
     state.cooperativeObjectives = Object.fromEntries(
       Object.entries(state.cooperativeObjectives).map(([id, objective]) => [
@@ -686,6 +693,12 @@ export class GlobalWorldHost {
         ([, link]) => buildings[link.sourceBuildingId] && buildings[link.targetBuildingId],
       ),
     );
+    const roads = Object.fromEntries(
+      Object.entries(source.roads).filter(([key]) => {
+        const [xText, yText] = key.split(':');
+        return relevantChunks.has(chunkKeyFor(Number(xText), Number(yText)));
+      }),
+    );
     const cooperativeObjectives = Object.fromEntries(
       Object.entries(source.cooperativeObjectives).map(([id, objective]) => [
         id,
@@ -756,6 +769,7 @@ export class GlobalWorldHost {
       ),
       settlements,
       logisticsLinks,
+      roads,
       cooperativeObjectives,
       playerActivity: source.playerActivity[playerId]
         ? { [playerId]: source.playerActivity[playerId] }

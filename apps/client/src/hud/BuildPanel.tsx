@@ -6,6 +6,7 @@ import type { PickedEntity } from '../WorldCanvas.js';
 import {
   buildingLabel,
   extractorForBuilding,
+  renewerForBuilding,
   recipeForBuilding,
   recipeOptionsForBuilding,
   technologyCostLabel,
@@ -97,7 +98,8 @@ export const BuildPanel = ({
       {displayKey(preferences.camera.panLeft)}/{displayKey(preferences.camera.panDown)}/
       {displayKey(preferences.camera.panRight)} to pan. Boulders mark ore deposits and conifers mark
       timber groves; both thin out as they are worked. An outlined sector is claimed — green is
-      yours, blue is another settlement&apos;s.
+      yours, blue is another settlement&apos;s. Timber and ore slow scouts unless paved, while a
+      watchtower beside a mountain gains extra range.
     </p>
     {state && !player && <p>Loading world…</p>}
     {player && (
@@ -145,6 +147,20 @@ export const BuildPanel = ({
           Gather{' '}
           {selectedResource === 'ore' ? 'ore' : selectedResource === 'wood' ? 'wood' : 'resource'}
         </button>
+        <button
+          disabled={
+            !placement ||
+            !player.research.unlocked.engineering ||
+            player.inventory.wood < 1 ||
+            Boolean(state?.roads[`${placement.x}:${placement.y}`])
+          }
+          onClick={() => placement && send({ type: 'placeRoad', ...placement })}
+        >
+          Build road (1 wood)
+        </button>
+        {!player.research.unlocked.engineering && (
+          <span className="build-reason">Engineering research unlocks roads.</span>
+        )}
         <h2>Construction</h2>
         <ul className="build-menu">
           {buildMenu.map((entry) => (
@@ -280,6 +296,15 @@ export const BuildPanel = ({
                       )}
                     </>
                   )}
+                  {renewerForBuilding(building) && (
+                    <>
+                      <span>
+                        Renewal cycle: {building.progress} ticks remaining; water and fertile groves
+                        accelerate restoration
+                      </span>
+                      <span>Machine: {building.productionState.replaceAll('-', ' ')}</span>
+                    </>
+                  )}
                   {usesWorkers(building) && (
                     <>
                       <label>
@@ -397,7 +422,8 @@ export const BuildPanel = ({
           <h2 id="automation-title">Automation</h2>
           <p>
             Link completed storage or production buildings to a producer. Higher-priority links
-            reserve source and target capacity first; each link uses its configured throughput.
+            reserve source and target capacity first. A carrier travels the route between each
+            delivery; roads and Engineering shorten that journey.
           </p>
           <label htmlFor="logistics-source">Source</label>
           <select
@@ -467,7 +493,8 @@ export const BuildPanel = ({
             return (
               <p className="logistics-link" key={link.id}>
                 {link.sourceBuildingId} → {link.targetBuildingId} ({link.item},{' '}
-                {link.throughputPerTick}/tick, {link.status.replaceAll('-', ' ')})
+                {link.throughputPerTick}/delivery, {link.routeDistance ?? 0} route tiles,{' '}
+                {link.travelTicksRemaining ?? 0} travel ticks, {link.status.replaceAll('-', ' ')})
                 <select
                   aria-label={`Priority for ${link.id}`}
                   disabled={!canRemove}

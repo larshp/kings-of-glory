@@ -19,18 +19,22 @@ import {
   logisticsLinks as logisticsDefinitions,
   onboardingRules,
   producers as producerDefinitions,
+  renewers as renewerDefinitions,
   resources as resourceDefinitions,
+  roadRules,
   recipes,
   socialRules,
+  terrainRules,
   technologies,
   threats as threatDefinitions,
   worldRetention,
   type TechnologyId,
   type CooperativeObjectiveId,
+  type LandmarkId,
 } from '@kings/content';
 import { chunkFor, findHierarchicalPath, findPath, manhattanDistance } from '@kings/pathfinding';
 import { stableHash } from './hash.js';
-import { isOpenTile, terrainAt } from './terrain.js';
+import { isOpenTile, landmarkAtChunk, terrainAt } from './terrain.js';
 export {
   elevationAt,
   isOpenTile,
@@ -75,7 +79,15 @@ export interface PlayerState {
   visibleChunks?: Record<string, true>;
   territoryCells: Record<string, true>;
   research: ResearchState;
+  discoveries: Record<string, LandmarkDiscovery>;
   lastSequence: number;
+}
+export interface LandmarkDiscovery {
+  readonly kind: LandmarkId;
+  readonly x: number;
+  readonly y: number;
+  readonly discoveredTick: number;
+  readonly reward: Readonly<Partial<Inventory>>;
 }
 export interface Building {
   id: BuildingId;
@@ -88,7 +100,8 @@ export interface Building {
     | 'hearth'
     | 'watchtower'
     | 'mine'
-    | 'lumber-camp';
+    | 'lumber-camp'
+    | 'forester';
   ownerId: PlayerId;
   x: number;
   y: number;
@@ -128,6 +141,8 @@ export interface Scout {
   x: number;
   y: number;
   target?: { x: number; y: number };
+  /** Rough terrain consumes an extra tick unless a road reaches the tile. */
+  moveCooldown?: number;
 }
 export interface ResourceTransfer {
   id: string;
@@ -151,6 +166,10 @@ export interface LogisticsLink {
   item: ItemId;
   priority: 0 | 1 | 2 | 3;
   throughputPerTick: number;
+  /** Every link owns one deterministic carrier whose return journey limits throughput. */
+  carrierId?: string;
+  routeDistance?: number;
+  travelTicksRemaining?: number;
   status:
     | 'idle'
     | 'transferred'
@@ -158,7 +177,8 @@ export interface LogisticsLink {
     | 'source-empty'
     | 'target-full'
     | 'target-reconfigured'
-    | 'constructing';
+    | 'constructing'
+    | 'in-transit';
 }
 export interface ObjectiveContribution {
   readonly commandId: string;
@@ -247,7 +267,7 @@ export interface OnboardingReservation {
   securedTick: number | null;
 }
 export interface WorldState {
-  schemaVersion: 28;
+  schemaVersion: 29;
   contentVersion: typeof CONTENT_VERSION;
   seed: number;
   /** When true, no PvE threats spawn. Peaceful worlds stay threat-free. */
@@ -264,6 +284,8 @@ export interface WorldState {
   transfers: ResourceTransfer[];
   settlements: Record<string, Settlement>;
   logisticsLinks: Record<string, LogisticsLink>;
+  /** Traversable infrastructure keyed by tile; the value is its owning player. */
+  roads: Record<string, PlayerId>;
   cooperativeObjectives: Record<CooperativeObjectiveId, CooperativeObjectiveState>;
   playerActivity: Record<string, PlayerActivity>;
   onboardingReservations: Record<string, OnboardingReservation>;
@@ -301,7 +323,10 @@ export interface WorldEvent {
     | 'chatMessageReported'
     | 'playerBlockChanged'
     | 'playerDeleted'
-    | 'onboardingReservationReclaimed';
+    | 'onboardingReservationReclaimed'
+    | 'landmarkDiscovered'
+    | 'roadPlaced'
+    | 'resourceRegenerated';
   playerId?: PlayerId;
   buildingId?: BuildingId;
   environmentalEventId?: keyof typeof environmentalEvents;
@@ -309,6 +334,7 @@ export interface WorldEvent {
   targetPlayerId?: PlayerId;
   objectiveId?: CooperativeObjectiveId;
   projectId?: string;
+  landmarkKind?: LandmarkId;
 }
 
 /**
@@ -414,8 +440,12 @@ export const isProducer = (kind: Building['kind']) => Boolean(producerFor(kind))
 const extractorFor = (kind: Building['kind']) =>
   extractorDefinitions[kind as keyof typeof extractorDefinitions];
 const isExtractor = (kind: Building['kind']) => Boolean(extractorFor(kind));
-/** Producers and extractors both occupy a settler, so they share one job pool. */
-const needsWorker = (kind: Building['kind']) => isProducer(kind) || isExtractor(kind);
+const renewerFor = (kind: Building['kind']) =>
+  renewerDefinitions[kind as keyof typeof renewerDefinitions];
+const isRenewer = (kind: Building['kind']) => Boolean(renewerFor(kind));
+/** Producers, extractors, and renewers occupy the same finite settler job pool. */
+const needsWorker = (kind: Building['kind']) =>
+  isProducer(kind) || isExtractor(kind) || isRenewer(kind);
 const acceptsRecipeInput = (building: Building, item: ItemId) =>
   Boolean(recipeFor(building)?.input[item]);
 const isStorageBuilding = (kind: Building['kind']) => kind === 'storage';
@@ -445,6 +475,29 @@ const canStartRecipe = (building: Building, recipe: ProductionRecipe) =>
 const outputReservationFor = (building: Building): Partial<Inventory> =>
   building.progress > 0 ? (recipeFor(building)?.output ?? {}) : {};
 export const logisticsThroughput = logisticsDefinitions.internalInventory.throughputPerTick;
+const carrierRouteFor = (state: WorldState, source: Building, target: Building) => {
+  const route: string[] = [];
+  let x = source.x;
+  let y = source.y;
+  while (x !== target.x) {
+    x += Math.sign(target.x - x);
+    route.push(tileKey(x, y));
+  }
+  while (y !== target.y) {
+    y += Math.sign(target.y - y);
+    route.push(tileKey(x, y));
+  }
+  const roadTiles = route.filter((key) => Boolean(state.roads[key])).length;
+  const distance = route.length;
+  const effectiveDistance = Math.max(1, distance - roadTiles * roadRules.roadDistanceDiscount);
+  const speed = state.players[source.ownerId]?.research.unlocked.engineering
+    ? roadRules.engineeringTilesPerTick
+    : roadRules.baseTilesPerTick;
+  return {
+    distance,
+    travelTicks: Math.max(0, Math.ceil(effectiveDistance / speed) - 1),
+  };
+};
 const consumeRecipe = (building: Building, recipe: ProductionRecipe) => {
   for (const [item, amount] of Object.entries(recipe.input))
     building.inventory[item as ItemId] -= amount ?? 0;
@@ -632,7 +685,7 @@ export const initialCooperativeObjectives = (): WorldState['cooperativeObjective
   ) as unknown as WorldState['cooperativeObjectives'];
 
 export const createWorld = (seed = 1, peaceful = true): WorldState => ({
-  schemaVersion: 28,
+  schemaVersion: 29,
   contentVersion: CONTENT_VERSION,
   seed,
   peaceful,
@@ -646,6 +699,7 @@ export const createWorld = (seed = 1, peaceful = true): WorldState => ({
   transfers: [],
   settlements: {},
   logisticsLinks: {},
+  roads: {},
   cooperativeObjectives: initialCooperativeObjectives(),
   playerActivity: {},
   onboardingReservations: {},
@@ -670,8 +724,14 @@ export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
     research: {
       activeTechnology: null,
       ticksRemaining: 0,
-      unlocked: { metallurgy: false, 'territorial-charter': false },
+      unlocked: {
+        metallurgy: false,
+        'territorial-charter': false,
+        engineering: false,
+        stewardship: false,
+      },
     },
+    discoveries: {},
     lastSequence: 0,
   };
   state.playerActivity[id] = {
@@ -726,6 +786,7 @@ export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
     ownerId: typedId,
     x: plot.x + Math.floor(plot.size / 2),
     y: plot.y + Math.floor(plot.size / 2),
+    moveCooldown: 0,
   };
   return [{ type: 'playerJoined', playerId: typedId }];
 };
@@ -758,6 +819,64 @@ const plotExploration = (plot: Plot): Record<string, true> => {
       if (Math.abs(centerX - x) + Math.abs(centerY - y) <= GATHER_RANGE)
         chunks[chunkKey(x, y)] = true;
   return chunks;
+};
+
+/** Finds a worked timber node a forester can restore, preferring the nearest stable tile. */
+const renewableTile = (state: WorldState, building: Pick<Building, 'kind' | 'x' | 'y'>) => {
+  const renewer = renewerFor(building.kind);
+  if (!renewer) return undefined;
+  for (let distance = 0; distance <= renewer.range; distance += 1)
+    for (let offsetX = -distance; offsetX <= distance; offsetX += 1) {
+      const offsetY = distance - Math.abs(offsetX);
+      const candidates =
+        offsetY === 0 ? [building.y] : [building.y - offsetY, building.y + offsetY];
+      for (const candidateY of candidates) {
+        const candidateX = building.x + offsetX;
+        const key = tileKey(candidateX, candidateY);
+        if (
+          terrainAt(state.seed, candidateX, candidateY) === renewer.terrain &&
+          (state.minedTiles[key] ?? 0) > 0
+        )
+          return { x: candidateX, y: candidateY };
+      }
+    }
+  return undefined;
+};
+
+const foresterCycleTicks = (state: WorldState, building: Building) => {
+  const renewer = renewerFor(building.kind)!;
+  const besideWater = [
+    [building.x + 1, building.y],
+    [building.x - 1, building.y],
+    [building.x, building.y + 1],
+    [building.x, building.y - 1],
+  ].some(([x, y]) => terrainAt(state.seed, x!, y!) === 'water');
+  const fertileGrove =
+    state.players[building.ownerId]?.discoveries[chunkKey(building.x, building.y)]?.kind ===
+    'fertile-grove';
+  return besideWater || fertileGrove ? renewer.waterBonusTicksPerUnit : renewer.ticksPerUnit;
+};
+
+const landmarkRewardFor = (kind: LandmarkId): Partial<Inventory> =>
+  kind === 'ancient-ruin' ? { ingot: 1 } : kind === 'mountain-pass' ? { tool: 1 } : { wood: 2 };
+
+const discoverChunk = (state: WorldState, player: PlayerState, key: string): WorldEvent[] => {
+  if (player.discoveries[key]) return [];
+  const [chunkXText, chunkYText] = key.split(':');
+  const landmark = landmarkAtChunk(state.seed, Number(chunkXText), Number(chunkYText));
+  if (!landmark) return [];
+  const requestedReward = landmarkRewardFor(landmark.kind);
+  const rewardAmount = Object.values(requestedReward).reduce((total, amount) => total + amount, 0);
+  const reward =
+    inventoryTotal(player.inventory) + rewardAmount <= INVENTORY_CAPACITY ? requestedReward : {};
+  for (const [item, amount] of Object.entries(reward))
+    player.inventory[item as ItemId] += amount ?? 0;
+  player.discoveries[key] = {
+    ...landmark,
+    discoveredTick: state.tick,
+    reward,
+  };
+  return [{ type: 'landmarkDiscovered', playerId: player.id, landmarkKind: landmark.kind }];
 };
 export const individualSettlementsFor = (players: Record<string, { id: PlayerId }>) =>
   Object.fromEntries(
@@ -909,6 +1028,8 @@ const removePlayerData = (
       delete state.logisticsLinks[id];
   for (const [id, scout] of Object.entries(state.scouts ?? {}))
     if (scout.ownerId === player.id) delete state.scouts?.[id];
+  for (const [key, ownerId] of Object.entries(state.roads))
+    if (ownerId === player.id) delete state.roads[key];
 
   for (const [id, settlement] of Object.entries(state.settlements)) {
     delete settlement.members[player.id];
@@ -1043,8 +1164,9 @@ export const applyCommand = (
   }
   if (command.type === 'explore') {
     if (distance(player.plot, command.x, command.y) > 64) return reject('out-of-range');
-    player.exploredChunks[chunkKey(command.x, command.y)] = true;
-    return accept([]);
+    const key = chunkKey(command.x, command.y);
+    player.exploredChunks[key] = true;
+    return accept(discoverChunk(state, player, key));
   }
   if (command.type === 'moveScout') {
     const scout = state.scouts?.[command.scoutId];
@@ -1069,10 +1191,38 @@ export const applyCommand = (
     player.territoryCells[key] = true;
     return accept([]);
   }
+  if (command.type === 'placeRoad') {
+    if (!player.research.unlocked.engineering) return reject('technology-locked');
+    const key = tileKey(command.x, command.y);
+    if (state.roads[key]) return reject('road-exists');
+    if (!canBuildAt(state, player, command.x, command.y)) return reject('outside-plot');
+    if (!isOpenTile(state.seed, command.x, command.y)) return reject('tile-not-buildable');
+    if (
+      Object.values(state.buildings).some(
+        (building) => building.x === command.x && building.y === command.y,
+      )
+    )
+      return reject('occupied');
+    if (player.inventory.wood < roadRules.woodCost) return reject('insufficient-wood');
+    player.inventory.wood -= roadRules.woodCost;
+    state.roads[key] = player.id;
+    return accept([{ type: 'roadPlaced', playerId: player.id }]);
+  }
   if (command.type === 'research') {
     const technology = technologies[command.technologyId];
     if (player.research.unlocked[technology.id]) return reject('already-researched');
     if (player.research.activeTechnology) return reject('research-in-progress');
+    if (
+      'exclusiveGroup' in technology &&
+      Object.values(technologies).some(
+        (candidate) =>
+          candidate.id !== technology.id &&
+          'exclusiveGroup' in candidate &&
+          candidate.exclusiveGroup === technology.exclusiveGroup &&
+          player.research.unlocked[candidate.id],
+      )
+    )
+      return reject('research-branch-locked');
     if (
       !technology.prerequisites.every(
         (prerequisite) => player.research.unlocked[prerequisite as TechnologyId],
@@ -1475,6 +1625,9 @@ export const applyCommand = (
       item: command.item,
       priority: 1,
       throughputPerTick: logisticsThroughput,
+      carrierId: `carrier-${id}`,
+      routeDistance: Math.abs(source.x - target.x) + Math.abs(source.y - target.y),
+      travelTicksRemaining: 0,
       status: 'idle',
     };
     return accept([]);
@@ -1786,6 +1939,10 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
   )) {
     const target = scout.target;
     if (!target) continue;
+    if ((scout.moveCooldown ?? 0) > 0) {
+      scout.moveCooldown = (scout.moveCooldown ?? 0) - 1;
+      continue;
+    }
     const path = findPath({
       start: scout,
       goal: target,
@@ -1807,11 +1964,21 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
     if (next) {
       scout.x = next.x;
       scout.y = next.y;
+      const roughTerrain = terrainAt(state.seed, next.x, next.y);
+      scout.moveCooldown = state.roads[tileKey(next.x, next.y)]
+        ? 0
+        : roughTerrain === 'wood' || roughTerrain === 'ore'
+          ? terrainRules.movement.roughTerrainDelayTicks
+          : 0;
     }
     if ((scout.x === target.x && scout.y === target.y) || path.status !== 'found')
       delete scout.target;
     const owner = state.players[scout.ownerId];
-    if (owner) owner.exploredChunks[chunkKey(scout.x, scout.y)] = true;
+    if (owner) {
+      const key = chunkKey(scout.x, scout.y);
+      owner.exploredChunks[key] = true;
+      events.push(...discoverChunk(state, owner, key));
+    }
   }
   for (const player of Object.values(state.players))
     player.visibleChunks = visibleChunksFor(
@@ -1845,6 +2012,33 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
           buildingId: building.id,
           playerId: building.ownerId,
         });
+      }
+      continue;
+    }
+    const renewer = renewerFor(building.kind);
+    if (renewer) {
+      if (building.health !== building.maxHealth) building.productionState = 'damaged';
+      else if (!staffedSmelters.has(building.id)) building.productionState = 'unassigned';
+      else {
+        const deposit = renewableTile(state, building);
+        if (!deposit) {
+          building.productionState = 'blocked-input';
+          building.progress = 0;
+        } else {
+          building.productionState = 'working';
+          if (building.progress === 0) building.progress = foresterCycleTicks(state, building);
+          building.progress -= 1;
+          if (building.progress === 0) {
+            const key = tileKey(deposit.x, deposit.y);
+            state.minedTiles[key] = Math.max(0, (state.minedTiles[key] ?? 0) - 1);
+            if (state.minedTiles[key] === 0) delete state.minedTiles[key];
+            events.push({
+              type: 'resourceRegenerated',
+              buildingId: building.id,
+              playerId: building.ownerId,
+            });
+          }
+        }
       }
       continue;
     }
@@ -1946,7 +2140,11 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
   endPhase = beginPhase('logistics');
   const sourceReservations = new Map<string, number>();
   const targetReservations = new Map<string, number>();
-  const logisticsReservations: Array<{ link: LogisticsLink; amount: number }> = [];
+  const logisticsReservations: Array<{
+    link: LogisticsLink;
+    amount: number;
+    travelTicks: number;
+  }> = [];
   for (const link of Object.values(state.logisticsLinks).sort(
     (left, right) => right.priority - left.priority || left.id.localeCompare(right.id),
   )) {
@@ -1962,6 +2160,14 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
     }
     if (source.constructionTicks > 0 || target.constructionTicks > 0) {
       link.status = 'constructing';
+      continue;
+    }
+    const route = carrierRouteFor(state, source, target);
+    link.carrierId ??= `carrier-${link.id}`;
+    link.routeDistance = route.distance;
+    if ((link.travelTicksRemaining ?? 0) > 0) {
+      link.travelTicksRemaining = (link.travelTicksRemaining ?? 0) - 1;
+      link.status = 'in-transit';
       continue;
     }
     if (!acceptsLogisticsItem(target, link.item)) {
@@ -2003,13 +2209,14 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
     sourceReservations.set(sourceKey, (sourceReservations.get(sourceKey) ?? 0) + amount);
     targetReservations.set(target.id, (targetReservations.get(target.id) ?? 0) + amount);
     targetReservations.set(targetKey, (targetReservations.get(targetKey) ?? 0) + amount);
-    logisticsReservations.push({ link, amount });
+    logisticsReservations.push({ link, amount, travelTicks: route.travelTicks });
   }
-  for (const { link, amount } of logisticsReservations) {
+  for (const { link, amount, travelTicks } of logisticsReservations) {
     const source = state.buildings[link.sourceBuildingId]!;
     const target = state.buildings[link.targetBuildingId]!;
     source.inventory[link.item] -= amount;
     target.inventory[link.item] += amount;
+    link.travelTicksRemaining = travelTicks;
     link.status = 'transferred';
   }
   endPhase();
@@ -2124,9 +2331,18 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
       threat.y = next.y;
     }
     const defense =
-      (watchtowersByOwner.get(target.ownerId) ?? []).filter(
-        (tower) => manhattanDistance(tower, threat) <= raider.watchtowerRange,
-      ).length * buildingDefinitions.watchtower.defenseDamage;
+      (watchtowersByOwner.get(target.ownerId) ?? []).filter((tower) => {
+        const overlooksMountain = [
+          [tower.x + 1, tower.y],
+          [tower.x - 1, tower.y],
+          [tower.x, tower.y + 1],
+          [tower.x, tower.y - 1],
+        ].some(([x, y]) => terrainAt(state.seed, x!, y!) === 'mountain');
+        const range =
+          raider.watchtowerRange +
+          (overlooksMountain ? terrainRules.watchtower.mountainRangeBonus : 0);
+        return manhattanDistance(tower, threat) <= range;
+      }).length * buildingDefinitions.watchtower.defenseDamage;
     threat.health -= defense;
     if (threat.health <= 0) {
       delete state.threats[threat.id];
@@ -2217,6 +2433,32 @@ export const inspectWorld = (state: WorldState): string[] => {
       })
     )
       errors.push(`player ${id} has invalid visible chunks`);
+    if (player.research.unlocked.engineering && player.research.unlocked.stewardship)
+      errors.push(`player ${id} has conflicting research branches`);
+    for (const [chunk, discovery] of Object.entries(player.discoveries)) {
+      const [chunkXText, chunkYText] = chunk.split(':');
+      const expected = landmarkAtChunk(state.seed, Number(chunkXText), Number(chunkYText));
+      const expectedReward = expected ? landmarkRewardFor(expected.kind) : {};
+      const rewardEntries = Object.entries(discovery.reward);
+      const rewardIsValid =
+        rewardEntries.length === 0 ||
+        (rewardEntries.length === Object.keys(expectedReward).length &&
+          rewardEntries.every(
+            ([item, amount]) =>
+              expectedReward[item as ItemId] === amount && isNonNegativeInteger(amount),
+          ));
+      if (
+        !expected ||
+        expected.kind !== discovery.kind ||
+        expected.x !== discovery.x ||
+        expected.y !== discovery.y ||
+        !player.exploredChunks[chunk] ||
+        !rewardIsValid ||
+        !isNonNegativeInteger(discovery.discoveredTick) ||
+        discovery.discoveredTick > state.tick
+      )
+        errors.push(`player ${id} has invalid landmark discovery ${chunk}`);
+    }
     const activity = state.playerActivity[id];
     if (
       !activity ||
@@ -2343,6 +2585,19 @@ export const inspectWorld = (state: WorldState): string[] => {
     )
       errors.push(`mined tile ${key} has an invalid depletion value`);
   }
+  for (const [key, ownerId] of Object.entries(state.roads)) {
+    const [xText, yText] = key.split(':');
+    const x = Number(xText);
+    const y = Number(yText);
+    if (
+      !state.players[ownerId] ||
+      !Number.isSafeInteger(x) ||
+      !Number.isSafeInteger(y) ||
+      !isOpenTile(state.seed, x, y) ||
+      occupied.has(key)
+    )
+      errors.push(`road ${key} has invalid state`);
+  }
   for (const [id, settlement] of Object.entries(state.settlements)) {
     if (settlement.id !== id) errors.push(`settlement key ${id} does not match its id`);
     if (!state.players[settlement.ownerId])
@@ -2457,9 +2712,16 @@ export const inspectWorld = (state: WorldState): string[] => {
         'target-full',
         'target-reconfigured',
         'constructing',
+        'in-transit',
       ].includes(link.status)
     )
       errors.push(`logistics link ${id} has an invalid status`);
+    if (
+      (link.carrierId !== undefined && link.carrierId !== `carrier-${id}`) ||
+      (link.routeDistance !== undefined && !isNonNegativeInteger(link.routeDistance)) ||
+      (link.travelTicksRemaining !== undefined && !isNonNegativeInteger(link.travelTicksRemaining))
+    )
+      errors.push(`logistics link ${id} has invalid carrier state`);
   }
   for (const definition of Object.values(cooperativeObjectiveDefinitions)) {
     const objective = state.cooperativeObjectives[definition.id];

@@ -35,6 +35,7 @@ export interface PersistedChunkSnapshot {
   readonly buildings: Readonly<Record<string, Building>>;
   readonly threats: Readonly<Record<string, Threat>>;
   readonly minedTiles: Readonly<Record<string, number>>;
+  readonly roads: WorldState['roads'];
 }
 export interface WorldPersistence {
   migrate(): Promise<void>;
@@ -135,12 +136,21 @@ export const snapshotDirtyChunk = (state: WorldState, chunk: string): PersistedC
       })
       .sort(([left], [right]) => left.localeCompare(right)),
   );
+  const roads = Object.fromEntries(
+    Object.entries(state.roads)
+      .filter(([tile]) => {
+        const [xText, yText] = tile.split(':');
+        return chunkKeyFor(Number(xText), Number(yText)) === chunk;
+      })
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
   return {
     chunk: coordinates,
     tick: state.tick,
     buildings: recordsInChunk(state.buildings, chunk),
     threats: recordsInChunk(state.threats, chunk),
     minedTiles,
+    roads,
   };
 };
 

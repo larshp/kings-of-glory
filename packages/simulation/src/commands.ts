@@ -6,7 +6,15 @@ export type ChunkCoordinate = readonly [number, number] & { readonly __brand: 'C
 export type TileCoordinate = readonly [number, number] & { readonly __brand: 'TileCoordinate' };
 export type SettlementRole = 'owner' | 'builder' | 'logistics' | 'member';
 export type SharedProjectBuildingKind =
-  'smelter' | 'workshop' | 'storage' | 'housing' | 'hearth' | 'watchtower' | 'mine' | 'lumber-camp';
+  | 'smelter'
+  | 'workshop'
+  | 'storage'
+  | 'housing'
+  | 'hearth'
+  | 'watchtower'
+  | 'mine'
+  | 'lumber-camp'
+  | 'forester';
 
 /** Maps every placement command onto the building kind it creates. */
 export const PLACEMENT_KINDS = {
@@ -18,6 +26,7 @@ export const PLACEMENT_KINDS = {
   placeWatchtower: 'watchtower',
   placeMine: 'mine',
   placeLumberCamp: 'lumber-camp',
+  placeForester: 'forester',
 } as const satisfies Readonly<Record<string, SharedProjectBuildingKind>>;
 export type PlacementCommandType = keyof typeof PLACEMENT_KINDS;
 
@@ -118,6 +127,22 @@ export type Command =
       readonly id: string;
       readonly playerId: PlayerId;
       readonly sequence: number;
+      readonly type: 'placeForester';
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'placeRoad';
+      readonly x: number;
+      readonly y: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
       readonly type: 'explore';
       readonly x: number;
       readonly y: number;
@@ -144,7 +169,7 @@ export type Command =
       readonly playerId: PlayerId;
       readonly sequence: number;
       readonly type: 'research';
-      readonly technologyId: 'metallurgy' | 'territorial-charter';
+      readonly technologyId: 'metallurgy' | 'territorial-charter' | 'engineering' | 'stewardship';
     }
   | {
       readonly id: string;
@@ -415,6 +440,8 @@ export type RejectionCode =
   | 'technology-locked'
   | 'research-in-progress'
   | 'already-researched'
+  | 'research-branch-locked'
+  | 'road-exists'
   | 'unknown-recipient'
   | 'unknown-settlement'
   | 'settlement-permission-denied'

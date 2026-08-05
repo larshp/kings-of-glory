@@ -51,6 +51,8 @@ export const rejectionMessage = (code: string | undefined) => {
     'incompatible-building': 'Copy settings only between completed producers of the same kind.',
     'building-destroyed': 'Repair or demolish the destroyed building first.',
     'technology-locked': 'Research the required technology first.',
+    'research-branch-locked': 'That development path is locked by your earlier research choice.',
+    'road-exists': 'A road already occupies that tile.',
     'unknown-objective': 'That cooperative objective is no longer available.',
     'objective-complete': 'That cooperative objective is already complete.',
     'objective-incomplete': 'The objective must be completed before rewards can be claimed.',

@@ -1,9 +1,25 @@
-import { terrainRules } from '@kings/content';
+import { terrainRules, type LandmarkId } from '@kings/content';
 
 const RESOURCE_SECTOR_SIZE = 8;
 
 const coordinateNoise = (seed: number, x: number, y: number) =>
   Math.abs(Math.imul(seed ^ x, 73856093) ^ Math.imul(y, 19349663));
+
+/** One deterministic point of interest for roughly every four world chunks. */
+export const landmarkAtChunk = (
+  seed: number,
+  chunkX: number,
+  chunkY: number,
+): { readonly kind: LandmarkId; readonly x: number; readonly y: number } | undefined => {
+  const value = coordinateNoise(seed ^ 0x5f3759df, chunkX, chunkY);
+  if (value % 4 !== 0) return undefined;
+  const kinds: readonly LandmarkId[] = ['ancient-ruin', 'fertile-grove', 'mountain-pass'];
+  return {
+    kind: kinds[Math.floor(value / 4) % kinds.length]!,
+    x: chunkX * 16 + 8,
+    y: chunkY * 16 + 8,
+  };
+};
 const terrainNoise = (seed: number, x: number, y: number) => coordinateNoise(seed, x, y) % 23;
 const resourceNodeAt = (seed: number, x: number, y: number): 'ore' | 'wood' | undefined => {
   const sectorX = Math.floor(x / RESOURCE_SECTOR_SIZE);

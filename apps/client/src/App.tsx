@@ -421,11 +421,15 @@ export const App = () => {
     : [];
   const exploredChunkCount = Object.keys(player?.exploredChunks ?? {}).length;
   const visibleChunkCount = Object.keys(player?.visibleChunks ?? {}).length;
-  const progressionEra = player?.research.unlocked['territorial-charter']
-    ? 'Expansion era'
-    : player?.research.unlocked.metallurgy
-      ? 'Industry era'
-      : 'Founding era';
+  const progressionEra = player?.research.unlocked.engineering
+    ? 'Engineering path'
+    : player?.research.unlocked.stewardship
+      ? 'Stewardship path'
+      : player?.research.unlocked['territorial-charter']
+        ? 'Expansion era'
+        : player?.research.unlocked.metallurgy
+          ? 'Industry era'
+          : 'Founding era';
   const transfers = state?.transfers ?? [];
   const personalSettlement = state?.settlements[`settlement-${playerId}`];
   const frontierBeacon = state?.cooperativeObjectives['frontier-beacon'];
@@ -474,6 +478,7 @@ export const App = () => {
       ['placeSmelter', 'smelter'],
       ['placeMine', 'mine'],
       ['placeLumberCamp', 'lumber-camp'],
+      ['placeForester', 'forester'],
       ['placeStorage', 'storage'],
       ['placeHousing', 'housing'],
       ['placeHearth', 'hearth'],
@@ -709,6 +714,8 @@ export const App = () => {
         elevation={state?.elevation ?? {}}
         minedTiles={state?.minedTiles ?? {}}
         territory={state?.territory ?? {}}
+        roads={state?.roads ?? {}}
+        discoveries={Object.values(player?.discoveries ?? {})}
         logisticsLinks={logisticsLinks}
         operationsOverlay={operationsOverlay}
         cameraBindings={preferences.camera}

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { threats as threatDefinitions } from '@kings/content';
 import type { TerrainTile } from '@kings/protocol';
-import type { Building, LogisticsLink, Threat } from '@kings/simulation';
+import type { Building, LandmarkDiscovery, LogisticsLink, Threat } from '@kings/simulation';
 import type { CameraBindings } from './preferences.js';
 import { drawSprite, type RenderAssets, type SpriteId } from './render-assets.js';
 import {
@@ -59,6 +59,8 @@ export const WorldCanvas = ({
   elevation,
   minedTiles,
   territory,
+  roads,
+  discoveries,
   logisticsLinks,
   operationsOverlay,
   focus,
@@ -83,6 +85,8 @@ export const WorldCanvas = ({
   elevation: Readonly<Record<string, number>>;
   minedTiles: Readonly<Record<string, number>>;
   territory: Readonly<Record<string, string>>;
+  roads: Readonly<Record<string, string>>;
+  discoveries: readonly LandmarkDiscovery[];
   logisticsLinks: readonly LogisticsLink[];
   operationsOverlay: OperationsOverlay;
   focus: { x: number; y: number };
@@ -109,6 +113,8 @@ export const WorldCanvas = ({
   const latestElevation = useRef(elevation);
   const latestMinedTiles = useRef(minedTiles);
   const latestTerritory = useRef(territory);
+  const latestRoads = useRef(roads);
+  const latestDiscoveries = useRef(discoveries);
   const latestLogisticsLinks = useRef(logisticsLinks);
   const latestOperationsOverlay = useRef(operationsOverlay);
   const latestFocus = useRef(focus);
@@ -132,6 +138,8 @@ export const WorldCanvas = ({
   latestElevation.current = elevation;
   latestMinedTiles.current = minedTiles;
   latestTerritory.current = territory;
+  latestRoads.current = roads;
+  latestDiscoveries.current = discoveries;
   latestLogisticsLinks.current = logisticsLinks;
   latestOperationsOverlay.current = operationsOverlay;
   latestFocus.current = focus;
@@ -298,6 +306,19 @@ export const WorldCanvas = ({
           context.fillStyle = layers.patch.sheen;
           context.fill();
         }
+    // Roads sit beneath deposits and buildings, keeping routes readable without hiding terrain.
+    for (const chunk of chunks)
+      for (let x = chunk.minX; x <= chunk.maxX; x += 1)
+        for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
+          if (!latestRoads.current[`${x}:${y}`]) continue;
+          const point = tilePoint(x, y);
+          context.beginPath();
+          context.moveTo(point.x + 15, point.y + TILE_HEIGHT / 2);
+          context.lineTo(point.x + TILE_WIDTH - 15, point.y + TILE_HEIGHT / 2);
+          context.strokeStyle = 'rgba(176, 132, 80, 0.95)';
+          context.lineWidth = 5;
+          context.stroke();
+        }
     // Pass 2: sector ownership as borders rather than a wash that hides the terrain.
     for (const own of [true, false]) {
       context.beginPath();
@@ -331,6 +352,29 @@ export const WorldCanvas = ({
             point.y + TILE_HEIGHT / 2,
           );
         }
+    // Once found, landmarks remain useful orientation points on the explored map.
+    for (const discovery of latestDiscoveries.current) {
+      if (
+        discovery.x < tileBounds.minX ||
+        discovery.x > tileBounds.maxX ||
+        discovery.y < tileBounds.minY ||
+        discovery.y > tileBounds.maxY
+      )
+        continue;
+      const point = tilePoint(discovery.x, discovery.y);
+      context.beginPath();
+      context.arc(point.x + TILE_WIDTH / 2, point.y + TILE_HEIGHT / 2 - 8, 6, 0, Math.PI * 2);
+      context.fillStyle =
+        discovery.kind === 'ancient-ruin'
+          ? '#e7c56c'
+          : discovery.kind === 'fertile-grove'
+            ? '#70c985'
+            : '#c9d7ea';
+      context.fill();
+      context.strokeStyle = '#203040';
+      context.lineWidth = 2;
+      context.stroke();
+    }
     // Pass 4: the hovered tile, so the pointer target is visible on the map itself.
     const hoveredForHighlight = latestHoveredTile.current;
     if (hoveredForHighlight) {

@@ -18,6 +18,7 @@ export type SpriteId =
   | 'watchtower'
   | 'mine'
   | 'lumber-camp'
+  | 'forester'
   | 'construction'
   | 'raider'
   | 'selection'
@@ -65,6 +66,7 @@ export const spriteFrames: Readonly<Record<SpriteId, SpriteFrame>> = {
   watchtower: frame(1, 1),
   mine: frame(2, 1),
   'lumber-camp': frame(3, 1),
+  forester: frame(3, 1),
   construction: frame(4, 1),
   raider: frame(0, 2),
   selection: frame(1, 2, 32),

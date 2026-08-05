@@ -9,11 +9,13 @@ export type OperationsOverlay = 'none' | 'resources' | 'logistics' | 'production
 export const logisticsStatusColor = (status: LogisticsLink['status']) =>
   status === 'transferred'
     ? '#68d7f5'
-    : status === 'target-full' || status === 'source-empty'
-      ? '#f4b860'
-      : status === 'target-reconfigured' || status === 'constructing'
-        ? '#de7780'
-        : '#8796a6';
+    : status === 'in-transit'
+      ? '#a88cf0'
+      : status === 'target-full' || status === 'source-empty'
+        ? '#f4b860'
+        : status === 'target-reconfigured' || status === 'constructing'
+          ? '#de7780'
+          : '#8796a6';
 
 export const productionRateLabel = (building: Pick<Building, 'recipeId'>) => {
   const recipe = Object.values(recipes).find((candidate) => candidate.id === building.recipeId);

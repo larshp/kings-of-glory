@@ -255,7 +255,20 @@ interface Version24World extends Omit<
 > {
   schemaVersion: 24;
 }
-interface Version27World extends Omit<WorldState, 'schemaVersion'> {
+interface Version28Player extends Omit<PlayerState, 'discoveries' | 'research'> {
+  research: Omit<ResearchState, 'unlocked'> & {
+    unlocked: Record<'metallurgy' | 'territorial-charter', boolean>;
+  };
+}
+interface Version28World extends Omit<
+  WorldState,
+  'schemaVersion' | 'contentVersion' | 'roads' | 'players'
+> {
+  schemaVersion: 28;
+  contentVersion: 3;
+  players: Record<string, Version28Player>;
+}
+interface Version27World extends Omit<Version28World, 'schemaVersion'> {
   schemaVersion: 27;
 }
 interface Version26World extends Omit<Version27World, 'schemaVersion' | 'contentVersion'> {
@@ -420,7 +433,9 @@ const socialStateForExistingWorld = (
   blockedPlayers: Object.fromEntries(Object.keys(players).map((id) => [id, {}])),
 });
 const onboardingReservationsForExistingWorld = (
-  state: Pick<WorldState, 'tick' | 'players' | 'buildings' | 'settlements' | 'playerActivity'>,
+  state: Pick<WorldState, 'tick' | 'buildings' | 'settlements' | 'playerActivity'> & {
+    readonly players: Readonly<Record<string, Pick<PlayerState, 'id'>>>;
+  },
 ): WorldState['onboardingReservations'] =>
   Object.fromEntries(
     Object.values(state.players).map((player) => {
@@ -448,18 +463,54 @@ const onboardingReservationsForExistingWorld = (
       ];
     }),
   );
-/** Version 27 worlds kept every command ID ever accepted; trim them to the retention window. */
-const migrateVersion27 = (state: Version27World): WorldState => ({
+const migrateVersion28 = (state: Version28World): WorldState => ({
   ...state,
-  schemaVersion: 28,
-  processedCommands: state.processedCommands.slice(-worldRetention.processedCommands),
-  transfers: state.transfers.slice(-worldRetention.transfers),
+  schemaVersion: 29,
+  contentVersion: CONTENT_VERSION,
+  roads: {},
+  players: Object.fromEntries(
+    Object.entries(state.players).map(([id, player]) => [
+      id,
+      {
+        ...player,
+        discoveries: {},
+        research: {
+          ...player.research,
+          unlocked: {
+            ...player.research.unlocked,
+            engineering: false,
+            stewardship: false,
+          },
+        },
+      },
+    ]),
+  ),
+  logisticsLinks: Object.fromEntries(
+    Object.entries(state.logisticsLinks).map(([id, link]) => [
+      id,
+      {
+        ...link,
+        carrierId: `carrier-${id}`,
+        routeDistance: 0,
+        travelTicksRemaining: 0,
+      },
+    ]),
+  ),
 });
+
+/** Version 27 worlds kept every command ID ever accepted; trim them to the retention window. */
+const migrateVersion27 = (state: Version27World): WorldState =>
+  migrateVersion28({
+    ...state,
+    schemaVersion: 28,
+    processedCommands: state.processedCommands.slice(-worldRetention.processedCommands),
+    transfers: state.transfers.slice(-worldRetention.transfers),
+  });
 const migrateVersion26 = (state: Version26World): WorldState =>
   migrateVersion27({
     ...state,
     schemaVersion: 27,
-    contentVersion: CONTENT_VERSION,
+    contentVersion: 3,
   });
 const migrateVersion25 = (state: Version25World): WorldState =>
   migrateVersion26({
@@ -747,7 +798,8 @@ const migrateVersion2 = (legacy: Version2World): WorldState =>
  * Version 16 is the one step that does not chain onward by itself, so it names both.
  */
 const SNAPSHOT_MIGRATIONS: Record<number, (candidate: unknown) => WorldState> = {
-  28: (candidate) => candidate as WorldState,
+  29: (candidate) => candidate as WorldState,
+  28: (candidate) => migrateVersion28(candidate as Version28World),
   27: (candidate) => migrateVersion27(candidate as Version27World),
   26: (candidate) => migrateVersion26(candidate as Version26World),
   25: (candidate) => migrateVersion25(candidate as Version25World),
@@ -783,7 +835,8 @@ export const deserializeWorld = (raw: unknown): WorldState => {
   if (
     candidate.schemaVersion !== undefined &&
     candidate.schemaVersion >= 27 &&
-    candidate.contentVersion !== CONTENT_VERSION
+    ((candidate.schemaVersion >= 29 && candidate.contentVersion !== CONTENT_VERSION) ||
+      (candidate.schemaVersion < 29 && candidate.contentVersion !== 3))
   )
     throw new Error(
       `Unsupported world content version: ${String(candidate.contentVersion)}; expected ${CONTENT_VERSION}`,

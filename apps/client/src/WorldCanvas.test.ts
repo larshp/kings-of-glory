@@ -122,6 +122,7 @@ describe('visibleByIsometricDepth', () => {
 
   it('uses distinct logistics overlay colors for flow and actionable blockage', () => {
     expect(logisticsStatusColor('transferred')).toBe('#68d7f5');
+    expect(logisticsStatusColor('in-transit')).toBe('#a88cf0');
     expect(logisticsStatusColor('target-full')).toBe('#f4b860');
     expect(logisticsStatusColor('target-reconfigured')).toBe('#de7780');
   });

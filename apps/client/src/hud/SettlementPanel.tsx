@@ -151,6 +151,16 @@ export const SettlementPanel = ({
           <li className={player.research.unlocked['territorial-charter'] ? 'complete' : undefined}>
             Expansion: research the Territorial Charter to claim explored sectors.
           </li>
+          <li
+            className={
+              player.research.unlocked.engineering || player.research.unlocked.stewardship
+                ? 'complete'
+                : undefined
+            }
+          >
+            Development: choose Engineering for road logistics or Stewardship for renewable timber.
+            This choice is permanent.
+          </li>
         </ol>
         <p>
           Research: {player.research.activeTechnology ?? 'idle'} ({player.research.ticksRemaining}{' '}
@@ -178,6 +188,32 @@ export const SettlementPanel = ({
         >
           Research {technologies['territorial-charter'].displayName} (
           {technologyCostLabel(technologies['territorial-charter'].cost)})
+        </button>
+        <button
+          disabled={
+            Boolean(player.research.activeTechnology) ||
+            !player.research.unlocked.metallurgy ||
+            player.research.unlocked.engineering ||
+            player.research.unlocked.stewardship ||
+            !canAffordTechnology(technologies.engineering.cost)
+          }
+          onClick={() => send({ type: 'research', technologyId: 'engineering' })}
+        >
+          Choose {technologies.engineering.displayName} (
+          {technologyCostLabel(technologies.engineering.cost)})
+        </button>
+        <button
+          disabled={
+            Boolean(player.research.activeTechnology) ||
+            !player.research.unlocked.metallurgy ||
+            player.research.unlocked.engineering ||
+            player.research.unlocked.stewardship ||
+            !canAffordTechnology(technologies.stewardship.cost)
+          }
+          onClick={() => send({ type: 'research', technologyId: 'stewardship' })}
+        >
+          Choose {technologies.stewardship.displayName} (
+          {technologyCostLabel(technologies.stewardship.cost)})
         </button>
         <section className="information-browser" aria-labelledby="information-browser-title">
           <h2 id="information-browser-title">Settlement information</h2>

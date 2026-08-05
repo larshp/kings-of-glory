@@ -61,7 +61,7 @@ export interface ClientWorldState extends Omit<
 export type ClientWorldDelta = Partial<ClientWorldState>;
 
 /** Bump whenever a client can no longer safely interpret server state messages. */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 export const MAX_MESSAGE_BYTES = 64 * 1024;
 export const MAX_INTEREST_CHUNKS = 64;
 
@@ -148,6 +148,7 @@ const isCommand = (value: unknown): value is Command => {
     value.type === 'gather' ||
     value.type === 'explore' ||
     value.type === 'claimTerritory' ||
+    value.type === 'placeRoad' ||
     value.type in PLACEMENT_KINDS
   )
     return Number.isSafeInteger(value.x) && Number.isSafeInteger(value.y);
@@ -156,7 +157,12 @@ const isCommand = (value: unknown): value is Command => {
       isIdentifier(value.scoutId) && Number.isSafeInteger(value.x) && Number.isSafeInteger(value.y)
     );
   if (value.type === 'research')
-    return value.technologyId === 'metallurgy' || value.technologyId === 'territorial-charter';
+    return (
+      value.technologyId === 'metallurgy' ||
+      value.technologyId === 'territorial-charter' ||
+      value.technologyId === 'engineering' ||
+      value.technologyId === 'stewardship'
+    );
   if (value.type === 'contributeToObjective')
     return (
       value.objectiveId === 'frontier-beacon' &&

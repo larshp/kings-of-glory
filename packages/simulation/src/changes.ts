@@ -15,6 +15,7 @@ export interface WorldChangeSet {
   readonly settlements: readonly string[];
   readonly logisticsLinks: readonly string[];
   readonly minedTiles: readonly string[];
+  readonly roads: readonly string[];
   /** Includes both the old and new chunk when an entity changes chunk or is removed. */
   readonly chunks: readonly string[];
   /** Tick, PRNG, or other world-level state changed outside an entity registry. */
@@ -89,12 +90,14 @@ export const diffWorld = (previous: WorldState, next: WorldState): WorldChangeSe
   const settlements = changedKeys(previous.settlements, next.settlements);
   const logisticsLinks = changedKeys(previous.logisticsLinks, next.logisticsLinks);
   const minedTiles = changedKeys(previous.minedTiles, next.minedTiles);
+  const roads = changedKeys(previous.roads, next.roads);
   const chunks = new Set<string>([
     ...entityChunks<Building>(previous.buildings, next.buildings, buildings),
     ...entityChunks<Threat>(previous.threats, next.threats, threats),
     ...entityChunks<Scout>(previous.scouts ?? {}, next.scouts ?? {}, scouts),
     ...changedPlayerChunks(previous.players, next.players, players),
     ...minedTileChunks(minedTiles),
+    ...minedTileChunks(roads),
   ]);
   return {
     players,
@@ -104,6 +107,7 @@ export const diffWorld = (previous: WorldState, next: WorldState): WorldChangeSe
     settlements,
     logisticsLinks,
     minedTiles,
+    roads,
     chunks: [...chunks].sort((left, right) => left.localeCompare(right)),
     world:
       previous.tick !== next.tick ||

@@ -3,6 +3,7 @@ import {
   extractors as extractorDefinitions,
   producers as producerDefinitions,
   recipes,
+  renewers as renewerDefinitions,
 } from '@kings/content';
 import type { Building } from '@kings/simulation';
 
@@ -28,10 +29,14 @@ export const buildingLabel = (kind: Building['kind']) => buildingDefinitions[kin
 export const extractorForBuilding = (building: Building) =>
   extractorDefinitions[building.kind as keyof typeof extractorDefinitions];
 
+export const renewerForBuilding = (building: Building) =>
+  renewerDefinitions[building.kind as keyof typeof renewerDefinitions];
+
 /** Extractors and recipe producers share the settlement's worker pool and job priorities. */
 export const usesWorkers = (building: Building) =>
   Boolean(producerDefinitions[building.kind as keyof typeof producerDefinitions]) ||
-  Boolean(extractorForBuilding(building));
+  Boolean(extractorForBuilding(building)) ||
+  Boolean(renewerForBuilding(building));
 
 export const recipeOptionsForBuilding = (building: Building) => {
   const producer = producerDefinitions[building.kind as keyof typeof producerDefinitions];

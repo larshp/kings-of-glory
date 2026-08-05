@@ -39,6 +39,29 @@ describe('client message validation', () => {
       ),
     ).toMatchObject({ type: 'command' });
   });
+  it('accepts roads, foresters, and both development research choices', () => {
+    for (const command of [
+      { id: 'road-1', playerId: 'player-a', sequence: 1, type: 'placeRoad', x: 2, y: 3 },
+      { id: 'forester-1', playerId: 'player-a', sequence: 2, type: 'placeForester', x: 3, y: 4 },
+      {
+        id: 'engineering-1',
+        playerId: 'player-a',
+        sequence: 3,
+        type: 'research',
+        technologyId: 'engineering',
+      },
+      {
+        id: 'stewardship-1',
+        playerId: 'player-a',
+        sequence: 4,
+        type: 'research',
+        technologyId: 'stewardship',
+      },
+    ])
+      expect(parseClientMessage(JSON.stringify({ type: 'command', command }))).toMatchObject({
+        type: 'command',
+      });
+  });
   it('accepts settlement commands only with safe identifiers and known roles', () => {
     expect(
       parseClientMessage(

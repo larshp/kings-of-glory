@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   borderSides,
   cameraOrigin,
+  compareIsometricDrawables,
   MAX_ELEVATION,
   entityAtTile,
   initialCameraFocus,
@@ -143,6 +144,24 @@ describe('visibleByIsometricDepth', () => {
     expect(visibleByIsometricDepth(entities, { x: 0, y: 0 }, 3).map((entity) => entity.id)).toEqual(
       ['north-west', 'same-depth-earlier-y', 'same-depth-later-y', 'south-east'],
     );
+  });
+
+  it('keeps same-depth resources, buildings, and units visible above raised terrain', () => {
+    const drawables = [
+      { id: 'building', depth: 4, y: 0, order: 2 },
+      { id: 'resource', depth: 4, y: 3, order: 1 },
+      { id: 'mountain-across-row', depth: 4, y: 2, order: 0 },
+      { id: 'threat', depth: 4, y: 1, order: 3 },
+      { id: 'mountain-in-front', depth: 5, y: 0, order: 0 },
+    ];
+
+    expect(drawables.sort(compareIsometricDrawables).map(({ id }) => id)).toEqual([
+      'mountain-across-row',
+      'resource',
+      'building',
+      'threat',
+      'mountain-in-front',
+    ]);
   });
 
   it('moves tile coverage with the camera while retaining the full viewport', () => {

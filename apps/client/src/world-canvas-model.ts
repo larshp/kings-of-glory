@@ -162,6 +162,23 @@ export const visibleByIsometricDepth = <Entity extends IsometricEntity>(
         left.id.localeCompare(right.id),
     );
 
+export interface IsometricDrawable {
+  readonly depth: number;
+  readonly y: number;
+  /** Ground layer at a shared depth: terrain, resources, buildings, then mobile units. */
+  readonly order: number;
+}
+
+/**
+ * Paints back-to-front while keeping objects on the same projected ground row above
+ * raised terrain. Using the row coordinate before the layer made a diagonal mountain
+ * tile cover a building whose feet were at exactly the same screen depth.
+ */
+export const compareIsometricDrawables = (
+  left: IsometricDrawable,
+  right: IsometricDrawable,
+): number => left.depth - right.depth || left.order - right.order || left.y - right.y;
+
 export const visibleTileBounds = (
   width: number,
   height: number,

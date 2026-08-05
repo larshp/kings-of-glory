@@ -645,8 +645,23 @@ const isSettleablePlot = (seed: number, plot: Plot) => {
   return open >= plot.size ** 2 * MIN_OPEN_PLOT_FRACTION;
 };
 
+/** Picks the nearest grass tile to the traditional center position without moving the plot. */
+const settlementCenterFor = (seed: number, plot: Plot) => {
+  const preferredX = plot.x + plot.size - 2;
+  const preferredY = plot.y + plot.size - 2;
+  for (let distance = 0; distance < plot.size * 2; distance += 1)
+    for (let x = plot.x; x < plot.x + plot.size; x += 1)
+      for (let y = plot.y; y < plot.y + plot.size; y += 1)
+        if (
+          Math.abs(x - preferredX) + Math.abs(y - preferredY) === distance &&
+          terrainAt(seed, x, y) === 'grass'
+        )
+          return { x, y };
+  return undefined;
+};
+
 /**
- * Allocates the next unclaimed radial plot with a buildable center. The scan is
+ * Allocates the next unclaimed radial plot with a grassland center. The scan is
  * deterministic and the 12-tile spacing keeps the 8×8 settlement plots apart. Plots
  * walled in by water or mountains are skipped so a new player never spawns somewhere
  * they cannot build.
@@ -655,10 +670,11 @@ const plotFor = (state: WorldState): Plot => {
   const claimed = Object.values(state.players).map((player) => player.plot);
   for (let ordinal = 0; ordinal < MAX_PLOT_CANDIDATE_ATTEMPTS; ordinal += 1) {
     const candidate = plotCandidate(ordinal);
-    const centerX = candidate.x + candidate.size - 2;
-    const centerY = candidate.y + candidate.size - 2;
+    const preferredX = candidate.x + candidate.size - 2;
+    const preferredY = candidate.y + candidate.size - 2;
     if (
-      isOpenTile(state.seed, centerX, centerY) &&
+      isOpenTile(state.seed, preferredX, preferredY) &&
+      settlementCenterFor(state.seed, candidate) &&
       isSettleablePlot(state.seed, candidate) &&
       !claimed.some((plot) => plotsOverlap(plot, candidate))
     )
@@ -762,12 +778,13 @@ export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
   };
   const centerId = buildingId(`center-${id}`);
   const center = buildingDefinitions['settlement-center'];
+  const centerTile = settlementCenterFor(state.seed, plot)!;
   state.buildings[centerId] = {
     id: centerId,
     kind: 'settlement-center',
     ownerId: typedId,
-    x: plot.x + plot.size - 2,
-    y: plot.y + plot.size - 2,
+    x: centerTile.x,
+    y: centerTile.y,
     health: center.maxHealth,
     maxHealth: center.maxHealth,
     progress: 0,

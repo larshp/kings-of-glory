@@ -122,8 +122,8 @@ describe('world simulation', () => {
     }
   });
 
-  it('gives every starter plot enough open ground to build on', () => {
-    for (const seed of [1, 47]) {
+  it('gives every starter plot enough open ground and a grassland center', () => {
+    for (const seed of [1, 47, 99, 117, 20260719]) {
       const world = createWorld(seed);
       for (let index = 0; index < 8; index += 1) {
         joinPlayer(world, `player-${index}`);
@@ -134,7 +134,7 @@ describe('world simulation', () => {
             if (isOpenTile(world.seed, x, y)) open += 1;
         expect(open).toBeGreaterThanOrEqual(plot.size ** 2 * 0.875);
         const center = world.buildings[`center-player-${index}`]!;
-        expect(isOpenTile(world.seed, center.x, center.y)).toBe(true);
+        expect(terrainAt(world.seed, center.x, center.y)).toBe('grass');
       }
       expect(inspectWorld(world)).toEqual([]);
     }
@@ -320,7 +320,7 @@ describe('world simulation', () => {
     const plots = Object.values(world.players).map((player) => player.plot);
     for (const [index, plot] of plots.entries()) {
       const center = world.buildings[`center-player-${index}`]!;
-      expect(terrainAt(world.seed, center.x, center.y)).not.toBe('water');
+      expect(terrainAt(world.seed, center.x, center.y)).toBe('grass');
       expect(plot.x).toBeLessThanOrEqual(center.x);
       expect(plot.y).toBeLessThanOrEqual(center.y);
       for (const other of plots.slice(index + 1))

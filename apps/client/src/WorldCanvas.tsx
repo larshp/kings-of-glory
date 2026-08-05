@@ -15,6 +15,7 @@ import {
 import {
   borderSides,
   cameraOrigin,
+  compareIsometricDrawables,
   entityAtTile,
   logisticsStatusColor,
   MAX_ELEVATION,
@@ -285,6 +286,7 @@ export const WorldCanvas = ({
      * pass. They join the depth-sorted pass with buildings and threats instead.
      */
     const raisedTiles: Array<{ x: number; y: number; level: number }> = [];
+    const resourceTiles: Array<{ x: number; y: number; sprite: SpriteId }> = [];
     // Pass 1: flat ground, plus the inset pond or outcrop surface where a tile has one.
     for (const chunk of chunks)
       for (let x = chunk.minX; x <= chunk.maxX; x += 1)
@@ -333,7 +335,8 @@ export const WorldCanvas = ({
       context.lineWidth = 2.5;
       context.stroke();
     }
-    // Pass 3: deposits, drawn as clutter whose density shows the remaining yield.
+    // Collect deposits for the standing-object pass below. Drawing them here made every
+    // mountain cover them regardless of which tile was actually closer to the viewer.
     for (const chunk of chunks)
       for (let x = chunk.minX; x <= chunk.maxX; x += 1)
         for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
@@ -341,16 +344,7 @@ export const WorldCanvas = ({
             terrainAt(x, y),
             latestMinedTiles.current[`${x}:${y}`] ?? 0,
           );
-          const assets = latestAssets.current;
-          if (!decoration || !assets) continue;
-          const point = tilePoint(x, y);
-          drawSprite(
-            context,
-            assets,
-            decoration,
-            point.x + TILE_WIDTH / 2,
-            point.y + TILE_HEIGHT / 2,
-          );
+          if (decoration) resourceTiles.push({ x, y, sprite: decoration });
         }
     // Once found, landmarks remain useful orientation points on the explored map.
     for (const discovery of latestDiscoveries.current) {
@@ -463,6 +457,12 @@ export const WorldCanvas = ({
       order: 0,
       draw: () => drawMountain(tile.x, tile.y, tile.level),
     }));
+    const resourceDrawables = resourceTiles.map((resource) => ({
+      depth: resource.x + resource.y,
+      y: resource.y,
+      order: 1,
+      draw: () => drawEntitySprite(resource.sprite, resource.x, resource.y),
+    }));
     const buildingDrawables = visibleByIsometricDepth(
       latestBuildings.current,
       tileBounds.center,
@@ -470,7 +470,7 @@ export const WorldCanvas = ({
     ).map((building) => ({
       depth: building.x + building.y,
       y: building.y,
-      order: 1,
+      order: 2,
       draw: () => {
         drawContactShadow(building.x, building.y, building.kind === 'watchtower' ? 14 : 20);
         drawEntitySprite(
@@ -495,7 +495,7 @@ export const WorldCanvas = ({
     ).map((threat) => ({
       depth: threat.x + threat.y,
       y: threat.y,
-      order: 2,
+      order: 3,
       draw: () => {
         drawContactShadow(threat.x, threat.y, 12);
         drawEntitySprite('raider', threat.x, threat.y);
@@ -506,9 +506,12 @@ export const WorldCanvas = ({
         );
       },
     }));
-    for (const drawable of [...raised, ...buildingDrawables, ...threatDrawables].sort(
-      (left, right) => left.depth - right.depth || left.y - right.y || left.order - right.order,
-    ))
+    for (const drawable of [
+      ...raised,
+      ...resourceDrawables,
+      ...buildingDrawables,
+      ...threatDrawables,
+    ].sort(compareIsometricDrawables))
       drawable.draw();
     const operationsOverlay = latestOperationsOverlay.current;
     if (operationsOverlay === 'logistics') {

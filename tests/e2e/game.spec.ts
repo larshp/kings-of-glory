@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 const canvasProbePositions = (width: number, height: number) => {
   const positions: Array<{ x: number; y: number }> = [];
@@ -12,20 +12,46 @@ const canvasProbePositions = (width: number, height: number) => {
   );
 };
 
-const selectCanvasTile = async (page: Page, expectedText: RegExp) => {
+const canvasBounds = async (page: Page) => {
   const canvas = page.locator('canvas');
   await expect(canvas).toBeVisible();
   const bounds = await canvas.boundingBox();
   if (!bounds) throw new Error('World canvas has no visible bounds');
+  return bounds;
+};
+
+const clickCanvas = async (
+  page: Page,
+  bounds: { x: number; y: number },
+  position: { x: number; y: number },
+) =>
+  page.locator('canvas').dispatchEvent('pointerup', {
+    clientX: bounds.x + position.x,
+    clientY: bounds.y + position.y,
+    pointerId: 1,
+  });
+
+/** Selects tiles until the HUD reports the expected state, and returns the tile that did. */
+const selectCanvasTile = async (page: Page, expectedText: RegExp) => {
+  const bounds = await canvasBounds(page);
   for (const position of canvasProbePositions(bounds.width, bounds.height)) {
-    await canvas.dispatchEvent('pointerup', {
-      clientX: bounds.x + position.x,
-      clientY: bounds.y + position.y,
-      pointerId: 1,
-    });
-    if (expectedText.test(await page.locator('body').innerText())) return;
+    await clickCanvas(page, bounds, position);
+    if (expectedText.test(await page.locator('body').innerText())) return position;
   }
   throw new Error(`Could not find a canvas tile matching ${String(expectedText)}`);
+};
+
+/**
+ * Placement is two steps: the menu arms a building, then a click on the map puts it there.
+ * The tile is chosen first so the click lands on a site the HUD has already called buildable.
+ */
+const placeBuilding = async (page: Page, name: RegExp) => {
+  const position = await selectCanvasTile(page, /Selected tile is buildable/);
+  const place = page.getByRole('button', { name });
+  await expect(place).toBeEnabled({ timeout: 10_000 });
+  await place.click();
+  await expect(place).toHaveAttribute('aria-pressed', 'true');
+  await clickCanvas(page, await canvasBounds(page), position);
 };
 
 const openHudTab = async (
@@ -36,22 +62,35 @@ const openHudTab = async (
   await expect(page.locator(`#hud-panel-${tab}`)).toBeVisible();
 };
 
-/** Reads the header resource bar, which lists one `Name count` pair per carryable item. */
+/** Reads the header resource bar, which carries one chip per carryable item. */
 const inventory = async (page: Page) => {
-  const text = await page.locator('aside.hud p.resource-bar').first().innerText();
-  const amounts = new Map(
-    [...text.matchAll(/([A-Za-z]+) (\d+)/g)].map(([, item, amount]) => [
-      item!.toLowerCase(),
-      Number(amount),
-    ]),
-  );
   const required = ['ore', 'wood', 'stone', 'ingot', 'brick', 'tool'] as const;
-  for (const item of required)
-    if (!amounts.has(item)) throw new Error(`Could not parse ${item} in inventory: ${text}`);
-  return Object.fromEntries(required.map((item) => [item, amounts.get(item)!])) as Record<
-    (typeof required)[number],
-    number
-  >;
+  const amounts = await Promise.all(
+    required.map(async (item) => {
+      const chip = page.locator(`aside.hud .resource-bar [data-item="${item}"]`).first();
+      const amount = await chip.getAttribute('data-amount');
+      if (amount === null) throw new Error(`The resource bar has no chip for ${item}`);
+      return [item, Number(amount)] as const;
+    }),
+  );
+  return Object.fromEntries(amounts) as Record<(typeof required)[number], number>;
+};
+
+/**
+ * Buildings collapse to one row each, so a building has to be opened before its controls
+ * exist. Opening one closes the others, which is why interactions re-open as they go.
+ */
+const expandBuilding = async (building: Locator) => {
+  const summary = building.locator('button.building-summary');
+  if ((await summary.getAttribute('aria-expanded')) !== 'true') await summary.click();
+  await expect(summary).toHaveAttribute('aria-expanded', 'true');
+};
+
+const openBuilding = async (page: Page, kind: string) => {
+  const building = page.locator('section.building').filter({ hasText: kind }).first();
+  await expect(building).toBeVisible();
+  await expandBuilding(building);
+  return building;
 };
 
 const gatherResource = async (page: Page, resource: 'ore' | 'wood') => {
@@ -103,9 +142,9 @@ const gatherTo = async (page: Page, resource: 'ore' | 'wood', minimum: number) =
 };
 
 const completedBuilding = async (page: Page, kind: string) => {
-  const building = page.locator('section.building').filter({ hasText: kind }).first();
-  await expect(building).toBeVisible();
-  await expect(building.getByText(/Construction:/)).toHaveCount(0, { timeout: 10_000 });
+  const building = await openBuilding(page, kind);
+  // The row states its own status, so completion is visible without opening anything.
+  await expect(building.getByText('Under construction')).toHaveCount(0, { timeout: 10_000 });
   return building;
 };
 
@@ -165,9 +204,8 @@ test('completes the authoritative gather-build-produce-research-defend loop', as
   await gatherTo(page, 'ore', 2);
   await gatherTo(page, 'wood', 11);
 
-  await selectCanvasTile(page, /Selected tile is buildable/);
-  await page.getByRole('button', { name: /Place smelter/ }).click();
-  const smelter = await completedBuilding(page, 'smelter');
+  await placeBuilding(page, /Place smelter/);
+  let smelter = await completedBuilding(page, 'Smelter');
   await smelter.getByRole('button', { name: 'Load 1 ore' }).click();
   await expect(smelter.getByRole('button', { name: 'Take 1 ingot' })).toBeEnabled();
   await smelter.getByRole('button', { name: 'Take 1 ingot' }).click();
@@ -175,34 +213,37 @@ test('completes the authoritative gather-build-produce-research-defend loop', as
   await openHudTab(page, 'settlement');
   await page.getByRole('button', { name: /Research Metallurgy/ }).click();
   await openHudTab(page, 'build');
-  await selectCanvasTile(page, /Selected tile is buildable/);
-  await expect(page.getByRole('button', { name: /Place workshop/ })).toBeEnabled({
-    timeout: 10_000,
-  });
-  await page.getByRole('button', { name: /Place workshop/ }).click();
-  const workshop = await completedBuilding(page, 'workshop');
+  await placeBuilding(page, /Place workshop/);
+  await completedBuilding(page, 'Workshop');
 
+  smelter = await openBuilding(page, 'Smelter');
   await smelter.getByRole('button', { name: 'Load 1 ore' }).click();
   await expect(smelter.getByRole('button', { name: 'Take 1 ingot' })).toBeEnabled();
   await smelter.getByRole('button', { name: 'Take 1 ingot' }).click();
+  await smelter.getByRole('combobox', { name: 'Job priority' }).selectOption('0');
+  const workshop = await openBuilding(page, 'Workshop');
   await workshop.getByRole('button', { name: 'Load 1 ingot' }).click();
   await workshop.getByRole('button', { name: 'Load 1 wood' }).click();
   await expect(workshop.getByRole('button', { name: 'Take 1 tool' })).toBeEnabled();
   await workshop.getByRole('button', { name: 'Take 1 tool' }).click();
-  await smelter.getByRole('combobox', { name: 'Job priority' }).selectOption('0');
   await workshop.getByRole('combobox', { name: 'Job priority' }).selectOption('0');
 
-  await selectCanvasTile(page, /Selected tile is buildable/);
-  await page.getByRole('button', { name: /Place watchtower/ }).click();
-  await completedBuilding(page, 'watchtower');
+  await placeBuilding(page, /Place watchtower/);
+  await completedBuilding(page, 'Watchtower');
 
-  const damaged = page
-    .locator('section.building')
-    .filter({ hasText: 'Damaged by a threat or acid rain' })
-    .first();
+  // A damaged building says so on its own row, before it is opened.
+  const damaged = page.locator('section.building').filter({ hasText: 'Damaged' }).first();
   await expect(damaged).toBeVisible({ timeout: 45_000 });
+  const damagedName = await damaged.locator('.building-name').innerText();
+  await expandBuilding(damaged);
+  await expect(damaged.getByText('Damaged by a threat or acid rain')).toBeVisible();
   await damaged.getByRole('button', { name: 'Repair' }).click();
-  await expect(damaged.getByText('Damaged by a threat or acid rain')).toHaveCount(0);
+  await expect(
+    page
+      .locator('section.building')
+      .filter({ hasText: damagedName })
+      .locator('.building-state.damaged'),
+  ).toHaveCount(0);
 });
 
 test('automates gathering with a lumber camp beside a timber grove', async ({ page }, testInfo) => {
@@ -213,29 +254,62 @@ test('automates gathering with a lumber camp beside a timber grove', async ({ pa
   await page.goto('/');
   await expect(page.locator('.status')).toHaveText('Connected');
 
-  // Extractors need a deposit in range, so probe tiles until the build menu enables one.
   const place = page.getByRole('button', { name: /Place lumber camp/ });
-  const canvas = page.locator('canvas');
-  const bounds = await canvas.boundingBox();
-  if (!bounds) throw new Error('World canvas has no visible bounds');
+  await expect(page.getByText(/Extracts 1 wood every \d+ ticks while staffed/)).toBeVisible();
+  await place.click();
+  await expect(place).toHaveAttribute('aria-pressed', 'true');
+
+  /*
+   * An extractor needs a grove in range, and the armed camp simply refuses a site that has
+   * none, so probing with the camp armed is the same check the map makes: the first click
+   * that produces a camp found a working site.
+   */
+  const bounds = await canvasBounds(page);
+  const camps = page.locator('section.building').filter({ hasText: 'Lumber camp' });
   let site = false;
   for (const position of canvasProbePositions(bounds.width, bounds.height)) {
-    await canvas.dispatchEvent('pointerup', {
-      clientX: bounds.x + position.x,
-      clientY: bounds.y + position.y,
-      pointerId: 1,
-    });
-    if (await place.isEnabled()) {
+    await clickCanvas(page, bounds, position);
+    await page.waitForTimeout(250);
+    if ((await camps.count()) > 0) {
       site = true;
       break;
     }
   }
-  if (!site) throw new Error('No lumber camp site was offered inside the starter plot');
-  await expect(page.getByText(/Extracts 1 wood every \d+ ticks while staffed/)).toBeVisible();
-  await place.click();
+  if (!site) throw new Error('No lumber camp site was accepted inside the starter plot');
 
   const camp = await completedBuilding(page, 'Lumber camp');
   await expect(camp.getByText(/Extraction: \d+\/\d+ ticks per wood/)).toBeVisible();
   // No gather command is sent here: the camp works the grove on its own.
   await expect(camp.getByText(/Inventory: ore 0 · wood [1-9]/)).toBeVisible({ timeout: 30_000 });
+});
+
+test('arms a building for placement with its hotkey and cancels with Escape', async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== 'chromium-desktop',
+    'Placement mode runs once; smoke runs in every engine.',
+  );
+  await page.goto('/');
+  await expect(page.locator('.status')).toHaveText('Connected');
+
+  const place = page.getByRole('button', { name: /Place storage/ });
+  await expect(place).toHaveAttribute('aria-keyshortcuts', '6');
+  await expect(place).toHaveAttribute('aria-pressed', 'false');
+
+  await page.keyboard.press('6');
+  await expect(place).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByText(/Placing storage/)).toBeVisible();
+
+  // The map answers for the armed building rather than for buildability in general.
+  const bounds = await canvasBounds(page);
+  await page.locator('canvas').hover({ position: { x: bounds.width / 2, y: bounds.height / 2 } });
+  await expect(page.locator('canvas')).toHaveAttribute(
+    'aria-description',
+    /(Place storage here|Cannot place storage:)/,
+  );
+
+  await page.keyboard.press('Escape');
+  await expect(place).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByText(/Placing storage/)).toHaveCount(0);
 });

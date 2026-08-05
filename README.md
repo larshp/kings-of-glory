@@ -280,7 +280,33 @@ that stays visible, and groups everything else into keyboard-navigable **Build**
 **World**, **Co-op**, and **Settings** tabs. Build is the default so construction and building management
 are the first thing a new player sees; accessibility options, control rebinding, renderer diagnostics,
 and performance counters live under Settings. The tab strip is a standard ARIA tablist: arrow keys move
-between tabs and Home/End jump to the ends. The build menu is generated from content definitions and
-states the exact reason a placement is unavailable — missing materials of any kind, a locked technology,
-no selected tile, or no deposit in range. Each completed building also offers its tier upgrade beside
-repair and demolish, stating the cost, what the tier buys, and the downtime it will cost.
+between tabs and Home/End jump to the ends. The map legend is a collapsed disclosure, so a legend worth
+reading once does not stand between the player and the build menu on every visit.
+
+The resource bar carries one chip per item — icon, name, amount, and the change per minute over the last
+minute — because during play the useful question is whether a chain is producing, which a bare count
+cannot answer. Buttons size to their label; only the action that leads a section takes a full row.
+
+Placement is a mode rather than a single click. The build menu is generated from content definitions and
+reports what stops a building anywhere — a locked technology or missing materials — while arming it puts
+a translucent ghost of that exact building under the pointer, which the map depth-sorts so terrain in
+front of the site hides it. The hover tooltip then answers for the armed building instead of for
+buildability in general, naming the reason a site is refused, including a missing deposit in range for
+an extractor. Clicking places it, Shift-clicking keeps the building armed for the next site, and Escape
+cancels. The first ten menu entries carry digit hotkeys, numbered by the fixed menu order so a hotkey
+never changes meaning as research unlocks entries.
+
+Buildings collapse to one row each — name, site, plain-language status, and a progress bar — and one
+row at a time expands into its full controls, which is also what selecting a building on the map opens.
+A settlement of any size stayed navigable this way, where a list of fully expanded buildings did not.
+The expanded controls offer the tier upgrade beside repair and demolish, stating the cost, what the tier
+buys, and the downtime it will cost.
+
+The research interface is generated from the content graph: every technology states its cost, duration,
+prerequisites, and what it unlocks, indented one step in from what it depends on, and a permanent path
+choice says so before it is made. The frontier actions in the World tab act on the selected sector and
+describe it, rather than on an off-screen default the player has no way to judge.
+
+Server acknowledgements, rejections, and connection changes queue as toasts stacked by severity instead
+of overwriting one slot, an immediate repeat is counted rather than duplicated, and the Settlement tab
+keeps a log of recent messages for anything a player missed while it faded.

@@ -8,13 +8,10 @@ import {
 import {
   buildings as buildingDefinitions,
   cooperativeObjectives as cooperativeObjectiveDefinitions,
-  extractors as extractorDefinitions,
   logisticsLinks as logisticsDefinitions,
   recipes,
-  resources as resourceDefinitions,
   technologies,
   threats as threatDefinitions,
-  type TechnologyId,
 } from '@kings/content';
 import {
   type ClientWorldState,
@@ -28,13 +25,15 @@ import { fallbackPlayerId, playerIdPromise } from './connection-status.js';
 import { useGameConnection } from './useGameConnection.js';
 import { BuildPanel } from './hud/BuildPanel.js';
 import { SettlementPanel } from './hud/SettlementPanel.js';
+import { amountLabel, ITEM_KINDS, recipeForBuilding } from './hud/labels.js';
 import {
-  amountLabel,
-  depositLabel,
-  itemLabel,
-  ITEM_KINDS,
-  recipeForBuilding,
-} from './hud/labels.js';
+  buildMenuEntries,
+  kindForHotkey,
+  placementStatus,
+  type PlacementRules,
+} from './hud/build-menu.js';
+import { researchEntries } from './hud/research.js';
+import { ResourceBar } from './hud/ResourceBar.js';
 import { WorldPanel } from './hud/WorldPanel.js';
 import { initialCameraFocus, WorldCanvas } from './WorldCanvas.js';
 import type {
@@ -49,7 +48,18 @@ import {
   type InformationCategory,
   type InformationEntry,
 } from './information-search.js';
-import { groupNotifications, type NotificationSeverity } from './notifications.js';
+import {
+  appendNotice,
+  groupNotifications,
+  MESSAGE_LOG_LIMIT,
+  type Notice,
+  type NotificationSeverity,
+} from './notifications.js';
+import {
+  inventoryRatesPerMinute,
+  withInventorySample,
+  type InventorySample,
+} from './inventory-trend.js';
 import {
   displayKey,
   loadPreferences,
@@ -90,11 +100,24 @@ export const App = () => {
   );
   const [state, setState] = useState<ClientWorldState>();
   const [status, setStatus] = useState('Connecting');
-  // seq bumps on every message so an identical repeated toast (e.g. "Gathered
-  // wood.") still re-shows and resets its auto-dismiss timer.
-  const [notice, setNoticeState] = useState<{ text: string; seq: number }>({ text: '', seq: 0 });
-  const notify = (text: string) => setNoticeState((previous) => ({ text, seq: previous.seq + 1 }));
-  const dismissNotice = () => setNoticeState((previous) => ({ ...previous, text: '' }));
+  /**
+   * Toasts are a queue rather than one slot: a burst of acknowledgements used to overwrite
+   * each other, so players lost messages they never saw. The log keeps them for review after
+   * the toast has faded, and each toast schedules its own dismissal so an older message is
+   * not held on screen by a newer one.
+   */
+  const [notices, setNotices] = useState<readonly Notice[]>([]);
+  const [messageLog, setMessageLog] = useState<readonly Notice[]>([]);
+  const noticeCount = useRef(0);
+  const dismissNotice = (id: number) =>
+    setNotices((current) => current.filter((notice) => notice.id !== id));
+  const notify = (text: string, severity: NotificationSeverity = 'info') => {
+    const id = (noticeCount.current += 1);
+    setNotices((current) => appendNotice(current, { text, severity }, id));
+    setMessageLog((current) => appendNotice(current, { text, severity }, id, MESSAGE_LOG_LIMIT));
+    // A repeat replaces the newest notice under a new id, so this also restarts its timer.
+    window.setTimeout(() => dismissNotice(id), 5_000);
+  };
   const [selectedTile, setSelectedTile] = useState<{ x: number; y: number }>();
   const [selectedEntity, setSelectedEntity] = useState<PickedEntity>();
   const [hoveredTile, setHoveredTile] = useState<{ x: number; y: number }>();
@@ -122,6 +145,9 @@ export const App = () => {
   });
   const [operationsOverlay, setOperationsOverlay] = useState<OperationsOverlay>('none');
   const [hudTab, setHudTab] = useState<HudTabId>('build');
+  /** The building the player armed, which then follows the pointer until it is placed. */
+  const [armedKind, setArmedKind] = useState<Building['kind']>();
+  const [inventorySamples, setInventorySamples] = useState<readonly InventorySample[]>([]);
   /** Standard tablist behaviour: arrows move between tabs, Home and End jump to the ends. */
   const moveHudTabFocus = (event: ReactKeyboardEvent<HTMLButtonElement>, current: HudTabId) => {
     const index = HUD_TABS.findIndex((tab) => tab.id === current);
@@ -141,6 +167,11 @@ export const App = () => {
     setHudTab(next);
     document.getElementById(`hud-tab-${next}`)?.focus();
   };
+  /**
+   * Assigned on every render and read only when a key is pressed, so the window listener is
+   * installed once while still acting on current research, materials, and bindings.
+   */
+  const latestHotkeyHandler = useRef<(event: KeyboardEvent) => void>(() => {});
   const messageCount = useRef({ received: 0, sent: 0 });
   const [messageRate, setMessageRate] = useState({ received: 0, sent: 0 });
   const [updateApplicationMs, setUpdateApplicationMs] = useState(0);
@@ -227,21 +258,40 @@ export const App = () => {
   }, []);
 
   useEffect(() => {
-    if (!notice.text) return;
-    const timer = window.setTimeout(
-      () => setNoticeState((previous) => ({ ...previous, text: '' })),
-      5_000,
-    );
-    return () => window.clearTimeout(timer);
-  }, [notice.seq, notice.text]);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
+      const target = event.target as HTMLElement | null;
+      // Never take a key away from chat, a name field, or an open dropdown.
+      if (
+        target?.isContentEditable ||
+        ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName ?? '')
+      )
+        return;
+      latestHotkeyHandler.current(event);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   const player = state?.players[playerId];
-  const canAffordTechnology = (cost: Readonly<Partial<Record<ItemKind, number>>>) => {
-    if (!player) return false;
-    return Object.entries(cost).every(
-      ([item, amount]) => player.inventory[item as keyof typeof player.inventory] >= (amount ?? 0),
-    );
-  };
+  /** Read by the sampling interval, which must not restart every time the world updates. */
+  const latestInventory = useRef(player?.inventory);
+  latestInventory.current = player?.inventory;
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const inventory = latestInventory.current;
+      if (!inventory) return;
+      setInventorySamples((current) =>
+        withInventorySample(current, { at: performance.now(), inventory }),
+      );
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const inventoryRates = useMemo(
+    () => inventoryRatesPerMinute(inventorySamples),
+    [inventorySamples],
+  );
   const rebindCamera = (action: CameraAction) => (event: ReactKeyboardEvent<HTMLInputElement>) => {
     event.preventDefault();
     const updated = withCameraBinding(preferences, action, event.code);
@@ -413,7 +463,29 @@ export const App = () => {
     : undefined;
   const transfer = (building: Building, item: ItemKind, direction: 'toBuilding' | 'toPlayer') =>
     send({ type: 'transfer', buildingId: building.id, item, amount: 1, direction });
-  const frontier = plot ? { x: plot.x + 16, y: plot.y } : { x: 0, y: 0 };
+  /** The sector both frontier actions target, described the way the server judges it. */
+  const sectorKey = (tile: { x: number; y: number }) =>
+    `${Math.floor(tile.x / 8)}:${Math.floor(tile.y / 8)}`;
+  const selectedSector = selectedTile
+    ? {
+        explored: Boolean(
+          player?.exploredChunks[
+            `${Math.floor(selectedTile.x / 16)}:${Math.floor(selectedTile.y / 16)}`
+          ],
+        ),
+        claimedBy: state?.territory[sectorKey(selectedTile)]
+          ? state.territory[sectorKey(selectedTile)] === playerId
+            ? ('you' as const)
+            : ('other' as const)
+          : undefined,
+        adjacentToOwnClaim: (() => {
+          const [x, y] = sectorKey(selectedTile).split(':').map(Number);
+          return [`${x! + 1}:${y!}`, `${x! - 1}:${y!}`, `${x!}:${y! + 1}`, `${x!}:${y! - 1}`].some(
+            (neighbor) => player?.territoryCells[neighbor],
+          );
+        })(),
+      }
+    : undefined;
   const activeThreats = state
     ? Object.values(state.threats).filter((threat) => {
         const target = state.buildings[threat.targetBuildingId];
@@ -431,6 +503,14 @@ export const App = () => {
         : player?.research.unlocked.metallurgy
           ? 'Industry era'
           : 'Founding era';
+  const research = player
+    ? researchEntries({
+        unlocked: player.research.unlocked,
+        activeTechnology: player.research.activeTechnology,
+        ticksRemaining: player.research.ticksRemaining,
+        inventory: player.inventory,
+      })
+    : [];
   const transfers = state?.transfers ?? [];
   const personalSettlement = state?.settlements[`settlement-${playerId}`];
   const frontierBeacon = state?.cooperativeObjectives['frontier-beacon'];
@@ -452,72 +532,66 @@ export const App = () => {
   const actionTile = selectedTile ?? (plot ? { x: plot.x, y: plot.y } : { x: 0, y: 0 });
   const selectedResource = terrainAt(actionTile.x, actionTile.y);
   /**
-   * Mirrors the authoritative extractor rule for explored tiles so the build menu can
-   * explain an impossible site before the command is sent. The server stays the judge.
+   * The world facts a site is judged by, shared so the menu, the ghost on the map, and the
+   * click that places a building can never disagree about whether a tile will be accepted.
    */
-  const depositInRange = (
-    kind: keyof typeof extractorDefinitions,
-    candidate: { x: number; y: number } | undefined,
-  ) => {
-    if (!candidate) return false;
-    const extractor = extractorDefinitions[kind];
-    for (let offsetX = -extractor.range; offsetX <= extractor.range; offsetX += 1) {
-      const span = extractor.range - Math.abs(offsetX);
-      for (let offsetY = -span; offsetY <= span; offsetY += 1) {
-        const x = candidate.x + offsetX;
-        const y = candidate.y + offsetY;
-        if (terrainAt(x, y) !== extractor.terrain) continue;
-        const mined = state?.minedTiles[`${x}:${y}`] ?? 0;
-        if (mined < resourceDefinitions[extractor.terrain].yield) return true;
-      }
-    }
-    return false;
+  const placementRules: PlacementRules = {
+    unlocked: (technology) => Boolean(player?.research.unlocked[technology]),
+    inventory: player?.inventory ?? { ore: 0, wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 },
+    isOpenSite: (tile) => Boolean(buildablePlacement(tile)),
+    terrainAt: (tile) => terrainAt(tile.x, tile.y),
+    minedAmount: (tile) => state?.minedTiles[`${tile.x}:${tile.y}`] ?? 0,
   };
-  const buildMenu = (
-    [
-      ['placeSmelter', 'smelter'],
-      ['placeMine', 'mine'],
-      ['placeLumberCamp', 'lumber-camp'],
-      ['placeQuarry', 'quarry'],
-      ['placeForester', 'forester'],
-      ['placeStorage', 'storage'],
-      ['placeHousing', 'housing'],
-      ['placeHearth', 'hearth'],
-      ['placeWorkshop', 'workshop'],
-      ['placeBrickworks', 'brickworks'],
-      ['placeWatchtower', 'watchtower'],
-      ['placeWall', 'wall'],
-    ] as const
-  ).map(([commandType, kind]) => {
-    const definition = buildingDefinitions[kind];
-    const cost = Object.entries(definition.cost) as Array<[ItemKind, number]>;
-    const requiredTechnology = definition.requiredTechnology as TechnologyId | null;
-    const locked = Boolean(requiredTechnology && !player?.research.unlocked[requiredTechnology]);
-    const missing = cost.filter(([item, amount]) => (player?.inventory[item] ?? 0) < amount);
-    const extractor =
-      kind in extractorDefinitions ? (kind as keyof typeof extractorDefinitions) : undefined;
-    const missingDeposit = Boolean(extractor && placement && !depositInRange(extractor, placement));
-    const reason = !placement
-      ? 'Select a buildable tile inside your territory.'
-      : locked
-        ? `${technologies[requiredTechnology!].displayName} required.`
-        : missing.length > 0
-          ? `Needs ${missing
-              .map(([item, amount]) => `${amount - (player?.inventory[item] ?? 0)} more ${item}`)
-              .join(' and ')}.`
-          : missingDeposit
-            ? `No ${depositLabel(extractorDefinitions[extractor!].terrain)} within ${extractorDefinitions[extractor!].range} tiles.`
-            : extractor
-              ? `Extracts 1 ${extractorDefinitions[extractor].item} every ${extractorDefinitions[extractor].ticksPerUnit} ticks while staffed.`
-              : '';
-    return {
-      commandType,
-      kind,
-      label: `Place ${definition.displayName.toLowerCase()} (${amountLabel(definition.cost)})`,
-      disabled: !placement || locked || missing.length > 0 || missingDeposit,
-      reason,
-    };
-  });
+  const buildMenu = buildMenuEntries(placementRules);
+  const armedEntry = buildMenu.find((entry) => entry.kind === armedKind);
+  const armedStatus = armedKind
+    ? placementStatus(armedKind, previewCandidate, placementRules)
+    : undefined;
+  /**
+   * Arms a building for placement. Doing it from a hotkey also opens the Build tab, so the
+   * armed entry and its cost are visible wherever the player pressed the key.
+   */
+  const armBuilding = (kind: Building['kind'] | undefined) => {
+    if (!kind) {
+      setArmedKind(undefined);
+      return;
+    }
+    const entry = buildMenu.find((candidate) => candidate.kind === kind);
+    if (!entry) return;
+    if (entry.unavailable) {
+      notify(`${entry.name}: ${entry.unavailable}`, 'warning');
+      return;
+    }
+    setHudTab('build');
+    setArmedKind(kind);
+  };
+  /**
+   * A map click places the armed building where the site allows it, and otherwise only moves
+   * the selection and answers why. Shift keeps the building armed for the next site.
+   */
+  const selectTile = (tile: { x: number; y: number }, modifiers: { shift: boolean }) => {
+    setSelectedTile(tile);
+    if (!armedKind || !armedEntry) return;
+    const status = placementStatus(armedKind, tile, placementRules);
+    if (!status.valid) {
+      notify(`Cannot place ${armedEntry.name.toLowerCase()}: ${status.reason}`, 'warning');
+      return;
+    }
+    send({ type: armedEntry.commandType, ...tile }, `Placing ${armedEntry.name.toLowerCase()}.`);
+    if (!modifiers.shift) setArmedKind(undefined);
+  };
+  latestHotkeyHandler.current = (event) => {
+    if (event.key === 'Escape') {
+      setArmedKind(undefined);
+      return;
+    }
+    // A camera binding on a digit keeps panning; only unbound digits arm a building.
+    if (Object.values(preferences.camera).includes(event.code)) return;
+    const kind = kindForHotkey(event.key);
+    if (!kind) return;
+    event.preventDefault();
+    armBuilding(kind);
+  };
   const ownedBuildings = Object.values(state?.buildings ?? {}).filter(
     (building) => building.ownerId === playerId,
   );
@@ -733,10 +807,22 @@ export const App = () => {
         selectedTile={selectedTile}
         placementPreview={
           previewCandidate
-            ? { tile: previewCandidate, valid: Boolean(previewPlacement) }
+            ? {
+                tile: previewCandidate,
+                valid: armedKind ? Boolean(armedStatus?.valid) : Boolean(previewPlacement),
+                ...(armedKind && armedEntry && armedStatus
+                  ? {
+                      armed: {
+                        kind: armedKind,
+                        name: armedEntry.name,
+                        reason: armedStatus.reason,
+                      },
+                    }
+                  : {}),
+              }
             : undefined
         }
-        onSelectTile={setSelectedTile}
+        onSelectTile={selectTile}
         onSelectEntity={setSelectedEntity}
         onHoverTile={setHoveredTile}
         onMetrics={setCanvasMetrics}
@@ -749,11 +835,7 @@ export const App = () => {
         <header className="hud-header">
           <h1>Kings of Glory</h1>
           <p className="status">{status}</p>
-          {player && (
-            <p className="resource-bar">
-              {ITEM_KINDS.map((item) => `${itemLabel(item)} ${player.inventory[item]}`).join(' · ')}
-            </p>
-          )}
+          {player && <ResourceBar inventory={player.inventory} rates={inventoryRates} />}
           {player && nextOnboardingStep && (
             <p className="onboarding-next">Next: {nextOnboardingStep.text}</p>
           )}
@@ -836,6 +918,10 @@ export const App = () => {
           actionTile={actionTile}
           placement={placement}
           buildMenu={buildMenu}
+          armedKind={armedKind}
+          armedName={armedEntry?.name}
+          armedStatus={armedStatus}
+          onArm={armBuilding}
           manageableBuildings={manageableBuildings}
           roleForBuilding={roleForBuilding}
           logisticsLinks={logisticsLinks}
@@ -861,7 +947,8 @@ export const App = () => {
           hasCompletedHearth={hasCompletedHearth}
           exploredChunkCount={exploredChunkCount}
           visibleChunkCount={visibleChunkCount}
-          canAffordTechnology={canAffordTechnology}
+          researchEntries={research}
+          messageLog={messageLog}
           activeAlertEntries={activeAlertEntries}
           alertGroups={alertGroups}
           informationQuery={informationQuery}
@@ -875,7 +962,8 @@ export const App = () => {
           hidden={hudTab !== 'world'}
           player={player}
           activeThreats={activeThreats}
-          frontier={frontier}
+          selectedTile={selectedTile}
+          selectedSector={selectedSector}
           worldMap={worldMap}
           worldMapLoading={worldMapLoading}
           requestWorldMap={requestWorldMap}
@@ -935,19 +1023,22 @@ export const App = () => {
         />
       </aside>
       <div className="toast-region" role="status" aria-live="polite">
-        {notice.text && (
-          <div className="toast" key={notice.seq}>
-            <span className="toast-message">{notice.text}</span>
+        {notices.map((notice) => (
+          <div className={`toast ${notice.severity}`} key={notice.id}>
+            <span className="toast-message">
+              {notice.text}
+              {notice.count > 1 ? ` ×${notice.count}` : ''}
+            </span>
             <button
               type="button"
               className="toast-dismiss"
               aria-label="Dismiss notification"
-              onClick={dismissNotice}
+              onClick={() => dismissNotice(notice.id)}
             >
               ×
             </button>
           </div>
-        )}
+        ))}
       </div>
     </main>
   );

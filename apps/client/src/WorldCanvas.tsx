@@ -104,8 +104,18 @@ export const WorldCanvas = ({
   cameraBindings: CameraBindings;
   hoveredTile: { x: number; y: number } | undefined;
   selectedTile: { x: number; y: number } | undefined;
-  placementPreview: { tile: { x: number; y: number }; valid: boolean } | undefined;
-  onSelectTile?: (tile: { x: number; y: number }) => void;
+  /**
+   * The tile a placement would use. While a building is armed it also carries that
+   * building, so the map can show the actual structure and say why a site is refused.
+   */
+  placementPreview:
+    | {
+        tile: { x: number; y: number };
+        valid: boolean;
+        armed?: { kind: Building['kind']; name: string; reason: string };
+      }
+    | undefined;
+  onSelectTile?: (tile: { x: number; y: number }, modifiers: { shift: boolean }) => void;
   onSelectEntity?: (entity: PickedEntity | undefined) => void;
   onHoverTile?: (tile: { x: number; y: number } | undefined) => void;
   onMetrics?: (metrics: WorldCanvasMetrics) => void;
@@ -248,7 +258,7 @@ export const WorldCanvas = ({
       context.lineTo(to.x, to.y);
     };
 
-    const drawEntitySprite = (sprite: SpriteId, x: number, y: number) => {
+    const drawEntitySprite = (sprite: SpriteId, x: number, y: number, opacity = 1) => {
       const position = tilePoint(x, y);
       const assets = latestAssets.current;
       if (assets)
@@ -258,6 +268,7 @@ export const WorldCanvas = ({
           sprite,
           position.x + TILE_WIDTH / 2,
           position.y + TILE_HEIGHT / 2,
+          opacity,
         );
     };
     /** A soft contact shadow grounds a sprite on its tile instead of letting it float. */
@@ -550,12 +561,36 @@ export const WorldCanvas = ({
         if (carrier.cargo > 0) drawCargoTally(carrier.x, carrier.y, carrier.cargo);
       },
     }));
+    /**
+     * The armed building follows the pointer as a translucent ghost, and joins the sorted
+     * pass so a range or a neighbour standing in front of the site hides it exactly as the
+     * finished structure would. A refused site keeps the ghost fainter than a valid one.
+     */
+    const armed = preview?.armed;
+    const ghostDrawables =
+      armed && preview
+        ? [
+            {
+              depth: preview.tile.x + preview.tile.y,
+              y: preview.tile.y,
+              order: 2,
+              draw: () =>
+                drawEntitySprite(
+                  armed.kind,
+                  preview.tile.x,
+                  preview.tile.y,
+                  preview.valid ? 0.7 : 0.35,
+                ),
+            },
+          ]
+        : [];
     for (const drawable of [
       ...raised,
       ...resourceDrawables,
       ...buildingDrawables,
       ...threatDrawables,
       ...carrierDrawables,
+      ...ghostDrawables,
     ].sort(compareIsometricDrawables))
       drawable.draw();
     const operationsOverlay = latestOperationsOverlay.current;
@@ -678,6 +713,11 @@ export const WorldCanvas = ({
       };
       const territoryOwner =
         latestTerritory.current[`${Math.floor(hovered.x / 8)}:${Math.floor(hovered.y / 8)}`];
+      const previewForHover =
+        latestPlacementPreview.current?.tile.x === hovered.x &&
+        latestPlacementPreview.current.tile.y === hovered.y
+          ? latestPlacementPreview.current
+          : undefined;
       const lines = tileHoverLines({
         tile: hovered,
         terrain: latestTerrain.current[`${hovered.x}:${hovered.y}`],
@@ -686,10 +726,16 @@ export const WorldCanvas = ({
         resourceReachable: resourceIsReachable(hovered, latestPlayerPlot.current),
         territoryOwner,
         playerId: latestPlayerId.current,
-        placementValid:
-          latestPlacementPreview.current?.tile.x === hovered.x &&
-          latestPlacementPreview.current.tile.y === hovered.y &&
-          latestPlacementPreview.current.valid,
+        placementValid: Boolean(previewForHover?.valid),
+        ...(previewForHover?.armed
+          ? {
+              armedPlacement: {
+                name: previewForHover.armed.name,
+                valid: previewForHover.valid,
+                reason: previewForHover.armed.reason,
+              },
+            }
+          : {}),
         building: latestBuildings.current.find(
           (candidate) => candidate.x === hovered.x && candidate.y === hovered.y,
         ),
@@ -861,7 +907,8 @@ export const WorldCanvas = ({
       dragging = false;
       if (draggedDistance < 8) {
         const tile = tileAtPointer(event);
-        latestSelectTile.current?.(tile);
+        // Shift travels with the click so a placement can keep the building armed for the next one.
+        latestSelectTile.current?.(tile, { shift: event.shiftKey });
         latestSelectEntity.current?.(
           entityAtTile(tile, latestBuildings.current, latestThreats.current),
         );
@@ -892,7 +939,10 @@ export const WorldCanvas = ({
                 : undefined;
       if (direction) {
         event.preventDefault();
-        latestSelectTile.current?.({ x: selected.x + direction.x, y: selected.y + direction.y });
+        latestSelectTile.current?.(
+          { x: selected.x + direction.x, y: selected.y + direction.y },
+          { shift: event.shiftKey },
+        );
         return;
       }
       const pan = 48;

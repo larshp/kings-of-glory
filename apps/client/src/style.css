@@ -104,16 +104,48 @@ main {
   font-weight: 700;
 }
 .resource-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(5.5rem, 1fr));
+  gap: 0.2rem 0.35rem;
   margin: 0.35rem 0;
   padding: 0.35rem 0.5rem;
   background: rgb(25 52 70 / 75%);
   border: 1px solid #698b75;
   border-radius: 0.25rem;
-  font-size: 0.9rem;
+  list-style: none;
+  font-size: 0.85rem;
+}
+.resource-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.item-icon {
+  flex: 0 0 auto;
+  width: 1.1em;
+  height: 1.1em;
+}
+.resource-name {
+  color: #c8d8e7;
+  /* The icon carries the identity; the name shrinks first when space runs out. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.resource-amount {
+  margin-left: auto;
   font-weight: 700;
+}
+.resource-rate {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+.resource-rate.rising {
+  color: #9fe2b1;
+}
+.resource-rate.falling {
+  color: #ffb4a7;
 }
 .build-menu {
   margin: 0.25rem 0;
@@ -125,6 +157,65 @@ main {
 }
 .build-menu button {
   margin: 0;
+}
+/*
+ * Hotkey, name, then cost, each in its own column so the menu can be scanned down either
+ * edge. The hotkey column keeps its width when an entry has no hotkey, which keeps the
+ * names of the two unbound entries in line with the rest.
+ */
+.build-option {
+  display: grid;
+  grid-template-columns: 1.4rem 1fr auto;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.5rem;
+  text-align: left;
+}
+.build-option-name {
+  grid-column: 2;
+}
+.build-cost {
+  grid-column: 3;
+}
+.build-option.armed {
+  outline: 2px solid #f5d56a;
+  outline-offset: 1px;
+}
+.hotkey {
+  padding: 0 0.25rem;
+  border: 1px solid rgb(255 255 255 / 45%);
+  border-radius: 0.2rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-align: center;
+}
+.build-cost {
+  font-size: 0.75rem;
+  opacity: 0.85;
+}
+.placement-banner {
+  margin: 0.25rem 0;
+  padding: 0.4rem 0.5rem;
+  border-left: 3px solid #f5d56a;
+  background: rgb(245 213 106 / 14%);
+  color: #fff1c2;
+  font-size: 0.85rem;
+}
+.placement-banner p {
+  margin: 0.15rem 0;
+}
+.placement-hint {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #c8d8e7;
+  font-size: 0.78rem;
+}
+.placement-hint button {
+  margin: 0;
+  padding: 0.15rem 0.4rem;
+  font-size: 0.72rem;
 }
 .build-reason {
   display: block;
@@ -138,10 +229,14 @@ h1 {
 h2 {
   font-size: 1rem;
 }
+/*
+ * Buttons size to their label. The panel is one narrow column, and a stack of identical
+ * full-width bars gave every action the same weight and made short ones look like commands
+ * of consequence. Actions that lead a section opt into a full row with `.block-button`.
+ */
 button {
-  width: 100%;
-  margin: 0.25rem 0;
-  padding: 0.5rem;
+  margin: 0.25rem 0.25rem 0.25rem 0;
+  padding: 0.4rem 0.7rem;
   background: #a57437;
   color: #fff;
   border: 0;
@@ -149,9 +244,25 @@ button {
   cursor: pointer;
   font: inherit;
 }
+.block-button {
+  display: block;
+  width: 100%;
+  margin-right: 0;
+  padding: 0.5rem;
+}
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 button:focus-visible,
 input:focus-visible,
@@ -188,19 +299,98 @@ select {
   font: inherit;
 }
 .building {
-  display: grid;
-  gap: 0.2rem;
-  padding: 0.5rem 0;
   border-top: 1px solid #526576;
 }
 .building.selected {
-  padding: 0.5rem;
   border: 1px solid #f5d56a;
   border-radius: 0.25rem;
   background: rgb(37 62 84 / 60%);
 }
 .building span {
   font-size: 0.85rem;
+}
+.building-count {
+  margin: 0.25rem 0;
+  color: #c8d8e7;
+  font-size: 0.8rem;
+}
+/*
+ * One row per building: name, site, status, and a progress bar. The row is the whole
+ * control, so the list can be scanned in a glance and only the building being worked on
+ * spends vertical space on its details.
+ */
+.building-summary {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.1rem 0.5rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.4rem 0.35rem;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.building-summary:hover {
+  background: rgb(255 255 255 / 6%);
+}
+.building-name {
+  font-weight: 700;
+}
+.building-site {
+  color: #c8d8e7;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+.building-state {
+  grid-column: 1;
+  font-size: 0.78rem;
+}
+.building-state.working {
+  color: #9fe2b1;
+}
+.building-state.idle,
+.building-state.paused {
+  color: #c8d8e7;
+}
+.building-state.constructing {
+  color: #a9d3f5;
+}
+.building-state.blocked {
+  color: #ffd166;
+}
+.building-state.damaged {
+  color: #ff9d8a;
+}
+.building-progress {
+  grid-column: 2;
+  align-self: center;
+  width: 3.5rem;
+  height: 0.35rem;
+  overflow: hidden;
+  border-radius: 0.2rem;
+  background: rgb(255 255 255 / 18%);
+}
+.building-progress-fill {
+  display: block;
+  height: 100%;
+  background: #9fe2b1;
+}
+.building-detail {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0 0.35rem 0.5rem;
+}
+.building-actions,
+.item-transfer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.building-actions button,
+.item-transfer button {
+  margin: 0;
+  padding: 0.25rem 0.45rem;
+  font-size: 0.78rem;
 }
 .status {
   color: #9fe2b1;
@@ -252,9 +442,18 @@ select {
 .operations-overlay p {
   margin: 0.3rem 0 0;
 }
+/* Collapsed by default so the legend never stands between the player and the build menu. */
 .map-help {
+  margin: 0.25rem 0;
   color: #c8d8e7;
   font-size: 0.8rem;
+}
+.map-help summary {
+  cursor: pointer;
+  color: #f4f0df;
+}
+.map-help p {
+  margin: 0.35rem 0 0;
 }
 .threat-active {
   color: #ff9d8a;
@@ -369,6 +568,91 @@ select {
     grid-template-columns: 1fr;
   }
 }
+.message-log {
+  margin: 0.35rem 0;
+  color: #c8d8e7;
+  font-size: 0.8rem;
+}
+.message-log summary {
+  cursor: pointer;
+  color: #f4f0df;
+}
+.message-log ul {
+  margin: 0.25rem 0;
+  padding-left: 1.25rem;
+}
+.message-log .critical {
+  color: #ff9d8a;
+}
+.message-log .warning {
+  color: #ffd166;
+}
+/*
+ * The tree is generated from content, and indentation is its only structure: a technology
+ * sits one step in from the technology it needs, so the chain is visible without a diagram.
+ */
+.research-tree ul {
+  margin: 0.25rem 0;
+  padding: 0;
+  list-style: none;
+}
+.research-entry {
+  display: grid;
+  gap: 0.1rem;
+  margin-bottom: 0.4rem;
+  padding: 0.4rem;
+  border: 1px solid #526576;
+  border-left-width: 0.25rem;
+  border-radius: 0.25rem;
+  background: rgb(23 36 58 / 72%);
+  font-size: 0.85rem;
+}
+.research-entry.unlocked {
+  border-left-color: #9fe2b1;
+}
+.research-entry.researching {
+  border-left-color: #f5d56a;
+}
+.research-entry.available {
+  border-left-color: #a9d3f5;
+}
+.research-entry.blocked {
+  border-left-color: #8da2b5;
+  opacity: 0.85;
+}
+.research-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+.research-state {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.research-state.unlocked {
+  color: #9fe2b1;
+}
+.research-state.researching {
+  color: #f5d56a;
+}
+.research-state.available {
+  color: #a9d3f5;
+}
+.research-state.blocked {
+  color: #c8d8e7;
+}
+.research-detail {
+  color: #c8d8e7;
+  font-size: 0.78rem;
+}
+.research-permanent {
+  color: #fff1c2;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
 .progression-milestones {
   padding-left: 1.4rem;
   font-size: 0.85rem;
@@ -436,8 +720,8 @@ select {
   margin-left: 0.35rem;
 }
 .chat-controls button {
-  width: auto;
-  padding: 0.2rem;
+  margin: 0;
+  padding: 0.2rem 0.35rem;
   font-size: 0.72rem;
 }
 .account-deletion {
@@ -464,7 +748,10 @@ select {
   inset-inline: 0;
   bottom: 1.5rem;
   display: flex;
-  justify-content: center;
+  /* Newest at the bottom, nearest the player's attention, oldest riding above it. */
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
   padding-inline: 1rem;
   pointer-events: none;
   z-index: 50;
@@ -483,6 +770,13 @@ select {
   font-size: 0.9rem;
   pointer-events: auto;
   animation: toast-in 160ms ease-out;
+}
+.toast.warning {
+  border-left-color: #ffd166;
+}
+.toast.critical {
+  border-left-color: #ff7f6e;
+  color: #ffd9d2;
 }
 .toast-message {
   flex: 1;
@@ -613,9 +907,8 @@ select {
   margin-top: 0.25rem;
 }
 .role-controls button {
-  width: auto;
   margin: 0;
-  padding: 0.25rem;
+  padding: 0.25rem 0.4rem;
   font-size: 0.75rem;
 }
 .automation-panel > p,
@@ -630,8 +923,7 @@ select {
   gap: 0.4rem;
 }
 .logistics-link button {
-  width: auto;
   margin: 0;
-  padding: 0.25rem;
+  padding: 0.25rem 0.4rem;
   font-size: 0.75rem;
 }

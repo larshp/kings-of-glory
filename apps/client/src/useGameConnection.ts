@@ -1,6 +1,7 @@
 import { useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
 import { PROTOCOL_VERSION, type ClientWorldState, type ServerMessage } from '@kings/protocol';
 import { rejectionMessage, serverUrl, setConnectionIndicator } from './connection-status.js';
+import type { NotificationSeverity } from './notifications.js';
 import { synchronizeWorld } from './world-sync.js';
 import type { DirectoryView } from './hud/CoopPanel.js';
 import type { WorldMapView } from './hud/types.js';
@@ -23,7 +24,7 @@ export interface GameConnectionOptions {
   readonly setWorldMapLoading: Dispatch<SetStateAction<boolean>>;
   readonly setDirectory: Dispatch<SetStateAction<DirectoryView | undefined>>;
   readonly setUpdateApplicationMs: Dispatch<SetStateAction<number>>;
-  readonly notify: (text: string) => void;
+  readonly notify: (text: string, severity?: NotificationSeverity) => void;
 }
 
 /**
@@ -80,7 +81,7 @@ export const useGameConnection = ({
       };
       connection.onerror = () => {
         setConnectionIndicator('Network error. Retrying the game server connection…');
-        notify('The connection encountered a network error. Retrying…');
+        notify('The connection encountered a network error. Retrying…', 'warning');
       };
       connection.onclose = (event) => {
         if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
@@ -90,7 +91,10 @@ export const useGameConnection = ({
           reconnectAllowed = false;
           setStatus('Maintenance');
           setConnectionIndicator('The game server is under maintenance. Please try again shortly.');
-          notify('The server is saving the world for maintenance. Your actions are paused.');
+          notify(
+            'The server is saving the world for maintenance. Your actions are paused.',
+            'critical',
+          );
           return;
         }
         if (event.code === 1002 && event.reason === 'Client upgrade required') {
@@ -99,7 +103,10 @@ export const useGameConnection = ({
           setConnectionIndicator(
             'This game client is incompatible with the server. Refresh to update.',
           );
-          notify('A newer game client is required. Refresh this page after it is deployed.');
+          notify(
+            'A newer game client is required. Refresh this page after it is deployed.',
+            'critical',
+          );
           return;
         }
         setConnectionIndicator(
@@ -107,6 +114,7 @@ export const useGameConnection = ({
         );
         notify(
           `Connection closed (${event.code}${event.reason ? `: ${event.reason}` : ''}). Retrying…`,
+          'warning',
         );
         attempts += 1;
         retryTimer = window.setTimeout(connect, Math.min(5_000, 250 * 2 ** Math.min(attempts, 5)));
@@ -118,7 +126,7 @@ export const useGameConnection = ({
           message = JSON.parse(data) as ServerMessage;
         } catch {
           setConnectionIndicator('The server sent an unreadable update. Reconnecting…');
-          notify('The server sent an unreadable update. Reconnecting…');
+          notify('The server sent an unreadable update. Reconnecting…', 'warning');
           connection.close(1002, 'Malformed server message');
           return;
         }
@@ -194,23 +202,26 @@ export const useGameConnection = ({
         }
         if (message.type === 'commandRejected') {
           pendingCommands.current.delete(message.result.commandId);
-          notify(rejectionMessage(message.result.code));
+          notify(rejectionMessage(message.result.code), 'warning');
         }
         if (message.type === 'maintenance') {
           reconnectAllowed = false;
           setStatus('Maintenance');
           setConnectionIndicator(message.message);
-          notify(message.message);
+          notify(message.message, 'critical');
         }
         if (message.type === 'error') {
-          notify(message.message ?? 'Connection error');
+          notify(message.message ?? 'Connection error', 'warning');
           if (message.code === 'version-mismatch') {
             reconnectAllowed = false;
             setStatus('Upgrade required');
             setConnectionIndicator(
               'This game client is incompatible with the server. Refresh to update.',
             );
-            notify('A newer game client is required. Refresh this page after it is deployed.');
+            notify(
+              'A newer game client is required. Refresh this page after it is deployed.',
+              'critical',
+            );
             connection.close(1002, 'Client upgrade required');
           }
         }

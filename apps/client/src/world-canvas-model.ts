@@ -85,6 +85,7 @@ export const tileHoverLines = ({
   territoryOwner,
   playerId,
   placementValid,
+  armedPlacement,
   building,
   threat,
   carrier,
@@ -97,6 +98,9 @@ export const tileHoverLines = ({
   readonly territoryOwner: string | undefined;
   readonly playerId: string;
   readonly placementValid: boolean;
+  /** Set while a building is armed, so the last line answers for that building. */
+  readonly armedPlacement?:
+    { readonly name: string; readonly valid: boolean; readonly reason: string } | undefined;
   readonly building: Building | undefined;
   readonly threat: Threat | undefined;
   readonly carrier?: Carrier | undefined;
@@ -133,7 +137,17 @@ export const tileHoverLines = ({
     lines.push(
       `Carrier · ${carrier.cargo} ${carrier.item} ${carrier.phase === 'outbound' ? 'outbound' : 'returning empty'}`,
     );
-  lines.push(placementValid ? 'Buildable' : 'Not buildable');
+  // While a building is armed the generic verdict is replaced by one about that building,
+  // because "buildable" and "a mine can work here" are different questions.
+  lines.push(
+    armedPlacement
+      ? armedPlacement.valid
+        ? `Place ${armedPlacement.name.toLowerCase()} here`
+        : `Cannot place ${armedPlacement.name.toLowerCase()}: ${armedPlacement.reason}`
+      : placementValid
+        ? 'Buildable'
+        : 'Not buildable',
+  );
   return lines;
 };
 

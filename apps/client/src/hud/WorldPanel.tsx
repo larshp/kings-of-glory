@@ -1,21 +1,34 @@
-import type { PlayerView, SendCommand, TabPanelProps, WorldMapView } from './types.js';
+import type { PlayerView, SendCommand, TabPanelProps, Tile, WorldMapView } from './types.js';
 
 export interface WorldPanelProps extends TabPanelProps {
   readonly player: PlayerView | undefined;
   readonly activeThreats: readonly { readonly id: string }[];
-  readonly frontier: { readonly x: number; readonly y: number };
+  /** The tile both frontier actions target: whatever the player selected on the map. */
+  readonly selectedTile: Tile | undefined;
+  readonly selectedSector:
+    | {
+        readonly explored: boolean;
+        readonly claimedBy: 'you' | 'other' | undefined;
+        readonly adjacentToOwnClaim: boolean;
+      }
+    | undefined;
   readonly worldMap: WorldMapView | undefined;
   readonly worldMapLoading: boolean;
   readonly requestWorldMap: (after?: string) => void;
   readonly send: SendCommand;
 }
 
-/** Defense summary and the aggregated strategic map of explored chunks. */
+/**
+ * Defense summary, frontier actions on the selected sector, and the strategic map. The
+ * frontier actions deliberately have no invisible default target: a button that explores or
+ * claims somewhere the player cannot see gives them no way to judge the outcome.
+ */
 export const WorldPanel = ({
   hidden,
   player,
   activeThreats,
-  frontier,
+  selectedTile,
+  selectedSector,
   worldMap,
   worldMapLoading,
   requestWorldMap,
@@ -37,13 +50,59 @@ export const WorldPanel = ({
             ? `${activeThreats.length} raider threat${activeThreats.length === 1 ? '' : 's'} active`
             : 'No active raider threats'}
         </p>
-        <button onClick={() => send({ type: 'explore', ...frontier })}>Explore frontier</button>
-        <button
-          disabled={!player.research.unlocked['territorial-charter']}
-          onClick={() => send({ type: 'claimTerritory', ...frontier })}
-        >
-          Claim frontier sector
-        </button>
+        <section aria-labelledby="frontier-title">
+          <h2 id="frontier-title">Frontier</h2>
+          {selectedTile && selectedSector ? (
+            <p>
+              Selected sector {Math.floor(selectedTile.x / 8)}:{Math.floor(selectedTile.y / 8)} at{' '}
+              {selectedTile.x}, {selectedTile.y} —{' '}
+              {selectedSector.explored ? 'explored' : 'unexplored'},{' '}
+              {selectedSector.claimedBy === 'you'
+                ? 'already yours'
+                : selectedSector.claimedBy === 'other'
+                  ? 'claimed by another settlement'
+                  : 'unclaimed'}
+              .
+            </p>
+          ) : (
+            <p>Select a tile on the map to choose where to explore or claim.</p>
+          )}
+          <button
+            className="block-button"
+            disabled={!selectedTile}
+            onClick={() => selectedTile && send({ type: 'explore', ...selectedTile })}
+          >
+            Explore selected sector
+          </button>
+          <button
+            className="block-button"
+            disabled={
+              !selectedTile ||
+              !player.research.unlocked['territorial-charter'] ||
+              !selectedSector?.explored ||
+              Boolean(selectedSector?.claimedBy) ||
+              !selectedSector?.adjacentToOwnClaim
+            }
+            onClick={() => selectedTile && send({ type: 'claimTerritory', ...selectedTile })}
+          >
+            Claim selected sector
+          </button>
+          {selectedTile && selectedSector && (
+            <span className="build-reason">
+              {!player.research.unlocked['territorial-charter']
+                ? 'Territorial Charter research unlocks claiming.'
+                : !selectedSector.explored
+                  ? 'Explore this sector before claiming it.'
+                  : selectedSector.claimedBy
+                    ? selectedSector.claimedBy === 'you'
+                      ? 'You already hold this sector.'
+                      : 'This sector belongs to another settlement.'
+                    : !selectedSector.adjacentToOwnClaim
+                      ? 'Claims must touch a sector you already hold.'
+                      : 'Ready to claim.'}
+            </span>
+          )}
+        </section>
         <section aria-labelledby="discoveries-title">
           <h2 id="discoveries-title">Landmark discoveries</h2>
           {Object.values(player.discoveries).length === 0 ? (
@@ -69,7 +128,11 @@ export const WorldPanel = ({
             Aggregated explored chunks only. Entities hidden by fog are never included in these
             summaries.
           </p>
-          <button disabled={worldMapLoading} onClick={() => requestWorldMap()}>
+          <button
+            className="block-button"
+            disabled={worldMapLoading}
+            onClick={() => requestWorldMap()}
+          >
             {worldMapLoading && !worldMap ? 'Loading map…' : 'Refresh strategic map'}
           </button>
           {worldMap && (
@@ -105,6 +168,7 @@ export const WorldPanel = ({
               </ul>
               {worldMap.nextCursor && (
                 <button
+                  className="block-button"
                   disabled={worldMapLoading}
                   onClick={() => requestWorldMap(worldMap.nextCursor)}
                 >

@@ -83,6 +83,35 @@ describe('visibleByIsometricDepth', () => {
     ]);
   });
 
+  it('answers for the armed building instead of general buildability', () => {
+    const tile = {
+      tile: { x: 4, y: 7 },
+      terrain: 'grass' as const,
+      elevation: 0,
+      minedAmount: 0,
+      resourceReachable: false,
+      territoryOwner: 'player',
+      playerId: 'player',
+      building: undefined,
+      threat: undefined,
+    };
+    expect(
+      tileHoverLines({
+        ...tile,
+        placementValid: true,
+        armedPlacement: { name: 'Mine', valid: false, reason: 'No ore deposit within 4 tiles.' },
+      }),
+    ).toContain('Cannot place mine: No ore deposit within 4 tiles.');
+    expect(
+      tileHoverLines({
+        ...tile,
+        placementValid: true,
+        armedPlacement: { name: 'Storage', valid: true, reason: '' },
+      }),
+    ).toContain('Place storage here');
+    expect(tileHoverLines({ ...tile, placementValid: true })).toContain('Buildable');
+  });
+
   it('shows authoritative remaining yield for finite resource tiles', () => {
     expect(
       tileHoverLines({

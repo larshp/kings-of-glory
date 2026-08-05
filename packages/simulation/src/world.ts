@@ -23,7 +23,6 @@ import {
   recipes,
   socialRules,
   technologies,
-  terrainRules,
   threats as threatDefinitions,
   worldRetention,
   type TechnologyId,
@@ -31,6 +30,14 @@ import {
 } from '@kings/content';
 import { chunkFor, findHierarchicalPath, findPath, manhattanDistance } from '@kings/pathfinding';
 import { stableHash } from './hash.js';
+import { isOpenTile, terrainAt } from './terrain.js';
+export {
+  elevationAt,
+  isOpenTile,
+  nearestOreTile,
+  nearestResourceTile,
+  terrainAt,
+} from './terrain.js';
 import { createRandomState, takeRandomIndex, type RandomState } from './random.js';
 import { chunkKeyFor } from './spatial.js';
 
@@ -334,7 +341,6 @@ export const MAX_ACTIVE_CONSTRUCTIONS_PER_PLAYER = 64;
 export const MAX_PLOT_CANDIDATE_ATTEMPTS = 100_000;
 export const GATHER_RANGE = 8;
 const TERRITORY_CELL_SIZE = 8;
-const RESOURCE_SECTOR_SIZE = 8;
 /** Bounds all threat route work together, rather than once per threat. */
 export const THREAT_PATH_VISITS_PER_TICK = 128;
 const THREAT_PATH_VISITS_PER_SEARCH = 128;
@@ -348,156 +354,6 @@ export const initialSocialState = (): SocialState => ({
   reports: [],
 });
 export const tileKey = (x: number, y: number) => `${x}:${y}`;
-const coordinateNoise = (seed: number, x: number, y: number) =>
-  Math.abs(Math.imul(seed ^ x, 73856093) ^ Math.imul(y, 19349663));
-const terrainNoise = (seed: number, x: number, y: number) => coordinateNoise(seed, x, y) % 23;
-const resourceNodeAt = (seed: number, x: number, y: number): 'ore' | 'wood' | undefined => {
-  const sectorX = Math.floor(x / RESOURCE_SECTOR_SIZE);
-  const sectorY = Math.floor(y / RESOURCE_SECTOR_SIZE);
-  const oreX = coordinateNoise(seed ^ 0x4f1bbcdd, sectorX, sectorY) % RESOURCE_SECTOR_SIZE;
-  const oreY = coordinateNoise(seed ^ 0x19a4e6d3, sectorX, sectorY) % RESOURCE_SECTOR_SIZE;
-  let woodX = coordinateNoise(seed ^ 0x74e1a2b9, sectorX, sectorY) % RESOURCE_SECTOR_SIZE;
-  const woodY = coordinateNoise(seed ^ 0x2b6d9c41, sectorX, sectorY) % RESOURCE_SECTOR_SIZE;
-  if (woodX === oreX && woodY === oreY) woodX = (woodX + 1) % RESOURCE_SECTOR_SIZE;
-  const localX = x - sectorX * RESOURCE_SECTOR_SIZE;
-  const localY = y - sectorY * RESOURCE_SECTOR_SIZE;
-  if (localX === oreX && localY === oreY) return 'ore';
-  if (localX === woodX && localY === woodY) return 'wood';
-  return undefined;
-};
-/**
- * One lattice corner's unit gradient, dotted with the offset from that corner to the
- * sample point. Perlin noise normally indexes a shuffled permutation table; hashing the
- * coordinates instead keeps the field stateless, so any tile can be sampled directly
- * without generating the world in order.
- *
- * The dot product is folded in here rather than returning a vector: terrain is sampled
- * per tile on the pathfinding and state-sync paths, and a returned pair would allocate
- * four short-lived objects per noise sample.
- */
-const gradientDot = (
-  seed: number,
-  cellX: number,
-  cellY: number,
-  deltaX: number,
-  deltaY: number,
-) => {
-  let hash = Math.imul(cellX, 0x27d4eb2d) ^ Math.imul(cellY, 0x165667b1) ^ seed;
-  hash = Math.imul(hash ^ (hash >>> 15), 0x2c1b3c6d);
-  hash = Math.imul(hash ^ (hash >>> 12), 0x297a2d39);
-  hash ^= hash >>> 15;
-  // >>> 0 reads the hash as unsigned so the angle covers the whole circle.
-  const angle = (hash >>> 0) * ((Math.PI * 2) / 4294967296);
-  return Math.cos(angle) * deltaX + Math.sin(angle) * deltaY;
-};
-
-/** Perlin's quintic ease curve. Its zero first and second derivatives hide cell seams. */
-const fade = (t: number) => t * t * t * (t * (t * 6 - 15) + 10);
-
-/**
- * 2D Perlin gradient noise, in roughly -1 to 1. Only multiplication, addition, and the
- * integer hash above are involved, so every platform running the simulation agrees on the
- * result bit for bit and a seed always rebuilds the same terrain.
- */
-const perlin = (seed: number, x: number, y: number) => {
-  const cellX = Math.floor(x);
-  const cellY = Math.floor(y);
-  const corner = (offsetX: number, offsetY: number) =>
-    gradientDot(seed, cellX + offsetX, cellY + offsetY, x - cellX - offsetX, y - cellY - offsetY);
-  const easeX = fade(x - cellX);
-  const easeY = fade(y - cellY);
-  const north = corner(0, 0) + easeX * (corner(1, 0) - corner(0, 0));
-  const south = corner(0, 1) + easeX * (corner(1, 1) - corner(0, 1));
-  // 2D Perlin peaks near ±1/sqrt(2); scaling up spends the full -1 to 1 range.
-  return (north + easeY * (south - north)) * Math.SQRT2;
-};
-
-/**
- * Normalised mountain strength at a tile, from 0 on open ground to 1 on a summit.
- *
- * Plain Perlin noise makes rolling hills, not mountains. Folding it at zero with
- * `1 - |noise|` turns the crossings into sharp crest lines, and squaring the result thins
- * those crests further, so octaves sum into connected ranges with genuinely tall cores.
- */
-const ridgeStrength = (seed: number, x: number, y: number) => {
-  const { ridgeScale, octaves } = terrainRules.mountain;
-  let frequency = 1 / ridgeScale;
-  let amplitude = 1;
-  let total = 0;
-  let maximum = 0;
-  for (let octave = 0; octave < octaves; octave += 1) {
-    const ridge =
-      1 - Math.abs(perlin(seed ^ Math.imul(octave + 1, 0x9e3779b9), x * frequency, y * frequency));
-    total += ridge * ridge * amplitude;
-    maximum += amplitude;
-    // Each octave halves the wavelength and its contribution, the usual fBm progression.
-    frequency *= 2;
-    amplitude *= 0.5;
-  }
-  return total / maximum;
-};
-
-/**
- * Tile elevation in levels. Only mountains rise above level zero, which keeps every
- * gameplay rule on flat ground while the map still has real height.
- *
- * Strength above the threshold is mapped onto whole levels, so a range climbs through
- * foothills to a summit instead of every mountain tile standing the same height.
- */
-export const elevationAt = (seed: number, x: number, y: number): number => {
-  if (resourceNodeAt(seed, x, y) || terrainNoise(seed, x, y) === 0) return 0;
-  const { threshold, maxLevel } = terrainRules.mountain;
-  const strength = ridgeStrength(seed, x, y);
-  if (strength < threshold) return 0;
-  const climb = (strength - threshold) / (1 - threshold);
-  // ceil keeps the faintest qualifying tile at level 1; clamping guards the summit itself,
-  // where climb reaches exactly 1.
-  return Math.max(1, Math.min(maxLevel, Math.ceil(climb * maxLevel)));
-};
-
-export const terrainAt = (
-  seed: number,
-  x: number,
-  y: number,
-): 'grass' | 'water' | 'ore' | 'wood' | 'mountain' => {
-  const resource = resourceNodeAt(seed, x, y);
-  if (resource) return resource;
-  const value = terrainNoise(seed, x, y);
-  if (value === 0) return 'water';
-  return elevationAt(seed, x, y) > 0 ? 'mountain' : 'grass';
-};
-
-/**
- * Water and mountains block construction and movement alike. Every rule that used to
- * test for water goes through this predicate so the two stay in step.
- */
-export const isOpenTile = (seed: number, x: number, y: number) => {
-  const terrain = terrainAt(seed, x, y);
-  return terrain !== 'water' && terrain !== 'mountain';
-};
-/** Finds a deterministic reachable ore deposit around a point, if one exists within the range. */
-export const nearestOreTile = (seed: number, x: number, y: number, range: number) => {
-  return nearestResourceTile(seed, x, y, range, 'ore');
-};
-export const nearestResourceTile = (
-  seed: number,
-  x: number,
-  y: number,
-  range: number,
-  resource: 'ore' | 'wood',
-) => {
-  for (let distance = 0; distance <= range; distance += 1)
-    for (let offsetX = -distance; offsetX <= distance; offsetX += 1) {
-      const offsetY = distance - Math.abs(offsetX);
-      const candidates = offsetY === 0 ? [y] : [y - offsetY, y + offsetY];
-      for (const candidateY of candidates) {
-        const candidateX = x + offsetX;
-        if (terrainAt(seed, candidateX, candidateY) === resource)
-          return { x: candidateX, y: candidateY };
-      }
-    }
-  return undefined;
-};
 const inventoryTotal = (inventory: Inventory) =>
   inventory.ore + inventory.wood + inventory.ingot + inventory.tool;
 const inventoryItems: readonly ItemId[] = ['ore', 'wood', 'ingot', 'tool'];

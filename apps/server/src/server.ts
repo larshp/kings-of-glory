@@ -13,6 +13,7 @@ import {
 } from '@kings/server-runtime';
 import { WebSocketServer } from 'ws';
 import { issueSession, sessionCookie, sessionTokenFromCookie, verifySession } from './auth.js';
+import { createStructuredLogger } from './logger.js';
 
 const HEARTBEAT_TIMEOUT_MS = 45_000;
 export const MAX_PENDING_COMMANDS = 256;
@@ -59,8 +60,7 @@ export const createGameServer = async (
       ? verifySession(token, environment.previousSessionSecret)
       : undefined);
   const accountMessageWindows = new Map<string, { startedAt: number; count: number }>();
-  const log = (event: string, fields: Record<string, unknown> = {}) =>
-    console.log(JSON.stringify({ level: environment.logLevel, event, ...fields }));
+  const log = createStructuredLogger(environment.logLevel);
   const httpServer: Server = createServer((request, response) => {
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('X-Frame-Options', 'DENY');
@@ -291,7 +291,7 @@ export const createGameServer = async (
           .then(() => {
             connected = true;
             connectedPlayerId = playerId;
-            log('player.connected', { connectionId, playerId });
+            log.info('player.connected', { connectionId, playerId });
           })
           .catch((error: unknown) => {
             socket.send(
@@ -338,7 +338,7 @@ export const createGameServer = async (
         pendingCommands.add(pending);
         void pending
           .catch((error: unknown) => {
-            log('world.command_failed', {
+            log.error('world.command_failed', {
               connectionId,
               playerId: connectedPlayerId,
               commandId: message.command.id,
@@ -360,7 +360,7 @@ export const createGameServer = async (
     socket.on('close', (code, reason) => {
       clearInterval(heartbeatTimer);
       host.disconnect(connection);
-      log('player.disconnected', {
+      log.info('player.disconnected', {
         connectionId,
         playerId: connectedPlayerId,
         code,
@@ -379,7 +379,9 @@ export const createGameServer = async (
       })
       .catch((error: unknown) => {
         tickFailures += 1;
-        log('world.tick_failed', { error: error instanceof Error ? error.message : String(error) });
+        log.error('world.tick_failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
       })
       .finally(() => {
         pendingTick = undefined;
@@ -399,7 +401,7 @@ export const createGameServer = async (
             reject(new Error('Server did not bind a TCP port.'));
             return;
           }
-          log('server.started', { port: address.port, worldSeed: environment.worldSeed });
+          log.info('server.started', { port: address.port, worldSeed: environment.worldSeed });
           resolve(address.port);
         });
       });
@@ -408,7 +410,7 @@ export const createGameServer = async (
       if (stopping) return;
       stopping = true;
       clearInterval(tickTimer);
-      log('server.stopping');
+      log.info('server.stopping');
       for (const socket of sockets.clients) {
         socket.send(
           JSON.stringify({ type: 'maintenance', message: 'Server maintenance in progress.' }),

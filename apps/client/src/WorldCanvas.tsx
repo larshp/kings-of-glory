@@ -1,23 +1,39 @@
 import { useEffect, useRef } from 'react';
-import {
-  recipes,
-  resources as resourceDefinitions,
-  terrainRules,
-  threats as threatDefinitions,
-} from '@kings/content';
+import { threats as threatDefinitions } from '@kings/content';
 import type { TerrainTile } from '@kings/protocol';
-import { GATHER_RANGE, type Building, type LogisticsLink, type Threat } from '@kings/simulation';
+import type { Building, LogisticsLink, Threat } from '@kings/simulation';
 import type { CameraBindings } from './preferences.js';
 import { drawSprite, type RenderAssets, type SpriteId } from './render-assets.js';
 import {
   ELEVATION_STEP,
   screenToRaisedTile,
   screenToTile,
-  screenToWorld,
   TILE_HEIGHT,
   TILE_WIDTH,
   worldToScreen,
 } from './projection.js';
+import {
+  borderSides,
+  cameraOrigin,
+  entityAtTile,
+  logisticsStatusColor,
+  MAX_ELEVATION,
+  productionRateLabel,
+  resourceDecorationSprite,
+  resourceIsReachable,
+  summitColors,
+  tileHoverLines,
+  tileLayers,
+  visibleByIsometricDepth,
+  visibleChunkCoordinates,
+  visibleRenderChunks,
+  visibleTileBounds,
+  type OperationsOverlay,
+  type PickedEntity,
+  type Viewport,
+} from './world-canvas-model.js';
+
+export * from './world-canvas-model.js';
 
 export interface WorldCanvasMetrics {
   readonly framesPerSecond: number;
@@ -35,347 +51,6 @@ export interface WorldCanvasDebugState {
   readonly showEntityIds: boolean;
   readonly showPaths: boolean;
 }
-
-export type OperationsOverlay = 'none' | 'resources' | 'logistics' | 'production' | 'bottlenecks';
-
-export const logisticsStatusColor = (status: LogisticsLink['status']) =>
-  status === 'transferred'
-    ? '#68d7f5'
-    : status === 'target-full' || status === 'source-empty'
-      ? '#f4b860'
-      : status === 'target-reconfigured' || status === 'constructing'
-        ? '#de7780'
-        : '#8796a6';
-
-export const productionRateLabel = (building: Pick<Building, 'recipeId'>) => {
-  const recipe = Object.values(recipes).find((candidate) => candidate.id === building.recipeId);
-  if (!recipe) return 'no recipe';
-  const output = Object.entries(recipe.output)
-    .map(([item, amount]) => `${amount} ${item}`)
-    .join(' + ');
-  return `${output}/${recipe.ticks}t`;
-};
-
-interface Viewport {
-  readonly panX: number;
-  readonly panY: number;
-  readonly scale: number;
-}
-
-/** Places the center of the focused isometric diamond at the viewport center. */
-export const cameraOrigin = (width: number, height: number) => ({
-  x: width / 2 - TILE_WIDTH / 2,
-  y: height / 2 - TILE_HEIGHT / 2,
-});
-
-export interface VisibleTileBounds {
-  readonly minX: number;
-  readonly maxX: number;
-  readonly minY: number;
-  readonly maxY: number;
-  readonly center: { x: number; y: number };
-}
-
-interface IsometricEntity {
-  readonly id: string;
-  readonly x: number;
-  readonly y: number;
-}
-
-export type PickedEntity =
-  | { readonly type: 'building'; readonly id: string }
-  | { readonly type: 'threat'; readonly id: string };
-
-export const initialCameraFocus = (
-  buildings: readonly Building[],
-  playerId: string,
-  plot: { readonly x: number; readonly y: number; readonly size: number } | undefined,
-) => {
-  const settlementCenter = buildings.find(
-    (building) => building.kind === 'settlement-center' && building.ownerId === playerId,
-  );
-  if (settlementCenter) return { x: settlementCenter.x, y: settlementCenter.y };
-  return plot
-    ? { x: plot.x + Math.floor(plot.size / 2), y: plot.y + Math.floor(plot.size / 2) }
-    : { x: 0, y: 0 };
-};
-
-export const tileHoverLines = ({
-  tile,
-  terrain,
-  elevation,
-  minedAmount,
-  resourceReachable,
-  territoryOwner,
-  playerId,
-  placementValid,
-  building,
-  threat,
-}: {
-  readonly tile: { readonly x: number; readonly y: number };
-  readonly terrain: TerrainTile | undefined;
-  readonly elevation: number;
-  readonly minedAmount: number;
-  readonly resourceReachable: boolean;
-  readonly territoryOwner: string | undefined;
-  readonly playerId: string;
-  readonly placementValid: boolean;
-  readonly building: Building | undefined;
-  readonly threat: Threat | undefined;
-}) => {
-  const terrainLabel =
-    terrain === 'ore'
-      ? 'Ore deposit'
-      : terrain === 'wood'
-        ? 'Timber grove'
-        : terrain === 'water'
-          ? 'Water'
-          : terrain === 'mountain'
-            ? `Mountain · height ${elevation}`
-            : terrain === 'grass'
-              ? 'Grassland'
-              : 'Unexplored';
-  const territoryLabel = territoryOwner
-    ? territoryOwner === playerId
-      ? 'Your territory'
-      : 'Claimed territory'
-    : 'Unclaimed territory';
-  const lines = [`Tile ${tile.x}, ${tile.y}`, `${terrainLabel} · ${territoryLabel}`];
-  if (terrain === 'ore' || terrain === 'wood')
-    lines.push(
-      `Resource remaining: ${Math.max(0, resourceDefinitions[terrain].yield - minedAmount)}/${resourceDefinitions[terrain].yield}`,
-      resourceReachable ? 'Reachable for gathering' : 'Out of gathering range',
-    );
-  if (building)
-    lines.push(
-      `${building.kind.replaceAll('-', ' ')} · ${building.constructionTicks > 0 ? 'under construction' : `health ${building.health}/${building.maxHealth}`}`,
-    );
-  if (threat) lines.push(`Raider threat · health ${threat.health}`);
-  lines.push(placementValid ? 'Buildable' : 'Not buildable');
-  return lines;
-};
-
-export const resourceIsReachable = (
-  tile: { readonly x: number; readonly y: number },
-  plot: { readonly x: number; readonly y: number; readonly size: number } | undefined,
-) =>
-  Boolean(
-    plot &&
-    Math.abs(plot.x + Math.floor(plot.size / 2) - tile.x) +
-      Math.abs(plot.y + Math.floor(plot.size / 2) - tile.y) <=
-      GATHER_RANGE,
-  );
-
-/** Threats render above buildings, so they win a click on the same tile. */
-export const entityAtTile = (
-  tile: { x: number; y: number },
-  buildings: readonly Building[],
-  threats: readonly Threat[],
-): PickedEntity | undefined => {
-  const threat = threats.find((candidate) => candidate.x === tile.x && candidate.y === tile.y);
-  if (threat) return { type: 'threat', id: threat.id };
-  const building = buildings.find((candidate) => candidate.x === tile.x && candidate.y === tile.y);
-  return building ? { type: 'building', id: building.id } : undefined;
-};
-
-/** Filters first, then orders only the visible entities by stable isometric depth. */
-export const visibleByIsometricDepth = <Entity extends IsometricEntity>(
-  entities: readonly Entity[],
-  focus: { x: number; y: number },
-  radius = 9,
-): Entity[] =>
-  entities
-    .filter(
-      (entity) => Math.abs(entity.x - focus.x) <= radius && Math.abs(entity.y - focus.y) <= radius,
-    )
-    .sort(
-      (left, right) =>
-        left.x + left.y - (right.x + right.y) ||
-        left.y - right.y ||
-        left.id.localeCompare(right.id),
-    );
-
-/** Calculates the world tile rectangle needed to cover the current transformed viewport. */
-export const visibleTileBounds = (
-  width: number,
-  height: number,
-  focus: { x: number; y: number },
-  viewport: Viewport,
-): VisibleTileBounds => {
-  const origin = cameraOrigin(width, height);
-  const screenToAbsoluteWorld = (screenX: number, screenY: number) => {
-    const local = screenToWorld({
-      x: (screenX - origin.x - viewport.panX) / viewport.scale - TILE_WIDTH / 2,
-      y: (screenY - origin.y - viewport.panY) / viewport.scale - TILE_HEIGHT / 2,
-    });
-    return { x: focus.x + local.x, y: focus.y + local.y };
-  };
-  const corners = [
-    screenToAbsoluteWorld(0, 0),
-    screenToAbsoluteWorld(width, 0),
-    screenToAbsoluteWorld(0, height),
-    screenToAbsoluteWorld(width, height),
-  ];
-  const xValues = corners.map((corner) => corner.x);
-  const yValues = corners.map((corner) => corner.y);
-  return {
-    minX: Math.floor(Math.min(...xValues)) - 2,
-    maxX: Math.ceil(Math.max(...xValues)) + 2,
-    minY: Math.floor(Math.min(...yValues)) - 2,
-    maxY: Math.ceil(Math.max(...yValues)) + 2,
-    center: screenToAbsoluteWorld(width / 2, height / 2),
-  };
-};
-
-/** Stable, bounded chunk subscription derived from the current viewport tile rectangle. */
-export const visibleChunkCoordinates = (bounds: VisibleTileBounds) => {
-  const chunks: Array<{ x: number; y: number }> = [];
-  for (let x = Math.floor(bounds.minX / 16); x <= Math.floor(bounds.maxX / 16); x += 1)
-    for (let y = Math.floor(bounds.minY / 16); y <= Math.floor(bounds.maxY / 16); y += 1)
-      chunks.push({ x, y });
-  return chunks;
-};
-
-/**
- * The immediate-mode canvas keeps a compact container for each visible chunk.
- * It avoids allocating one render object per tile; a pool is deliberately not
- * used because the renderer has no per-tile objects to recycle.
- */
-export const visibleRenderChunks = (bounds: VisibleTileBounds) =>
-  visibleChunkCoordinates(bounds).map((chunk) => ({
-    ...chunk,
-    minX: Math.max(bounds.minX, chunk.x * 16),
-    maxX: Math.min(bounds.maxX, chunk.x * 16 + 15),
-    minY: Math.max(bounds.minY, chunk.y * 16),
-    maxY: Math.min(bounds.maxY, chunk.y * 16 + 15),
-  }));
-
-/**
- * A stable integer hash per tile. Terrain variation has to look organic but stay
- * identical between frames, clients, and reloads, so it is derived from coordinates
- * rather than sampled randomly.
- */
-export const tileNoise = (x: number, y: number) => {
-  let hash = Math.imul(x | 0, 374_761_393) + Math.imul(y | 0, 668_265_263);
-  hash = Math.imul(hash ^ (hash >>> 13), 1_274_126_177);
-  return (hash ^ (hash >>> 16)) >>> 0;
-};
-
-/** Ground palettes, ordered light to dark within each surface so tiles read as one field. */
-const TILE_PALETTES = {
-  grass: ['#3c6e50', '#396949', '#366544', '#33613f', '#315d3d'],
-  /** Damp earth ringing a pond, so water is not a hard-edged blue tile on grass. */
-  bank: ['#446049', '#405a45', '#3c5541'],
-  water: ['#2a6790', '#276185', '#245b7d'],
-  sheen: ['#3d84ae', '#387ea6'],
-  rock: ['#5b6472', '#55606c', '#4f5966'],
-  grove: ['#2f5c3c', '#2c5738', '#295234'],
-  unexplored: ['#20362d', '#1d3129', '#1a2c25'],
-  /** Mountain plateaus, lighter than an outcrop patch so relief reads against grass. */
-  summit: ['#7d8694', '#77808e', '#6f7887', '#69727f', '#828b99'],
-  /** Only the tallest level is capped, so a range has visible peaks rather than one tone. */
-  snow: ['#e4ebf2', '#dae2ec', '#cfd9e4'],
-  /** Cliff faces: the south-west wall catches the light, the south-east wall does not. */
-  cliffLit: ['#5f6877', '#5a6371'],
-  cliffShaded: ['#3f4653', '#3a414d'],
-  /** Facets broken into a plateau so a range does not read as one flat slab. */
-  outcrop: ['#8d96a4', '#616a78'],
-  /** A capped peak needs shaded snow, not bare rock, or the facet reads as a hole. */
-  snowFacet: ['#c3ceda', '#eef3f8'],
-} as const;
-
-const shadeFrom = (palette: readonly string[], x: number, y: number, salt = 0) =>
-  palette[(tileNoise(x, y) + salt) % palette.length]!;
-
-export const tileShade = (terrain: TerrainTile | undefined, x: number, y: number) => {
-  const palette =
-    terrain === 'water'
-      ? TILE_PALETTES.water
-      : terrain === 'ore'
-        ? TILE_PALETTES.rock
-        : terrain === 'wood'
-          ? TILE_PALETTES.grove
-          : terrain === 'grass'
-            ? TILE_PALETTES.grass
-            : TILE_PALETTES.unexplored;
-  return shadeFrom(palette, x, y);
-};
-
-export const MAX_ELEVATION = terrainRules.mountain.maxLevel;
-
-/** Top and wall colours for a raised tile, so mountains shade consistently. */
-export const summitColors = (x: number, y: number, level: number) => ({
-  top:
-    level >= MAX_ELEVATION
-      ? shadeFrom(TILE_PALETTES.snow, x, y)
-      : shadeFrom(TILE_PALETTES.summit, x, y),
-  lit: shadeFrom(TILE_PALETTES.cliffLit, x, y),
-  shaded: shadeFrom(TILE_PALETTES.cliffShaded, x, y),
-  /** Present on a deterministic third of tiles, so facets scatter across a range. */
-  facet:
-    tileNoise(x, y) % 3 === 0
-      ? shadeFrom(level >= MAX_ELEVATION ? TILE_PALETTES.snowFacet : TILE_PALETTES.outcrop, x, y, 2)
-      : undefined,
-});
-
-export interface TileLayers {
-  readonly base: string;
-  /**
-   * An inset surface drawn inside the tile. Water and deposits keep a ring of ground
-   * around them so they look like ponds and outcrops instead of replaced tiles.
-   */
-  readonly patch?: { readonly fill: string; readonly inset: number; readonly sheen?: string };
-}
-
-export const tileLayers = (terrain: TerrainTile | undefined, x: number, y: number): TileLayers => {
-  if (terrain === 'water')
-    return {
-      base: shadeFrom(TILE_PALETTES.bank, x, y),
-      patch: {
-        fill: tileShade(terrain, x, y),
-        inset: 5,
-        sheen: shadeFrom(TILE_PALETTES.sheen, x, y, 1),
-      },
-    };
-  if (terrain === 'ore' || terrain === 'wood')
-    return {
-      base: shadeFrom(TILE_PALETTES.grass, x, y),
-      patch: { fill: tileShade(terrain, x, y), inset: terrain === 'ore' ? 7 : 6 },
-    };
-  return { base: tileShade(terrain, x, y) };
-};
-
-/**
- * Ground clutter that shows a deposit's remaining yield on the map instead of only in
- * the hover tooltip, so a worked-out node is visible at a glance.
- */
-export const resourceDecorationSprite = (
-  terrain: TerrainTile | undefined,
-  minedAmount: number,
-): SpriteId | undefined => {
-  if (terrain !== 'ore' && terrain !== 'wood') return undefined;
-  const total = resourceDefinitions[terrain].yield;
-  const remaining = Math.max(0, total - minedAmount);
-  const base = terrain === 'ore' ? 'ore-node' : 'timber-node';
-  if (remaining === 0) return `${base}-spent`;
-  return remaining * 2 <= total ? `${base}-low` : base;
-};
-
-/** Diamond sides whose neighbour belongs to a different region, in screen-corner order. */
-export const borderSides = (
-  x: number,
-  y: number,
-  regionAt: (x: number, y: number) => string | undefined,
-): Array<'south-east' | 'south-west' | 'north-west' | 'north-east'> => {
-  const region = regionAt(x, y);
-  if (!region) return [];
-  const sides: Array<'south-east' | 'south-west' | 'north-west' | 'north-east'> = [];
-  if (regionAt(x + 1, y) !== region) sides.push('south-east');
-  if (regionAt(x, y + 1) !== region) sides.push('south-west');
-  if (regionAt(x - 1, y) !== region) sides.push('north-west');
-  if (regionAt(x, y - 1) !== region) sides.push('north-east');
-  return sides;
-};
 
 export const WorldCanvas = ({
   buildings,

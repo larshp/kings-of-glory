@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "node scripts/run-pnpm.mjs -r build",
-    "test": "node scripts/run-pnpm.mjs -r test",
+    "test": "node scripts/run-pnpm.mjs -r --filter \"./packages/**\" build && node scripts/run-pnpm.mjs -r test",
     "test:e2e": "playwright test",
     "typecheck": "node scripts/run-pnpm.mjs build",
     "lint": "node scripts/run-pnpm.mjs -r lint",

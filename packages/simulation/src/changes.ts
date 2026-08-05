@@ -1,5 +1,5 @@
 import { chunkKeyFor } from './spatial.js';
-import type { Building, PlayerState, Scout, Threat, WorldState } from './world.js';
+import type { Building, Carrier, PlayerState, Scout, Threat, WorldState } from './world.js';
 
 /**
  * A serializable summary of state that changed between two completed simulation
@@ -14,6 +14,7 @@ export interface WorldChangeSet {
   readonly scouts: readonly string[];
   readonly settlements: readonly string[];
   readonly logisticsLinks: readonly string[];
+  readonly carriers: readonly string[];
   readonly minedTiles: readonly string[];
   readonly roads: readonly string[];
   /** Includes both the old and new chunk when an entity changes chunk or is removed. */
@@ -89,12 +90,14 @@ export const diffWorld = (previous: WorldState, next: WorldState): WorldChangeSe
   const scouts = changedKeys(previous.scouts ?? {}, next.scouts ?? {});
   const settlements = changedKeys(previous.settlements, next.settlements);
   const logisticsLinks = changedKeys(previous.logisticsLinks, next.logisticsLinks);
+  const carriers = changedKeys(previous.carriers ?? {}, next.carriers ?? {});
   const minedTiles = changedKeys(previous.minedTiles, next.minedTiles);
   const roads = changedKeys(previous.roads, next.roads);
   const chunks = new Set<string>([
     ...entityChunks<Building>(previous.buildings, next.buildings, buildings),
     ...entityChunks<Threat>(previous.threats, next.threats, threats),
     ...entityChunks<Scout>(previous.scouts ?? {}, next.scouts ?? {}, scouts),
+    ...entityChunks<Carrier>(previous.carriers ?? {}, next.carriers ?? {}, carriers),
     ...changedPlayerChunks(previous.players, next.players, players),
     ...minedTileChunks(minedTiles),
     ...minedTileChunks(roads),
@@ -106,6 +109,7 @@ export const diffWorld = (previous: WorldState, next: WorldState): WorldChangeSe
     scouts,
     settlements,
     logisticsLinks,
+    carriers,
     minedTiles,
     roads,
     chunks: [...chunks].sort((left, right) => left.localeCompare(right)),

@@ -445,6 +445,90 @@ describe('client message validation', () => {
       ),
     ).toBeUndefined();
   });
+  it('accepts the masonry items, the new placements, and building upgrades', () => {
+    for (const item of ['stone', 'brick'] as const)
+      expect(
+        parseClientMessage(
+          JSON.stringify({
+            type: 'command',
+            command: {
+              id: `move-${item}`,
+              playerId: 'player-a',
+              sequence: 1,
+              type: 'transfer',
+              buildingId: 'storage-1',
+              item,
+              amount: 2,
+              direction: 'toBuilding',
+            },
+          }),
+        ),
+      ).toBeDefined();
+    for (const type of ['placeQuarry', 'placeBrickworks', 'placeWall'] as const)
+      expect(
+        parseClientMessage(
+          JSON.stringify({
+            type: 'command',
+            command: { id: type, playerId: 'player-a', sequence: 1, type, x: 4, y: -7 },
+          }),
+        ),
+      ).toBeDefined();
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'upgrade',
+            playerId: 'player-a',
+            sequence: 1,
+            type: 'upgradeBuilding',
+            buildingId: 'smelter-1',
+          },
+        }),
+      ),
+    ).toBeDefined();
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'masonry',
+            playerId: 'player-a',
+            sequence: 1,
+            type: 'research',
+            technologyId: 'masonry',
+          },
+        }),
+      ),
+    ).toBeDefined();
+    // An upgrade still has to name a building, and items outside the set stay rejected.
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: { id: 'upgrade', playerId: 'player-a', sequence: 1, type: 'upgradeBuilding' },
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'bad-item',
+            playerId: 'player-a',
+            sequence: 1,
+            type: 'transfer',
+            buildingId: 'storage-1',
+            item: 'gold',
+            amount: 1,
+            direction: 'toBuilding',
+          },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
   it('rejects malformed, incomplete, and unsafe commands', () => {
     expect(
       parseClientMessage(JSON.stringify({ type: 'command', command: { type: 'gather' } })),

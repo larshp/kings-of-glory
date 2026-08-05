@@ -1,6 +1,13 @@
 import { recipes, resources as resourceDefinitions, terrainRules } from '@kings/content';
 import type { TerrainTile } from '@kings/protocol';
-import { GATHER_RANGE, type Building, type LogisticsLink, type Threat } from '@kings/simulation';
+import {
+  GATHER_RANGE,
+  recipeTicksFor,
+  type Building,
+  type Carrier,
+  type LogisticsLink,
+  type Threat,
+} from '@kings/simulation';
 import type { SpriteId } from './render-assets.js';
 import { screenToWorld, TILE_HEIGHT, TILE_WIDTH } from './projection.js';
 
@@ -13,17 +20,17 @@ export const logisticsStatusColor = (status: LogisticsLink['status']) =>
       ? '#a88cf0'
       : status === 'target-full' || status === 'source-empty'
         ? '#f4b860'
-        : status === 'target-reconfigured' || status === 'constructing'
+        : status === 'target-reconfigured' || status === 'constructing' || status === 'no-route'
           ? '#de7780'
           : '#8796a6';
 
-export const productionRateLabel = (building: Pick<Building, 'recipeId'>) => {
+export const productionRateLabel = (building: Pick<Building, 'recipeId' | 'kind' | 'tier'>) => {
   const recipe = Object.values(recipes).find((candidate) => candidate.id === building.recipeId);
   if (!recipe) return 'no recipe';
   const output = Object.entries(recipe.output)
     .map(([item, amount]) => `${amount} ${item}`)
     .join(' + ');
-  return `${output}/${recipe.ticks}t`;
+  return `${output}/${recipeTicksFor(building, recipe.ticks)}t`;
 };
 
 export interface Viewport {
@@ -80,6 +87,7 @@ export const tileHoverLines = ({
   placementValid,
   building,
   threat,
+  carrier,
 }: {
   readonly tile: { readonly x: number; readonly y: number };
   readonly terrain: TerrainTile | undefined;
@@ -91,6 +99,7 @@ export const tileHoverLines = ({
   readonly placementValid: boolean;
   readonly building: Building | undefined;
   readonly threat: Threat | undefined;
+  readonly carrier?: Carrier | undefined;
 }) => {
   const terrainLabel =
     terrain === 'ore'
@@ -100,7 +109,7 @@ export const tileHoverLines = ({
         : terrain === 'water'
           ? 'Water'
           : terrain === 'mountain'
-            ? `Mountain · height ${elevation}`
+            ? `Mountain · height ${elevation} · quarriable stone`
             : terrain === 'grass'
               ? 'Grassland'
               : 'Unexplored';
@@ -110,16 +119,20 @@ export const tileHoverLines = ({
       : 'Claimed territory'
     : 'Unclaimed territory';
   const lines = [`Tile ${tile.x}, ${tile.y}`, `${terrainLabel} · ${territoryLabel}`];
-  if (terrain === 'ore' || terrain === 'wood')
+  if (terrain === 'ore' || terrain === 'wood' || terrain === 'mountain')
     lines.push(
-      `Resource remaining: ${Math.max(0, resourceDefinitions[terrain].yield - minedAmount)}/${resourceDefinitions[terrain].yield}`,
+      `${resourceDefinitions[terrain].item} remaining: ${Math.max(0, resourceDefinitions[terrain].yield - minedAmount)}/${resourceDefinitions[terrain].yield}`,
       resourceReachable ? 'Reachable for gathering' : 'Out of gathering range',
     );
   if (building)
     lines.push(
-      `${building.kind.replaceAll('-', ' ')} · ${building.constructionTicks > 0 ? 'under construction' : `health ${building.health}/${building.maxHealth}`}`,
+      `${building.kind.replaceAll('-', ' ')}${building.tier > 1 ? ` II` : ''} · ${building.constructionTicks > 0 ? (building.upgradeTier ? 'being upgraded' : 'under construction') : `health ${building.health}/${building.maxHealth}`}`,
     );
   if (threat) lines.push(`Raider threat · health ${threat.health}`);
+  if (carrier)
+    lines.push(
+      `Carrier · ${carrier.cargo} ${carrier.item} ${carrier.phase === 'outbound' ? 'outbound' : 'returning empty'}`,
+    );
   lines.push(placementValid ? 'Buildable' : 'Not buildable');
   return lines;
 };
@@ -304,14 +317,20 @@ export const tileLayers = (terrain: TerrainTile | undefined, x: number, y: numbe
   return { base: tileShade(terrain, x, y) };
 };
 
+/**
+ * Clutter showing what a deposit has left. Stone shares the mountain tiles it is cut from,
+ * so its clutter only appears once a quarry has started working the range: an untouched range
+ * should read as terrain, not as a resource pile.
+ */
 export const resourceDecorationSprite = (
   terrain: TerrainTile | undefined,
   minedAmount: number,
 ): SpriteId | undefined => {
-  if (terrain !== 'ore' && terrain !== 'wood') return undefined;
+  if (terrain !== 'ore' && terrain !== 'wood' && terrain !== 'mountain') return undefined;
+  if (terrain === 'mountain' && minedAmount === 0) return undefined;
   const total = resourceDefinitions[terrain].yield;
   const remaining = Math.max(0, total - minedAmount);
-  const base = terrain === 'ore' ? 'ore-node' : 'timber-node';
+  const base = terrain === 'ore' ? 'ore-node' : terrain === 'wood' ? 'timber-node' : 'stone-node';
   if (remaining === 0) return `${base}-spent`;
   return remaining * 2 <= total ? `${base}-low` : base;
 };

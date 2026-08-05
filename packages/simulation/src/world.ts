@@ -12,6 +12,7 @@ import {
 } from './commands.js';
 import {
   buildings as buildingDefinitions,
+  buildingUpgrades,
   CONTENT_VERSION,
   cooperativeObjectives as cooperativeObjectiveDefinitions,
   environmentalEvents,
@@ -48,7 +49,9 @@ import { chunkKeyFor } from './spatial.js';
 export interface Inventory {
   ore: number;
   wood: number;
+  stone: number;
   ingot: number;
+  brick: number;
   tool: number;
 }
 export type ItemId = keyof Inventory;
@@ -101,7 +104,10 @@ export interface Building {
     | 'watchtower'
     | 'mine'
     | 'lumber-camp'
-    | 'forester';
+    | 'forester'
+    | 'quarry'
+    | 'brickworks'
+    | 'wall';
   ownerId: PlayerId;
   x: number;
   y: number;
@@ -114,6 +120,13 @@ export interface Building {
   inventory: Inventory;
   inventoryCapacity: number;
   populationCapacity: number;
+  /**
+   * The permanent tier this building has reached. A tier scales work rate, capacity, and
+   * durability; the values above already reflect it, so nothing reads the tier to size a
+   * building. `upgradeTier` is the tier an in-progress upgrade will apply on completion.
+   */
+  tier: 1 | 2;
+  upgradeTier?: 2;
   jobPriority: 0 | 1 | 2 | 3;
   /** The configured recipe is always one allowed by the building's producer definition. */
   recipeId: string | null;
@@ -165,11 +178,18 @@ export interface LogisticsLink {
   targetBuildingId: BuildingId;
   item: ItemId;
   priority: 0 | 1 | 2 | 3;
-  throughputPerTick: number;
-  /** Every link owns one deterministic carrier whose return journey limits throughput. */
+  /** Items one carrier loads for a single round trip; the link's real throughput. */
+  capacityPerTrip: number;
+  /** Every link owns at most one carrier, materialised only while it is on the road. */
   carrierId?: string;
+  /**
+   * The walking route from the source to the target as flat `x, y` pairs, excluding the
+   * source tile and ending on the target tile. It only depends on the world seed and the
+   * two tiles, so it is computed once and then reused; an empty route records a search
+   * that found no way through, which is retried periodically.
+   */
+  route?: readonly number[];
   routeDistance?: number;
-  travelTicksRemaining?: number;
   status:
     | 'idle'
     | 'transferred'
@@ -178,7 +198,25 @@ export interface LogisticsLink {
     | 'target-full'
     | 'target-reconfigured'
     | 'constructing'
-    | 'in-transit';
+    | 'in-transit'
+    | 'no-route';
+}
+/**
+ * A hauler walking one logistics link. Items are taken out of the source when the carrier
+ * loads and only reappear when it unloads, so a settlement's throughput is bounded by real
+ * travel time and every item in flight is accounted for in exactly one place.
+ */
+export interface Carrier {
+  id: string;
+  linkId: string;
+  ownerId: PlayerId;
+  x: number;
+  y: number;
+  item: ItemId;
+  cargo: number;
+  /** Steps completed along the link route; 0 is the source tile, `route.length / 2` the target. */
+  routeIndex: number;
+  phase: 'outbound' | 'returning';
 }
 export interface ObjectiveContribution {
   readonly commandId: string;
@@ -267,7 +305,7 @@ export interface OnboardingReservation {
   securedTick: number | null;
 }
 export interface WorldState {
-  schemaVersion: 29;
+  schemaVersion: 30;
   contentVersion: typeof CONTENT_VERSION;
   seed: number;
   /** When true, no PvE threats spawn. Peaceful worlds stay threat-free. */
@@ -284,6 +322,8 @@ export interface WorldState {
   transfers: ResourceTransfer[];
   settlements: Record<string, Settlement>;
   logisticsLinks: Record<string, LogisticsLink>;
+  /** Haulers currently on the road; a link with no entry here has its carrier at home. */
+  carriers: Record<string, Carrier>;
   /** Traversable infrastructure keyed by tile; the value is its owning player. */
   roads: Record<string, PlayerId>;
   cooperativeObjectives: Record<CooperativeObjectiveId, CooperativeObjectiveState>;
@@ -326,7 +366,9 @@ export interface WorldEvent {
     | 'onboardingReservationReclaimed'
     | 'landmarkDiscovered'
     | 'roadPlaced'
-    | 'resourceRegenerated';
+    | 'resourceRegenerated'
+    | 'buildingUpgraded'
+    | 'carrierDelivered';
   playerId?: PlayerId;
   buildingId?: BuildingId;
   environmentalEventId?: keyof typeof environmentalEvents;
@@ -370,7 +412,14 @@ const TERRITORY_CELL_SIZE = 8;
 /** Bounds all threat route work together, rather than once per threat. */
 export const THREAT_PATH_VISITS_PER_TICK = 128;
 const THREAT_PATH_VISITS_PER_SEARCH = 128;
-export const emptyInventory = (): Inventory => ({ ore: 0, wood: 0, ingot: 0, tool: 0 });
+export const emptyInventory = (): Inventory => ({
+  ore: 0,
+  wood: 0,
+  stone: 0,
+  ingot: 0,
+  brick: 0,
+  tool: 0,
+});
 export const initialSocialState = (): SocialState => ({
   playerNames: {},
   settlementNames: {},
@@ -380,38 +429,64 @@ export const initialSocialState = (): SocialState => ({
   reports: [],
 });
 export const tileKey = (x: number, y: number) => `${x}:${y}`;
+const inventoryItems: readonly ItemId[] = ['ore', 'wood', 'stone', 'ingot', 'brick', 'tool'];
 const inventoryTotal = (inventory: Inventory) =>
-  inventory.ore + inventory.wood + inventory.ingot + inventory.tool;
-const inventoryItems: readonly ItemId[] = ['ore', 'wood', 'ingot', 'tool'];
+  inventoryItems.reduce((total, item) => total + inventory[item], 0);
 const hasInvalidInventory = (inventory: Inventory) =>
   inventoryItems.some((item) => !Number.isSafeInteger(inventory[item]) || inventory[item] < 0);
-const constructionMaterialsFor = (kind: Building['kind']): Inventory => {
-  const cost = buildingDefinitions[kind].cost as Partial<Inventory>;
-  return {
-    ore: cost.ore ?? 0,
-    wood: cost.wood ?? 0,
-    ingot: cost.ingot ?? 0,
-    tool: cost.tool ?? 0,
-  };
+const inventoryFrom = (amounts: Readonly<Record<string, number>>): Inventory => {
+  const inventory = emptyInventory();
+  for (const item of inventoryItems) inventory[item] = amounts[item] ?? 0;
+  return inventory;
 };
-const canAffordConstruction = (inventory: Inventory, kind: Building['kind']) => {
-  const cost = constructionMaterialsFor(kind);
-  return inventoryItems.every((item) => inventory[item] >= cost[item]);
-};
-const deductConstructionCost = (inventory: Inventory, kind: Building['kind']) => {
-  const cost = constructionMaterialsFor(kind);
+const constructionMaterialsFor = (kind: Building['kind']): Inventory =>
+  inventoryFrom(buildingDefinitions[kind].cost);
+const canAfford = (inventory: Inventory, cost: Inventory) =>
+  inventoryItems.every((item) => inventory[item] >= cost[item]);
+const deductCost = (inventory: Inventory, cost: Inventory) => {
   for (const item of inventoryItems) inventory[item] -= cost[item];
 };
-const canRefundConstructionCost = (inventory: Inventory, kind: Building['kind']) => {
-  const cost = constructionMaterialsFor(kind);
-  return (
-    inventoryItems.every((item) => inventory[item] + cost[item] <= INVENTORY_CAPACITY) &&
-    inventoryTotal(inventory) + inventoryTotal(cost) <= INVENTORY_CAPACITY
+const canRefundCost = (inventory: Inventory, cost: Inventory) =>
+  inventoryItems.every((item) => inventory[item] + cost[item] <= INVENTORY_CAPACITY) &&
+  inventoryTotal(inventory) + inventoryTotal(cost) <= INVENTORY_CAPACITY;
+const refundCost = (inventory: Inventory, cost: Inventory) => {
+  for (const item of inventoryItems) inventory[item] += cost[item];
+};
+const upgradeFor = (kind: Building['kind']) =>
+  buildingUpgrades[kind as keyof typeof buildingUpgrades];
+/** Whether a kind has a second tier at all; the HUD offers an upgrade only for these. */
+export const isUpgradable = (kind: Building['kind']) => Boolean(upgradeFor(kind));
+/** The materials a tier costs, which are separate from what the building cost to place. */
+export const upgradeMaterialsFor = (kind: Building['kind']): Inventory | undefined => {
+  const upgrade = upgradeFor(kind);
+  return upgrade ? inventoryFrom(upgrade.cost) : undefined;
+};
+/**
+ * The largest delivery a building of this kind can ever owe. Construction and an upgrade
+ * both run through `constructionMaterials`, and they charge different items.
+ */
+const maxConstructionMaterialsFor = (kind: Building['kind']): Inventory => {
+  const build = constructionMaterialsFor(kind);
+  const upgrade = upgradeMaterialsFor(kind);
+  if (!upgrade) return build;
+  return inventoryFrom(
+    Object.fromEntries(inventoryItems.map((item) => [item, Math.max(build[item], upgrade[item])])),
   );
 };
-const refundConstructionCost = (inventory: Inventory, kind: Building['kind']) => {
-  const cost = constructionMaterialsFor(kind);
-  for (const item of inventoryItems) inventory[item] += cost[item];
+/** Durations and sizes a kind reaches at a given tier, so a rebuilt world agrees with a live one. */
+export const tieredWorkTicks = (kind: Building['kind'], tier: 1 | 2, ticks: number) => {
+  const upgrade = tier === 2 ? upgradeFor(kind) : undefined;
+  return upgrade ? Math.max(1, Math.ceil(ticks * upgrade.workRateMultiplier)) : ticks;
+};
+export const tieredInventoryCapacity = (kind: Building['kind'], tier: 1 | 2) => {
+  const upgrade = tier === 2 ? upgradeFor(kind) : undefined;
+  const capacity = buildingDefinitions[kind].inventoryCapacity;
+  return upgrade ? Math.floor(capacity * upgrade.inventoryCapacityMultiplier) : capacity;
+};
+export const tieredMaxHealth = (kind: Building['kind'], tier: 1 | 2) => {
+  const upgrade = tier === 2 ? upgradeFor(kind) : undefined;
+  const maxHealth = buildingDefinitions[kind].maxHealth;
+  return upgrade ? Math.floor(maxHealth * upgrade.maxHealthMultiplier) : maxHealth;
 };
 const canStore = (inventory: Inventory, capacity: number, item: ItemId, amount: number) =>
   Number.isInteger(amount) &&
@@ -474,30 +549,71 @@ const canStartRecipe = (building: Building, recipe: ProductionRecipe) =>
   hasRecipeInputs(building, recipe) && hasRecipeOutputCapacity(building, recipe);
 const outputReservationFor = (building: Building): Partial<Inventory> =>
   building.progress > 0 ? (recipeFor(building)?.output ?? {}) : {};
-export const logisticsThroughput = logisticsDefinitions.internalInventory.throughputPerTick;
-const carrierRouteFor = (state: WorldState, source: Building, target: Building) => {
-  const route: string[] = [];
-  let x = source.x;
-  let y = source.y;
-  while (x !== target.x) {
-    x += Math.sign(target.x - x);
-    route.push(tileKey(x, y));
-  }
-  while (y !== target.y) {
-    y += Math.sign(target.y - y);
-    route.push(tileKey(x, y));
-  }
-  const roadTiles = route.filter((key) => Boolean(state.roads[key])).length;
-  const distance = route.length;
-  const effectiveDistance = Math.max(1, distance - roadTiles * roadRules.roadDistanceDiscount);
-  const speed = state.players[source.ownerId]?.research.unlocked.engineering
+export const logisticsCarrierCapacity = logisticsDefinitions.internalInventory.carrierCapacity;
+/** Recipe and extraction durations a building actually works at, after its tier. */
+export const recipeTicksFor = (building: Pick<Building, 'kind' | 'tier'>, ticks: number) =>
+  tieredWorkTicks(building.kind, building.tier, ticks);
+export const extractionTicksFor = (building: Pick<Building, 'kind' | 'tier'>) => {
+  const extractor = extractorFor(building.kind);
+  return extractor ? tieredWorkTicks(building.kind, building.tier, extractor.ticksPerUnit) : 0;
+};
+/** Bounds all carrier route planning together, exactly as threats bound their routing. */
+export const CARRIER_PATH_VISITS_PER_TICK = 128;
+const CARRIER_PATH_VISITS_PER_SEARCH = 256;
+/** A route search that found nothing is retried on this cadence rather than every tick. */
+const CARRIER_ROUTE_RETRY_TICKS = 20;
+/**
+ * Plans the walking route a link's carrier follows, over open ground only, and returns it
+ * as flat `x, y` pairs excluding the source tile. Buildings are deliberately passable: a
+ * route that depended on them would have to be replanned whenever a settlement changed
+ * shape, while terrain makes the route a pure function of the seed and the two endpoints.
+ */
+const planCarrierRoute = (
+  state: WorldState,
+  source: Building,
+  target: Building,
+): { route: number[]; visited: number } => {
+  const path = findPath({
+    start: { x: source.x, y: source.y },
+    goal: { x: target.x, y: target.y },
+    maxVisited: CARRIER_PATH_VISITS_PER_SEARCH,
+    bounds: {
+      minX: Math.min(source.x, target.x) - 8,
+      maxX: Math.max(source.x, target.x) + 8,
+      minY: Math.min(source.y, target.y) - 8,
+      maxY: Math.max(source.y, target.y) + 8,
+    },
+    isPassable: (tile) =>
+      (tile.x === source.x && tile.y === source.y) ||
+      (tile.x === target.x && tile.y === target.y) ||
+      isOpenTile(state.seed, tile.x, tile.y),
+  });
+  const steps = path.status === 'found' ? path.path.slice(1) : [];
+  if (steps.length === 0 || steps.length > roadRules.maxRouteTiles)
+    return { route: [], visited: path.visited };
+  return { route: steps.flatMap((tile) => [tile.x, tile.y]), visited: path.visited };
+};
+/**
+ * The route a link's carrier will walk between two buildings. Exported for fixtures and
+ * tools that build completed links directly instead of issuing a command, so they cannot
+ * drift from the route the authoritative command would have planned.
+ */
+export const logisticsRouteFor = (
+  state: WorldState,
+  source: Building,
+  target: Building,
+): readonly number[] => planCarrierRoute(state, source, target).route;
+const routeTile = (route: readonly number[], step: number) => ({
+  x: route[(step - 1) * 2]!,
+  y: route[(step - 1) * 2 + 1]!,
+});
+/** Movement points a settlement's carriers spend per tick; Engineering buys more of them. */
+const carrierMovementBudget = (state: WorldState, ownerId: PlayerId) =>
+  state.players[ownerId]?.research.unlocked.engineering
     ? roadRules.engineeringTilesPerTick
     : roadRules.baseTilesPerTick;
-  return {
-    distance,
-    travelTicks: Math.max(0, Math.ceil(effectiveDistance / speed) - 1),
-  };
-};
+const carrierStepCost = (state: WorldState, x: number, y: number) =>
+  state.roads[tileKey(x, y)] ? roadRules.roadStepCost : roadRules.groundStepCost;
 const consumeRecipe = (building: Building, recipe: ProductionRecipe) => {
   for (const [item, amount] of Object.entries(recipe.input))
     building.inventory[item as ItemId] -= amount ?? 0;
@@ -599,6 +715,13 @@ export const extractableTile = (
     }
   return undefined;
 };
+/**
+ * The deposit a tile holds, if any. Ore and timber are their own terrain; stone is cut from
+ * mountain ranges, so relief is a resource as well as an obstacle.
+ */
+export const depositAt = (seed: number, x: number, y: number) =>
+  resourceDefinitions[terrainAt(seed, x, y) as keyof typeof resourceDefinitions] as
+    (typeof resourceDefinitions)[keyof typeof resourceDefinitions] | undefined;
 const activityFor = (state: WorldState, ownerId: PlayerId): PlayerActivity =>
   state.playerActivity[ownerId] ?? { lastActiveTick: state.tick, raidEligibleTick: state.tick };
 const isRaidEligible = (state: WorldState, ownerId: PlayerId) =>
@@ -701,7 +824,7 @@ export const initialCooperativeObjectives = (): WorldState['cooperativeObjective
   ) as unknown as WorldState['cooperativeObjectives'];
 
 export const createWorld = (seed = 1, peaceful = true): WorldState => ({
-  schemaVersion: 29,
+  schemaVersion: 30,
   contentVersion: CONTENT_VERSION,
   seed,
   peaceful,
@@ -715,6 +838,7 @@ export const createWorld = (seed = 1, peaceful = true): WorldState => ({
   transfers: [],
   settlements: {},
   logisticsLinks: {},
+  carriers: {},
   roads: {},
   cooperativeObjectives: initialCooperativeObjectives(),
   playerActivity: {},
@@ -732,7 +856,7 @@ export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
   state.players[id] = {
     id: typedId,
     plot,
-    inventory: { ore: 0, wood: 5, ingot: 0, tool: 0 },
+    inventory: { ...emptyInventory(), wood: 5 },
     population: { total: 2, capacity: 2, satisfaction: 100, employed: 0, unemployed: 2 },
     exploredChunks: plotExploration(plot),
     visibleChunks: plotExploration(plot),
@@ -745,6 +869,7 @@ export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
         'territorial-charter': false,
         engineering: false,
         stewardship: false,
+        masonry: false,
       },
     },
     discoveries: {},
@@ -793,6 +918,7 @@ export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
     inventory: emptyInventory(),
     inventoryCapacity: center.inventoryCapacity,
     populationCapacity: center.populationCapacity,
+    tier: 1,
     jobPriority: 0,
     recipeId: null,
     productionState: 'idle',
@@ -999,6 +1125,7 @@ const createBuildingRecord = (
     inventory: emptyInventory(),
     inventoryCapacity: definition.inventoryCapacity,
     populationCapacity: definition.populationCapacity,
+    tier: 1,
     jobPriority: needsWorker(kind) ? 1 : 0,
     recipeId: defaultRecipeIdFor(kind),
     productionState: definition.constructionTicks > 0 ? 'constructing' : 'idle',
@@ -1041,8 +1168,12 @@ const removePlayerData = (
       link.ownerId === player.id ||
       ownedBuildingIds.has(link.sourceBuildingId) ||
       ownedBuildingIds.has(link.targetBuildingId)
-    )
+    ) {
+      if (link.carrierId) delete state.carriers[link.carrierId];
       delete state.logisticsLinks[id];
+    }
+  for (const [id, carrier] of Object.entries(state.carriers))
+    if (carrier.ownerId === player.id) delete state.carriers[id];
   for (const [id, scout] of Object.entries(state.scouts ?? {}))
     if (scout.ownerId === player.id) delete state.scouts?.[id];
   for (const [key, ownerId] of Object.entries(state.roads))
@@ -1170,13 +1301,12 @@ export const applyCommand = (
     if (reservedResourceOwner(state, command.x, command.y) !== player.id)
       return reject('reserved-resource');
     const key = tileKey(command.x, command.y);
-    const resource = terrainAt(state.seed, command.x, command.y);
-    if (resource !== 'ore' && resource !== 'wood') return reject('resource-depleted');
-    if ((state.minedTiles[key] ?? 0) >= resourceDefinitions[resource].yield)
-      return reject('resource-depleted');
+    const deposit = depositAt(state.seed, command.x, command.y);
+    if (!deposit) return reject('resource-depleted');
+    if ((state.minedTiles[key] ?? 0) >= deposit.yield) return reject('resource-depleted');
     if (inventoryTotal(player.inventory) >= INVENTORY_CAPACITY) return reject('inventory-full');
     state.minedTiles[key] = (state.minedTiles[key] ?? 0) + 1;
-    player.inventory[resource] += 1;
+    player.inventory[deposit.item as ItemId] += 1;
     return accept([{ type: 'gathered', playerId: player.id }]);
   }
   if (command.type === 'explore') {
@@ -1634,6 +1764,9 @@ export const applyCommand = (
       return reject('settlement-permission-denied');
     const id = `link-${source.id}-${target.id}-${command.item}`;
     if (state.logisticsLinks[id]) return reject('logistics-link-exists');
+    // Planned here rather than on the first tick: link creation is one command, so the
+    // route search is naturally spread out, and the player sees the real route immediately.
+    const { route } = planCarrierRoute(state, source, target);
     state.logisticsLinks[id] = {
       id,
       ownerId: player.id,
@@ -1641,11 +1774,11 @@ export const applyCommand = (
       targetBuildingId: target.id,
       item: command.item,
       priority: 1,
-      throughputPerTick: logisticsThroughput,
+      capacityPerTrip: logisticsCarrierCapacity,
       carrierId: `carrier-${id}`,
-      routeDistance: Math.abs(source.x - target.x) + Math.abs(source.y - target.y),
-      travelTicksRemaining: 0,
-      status: 'idle',
+      route,
+      routeDistance: route.length / 2,
+      status: route.length === 0 ? 'no-route' : 'idle',
     };
     return accept([]);
   }
@@ -1662,6 +1795,16 @@ export const applyCommand = (
         !canManageLogistics(state, player.id, target))
     )
       return reject('settlement-permission-denied');
+    // A loaded carrier is holding the only copy of its cargo, so removal puts it back into
+    // the source before the link goes. Without room the link stays and nothing is lost.
+    const carrier = link.carrierId ? state.carriers[link.carrierId] : undefined;
+    if (carrier && carrier.cargo > 0) {
+      if (!source) return reject('unknown-building');
+      if (!canStore(source.inventory, source.inventoryCapacity, carrier.item, carrier.cargo))
+        return reject('inventory-full');
+      source.inventory[carrier.item] += carrier.cargo;
+    }
+    if (link.carrierId) delete state.carriers[link.carrierId];
     delete state.logisticsLinks[link.id];
     return accept([]);
   }
@@ -1744,8 +1887,9 @@ export const applyCommand = (
       })
     )
       return reject('no-deposit-in-range');
-    if (!canAffordConstruction(player.inventory, placementKind)) return reject('insufficient-wood');
-    deductConstructionCost(player.inventory, placementKind);
+    if (!canAfford(player.inventory, constructionMaterialsFor(placementKind)))
+      return reject('insufficient-wood');
+    deductCost(player.inventory, constructionMaterialsFor(placementKind));
     const placed = createBuildingRecord(state, player.id, placementKind, command.x, command.y);
     return accept([{ type: 'buildingPlaced', playerId: player.id, buildingId: placed.id }]);
   }
@@ -1763,27 +1907,64 @@ export const applyCommand = (
     if (building.kind === 'settlement-center') return reject('cannot-demolish');
     if (building.constructionTicks === 0) return reject('construction-incomplete');
     const owner = state.players[building.ownerId];
-    if (!owner || !canRefundConstructionCost(owner.inventory, building.kind))
-      return reject('inventory-full');
-    delete state.buildings[building.id];
-    refundConstructionCost(owner.inventory, building.kind);
+    // Cancelling an upgrade refunds the tier's materials and keeps the working building;
+    // only a first-time construction has nothing to fall back to and is removed.
+    const upgradeCost = building.upgradeTier ? upgradeMaterialsFor(building.kind) : undefined;
+    const cost = upgradeCost ?? constructionMaterialsFor(building.kind);
+    if (!owner || !canRefundCost(owner.inventory, cost)) return reject('inventory-full');
+    refundCost(owner.inventory, cost);
+    if (upgradeCost) {
+      building.constructionTicks = 0;
+      building.constructionMaterials = emptyInventory();
+      delete building.upgradeTier;
+      building.productionState = 'idle';
+    } else delete state.buildings[building.id];
     return accept([{ type: 'buildingCancelled', playerId: player.id, buildingId: building.id }]);
+  }
+  if (command.type === 'upgradeBuilding') {
+    const upgrade = upgradeFor(building.kind);
+    const cost = upgradeMaterialsFor(building.kind);
+    if (!upgrade || !cost) return reject('upgrade-unavailable');
+    if (building.constructionTicks > 0) return reject('construction-incomplete');
+    if (building.tier >= upgrade.tier) return reject('already-upgraded');
+    // A running batch has already consumed its inputs, so an upgrade waits for it.
+    if (building.progress > 0) return reject('busy');
+    // Charged to the owner's stock, because cancelling an upgrade refunds it there. A
+    // delegated builder spends the settlement's materials rather than their own.
+    const owner = state.players[building.ownerId];
+    if (!owner) return reject('unknown-player');
+    if (
+      upgrade.requiredTechnology &&
+      !owner.research.unlocked[upgrade.requiredTechnology as TechnologyId]
+    )
+      return reject('technology-locked');
+    if (!canAfford(owner.inventory, cost)) return reject('insufficient-resources');
+    deductCost(owner.inventory, cost);
+    building.upgradeTier = upgrade.tier;
+    building.constructionTicks = upgrade.constructionTicks;
+    building.constructionMaterials = cost;
+    building.productionState = 'constructing';
+    return accept([]);
   }
   if (command.type === 'demolish') {
     if (building.kind === 'settlement-center') return reject('cannot-demolish');
     if (building.constructionTicks > 0) return reject('construction-incomplete');
-    if (
-      inventoryTotal(player.inventory) + inventoryTotal(building.inventory) > INVENTORY_CAPACITY ||
-      player.inventory.ore + building.inventory.ore > INVENTORY_CAPACITY ||
-      player.inventory.wood + building.inventory.wood > INVENTORY_CAPACITY ||
-      player.inventory.ingot + building.inventory.ingot > INVENTORY_CAPACITY ||
-      player.inventory.tool + building.inventory.tool > INVENTORY_CAPACITY
-    )
-      return reject('inventory-full');
-    player.inventory.ore += building.inventory.ore;
-    player.inventory.wood += building.inventory.wood;
-    player.inventory.ingot += building.inventory.ingot;
-    player.inventory.tool += building.inventory.tool;
+    // Demolition also ends every link that touched the building, so whatever its carriers
+    // are still holding comes back with the building's own stock rather than vanishing.
+    const strandedLinks = Object.values(state.logisticsLinks).filter(
+      (link) => link.sourceBuildingId === building.id || link.targetBuildingId === building.id,
+    );
+    const recovered = { ...building.inventory };
+    for (const link of strandedLinks) {
+      const carrier = link.carrierId ? state.carriers[link.carrierId] : undefined;
+      if (carrier) recovered[carrier.item] += carrier.cargo;
+    }
+    if (!canRefundCost(player.inventory, recovered)) return reject('inventory-full');
+    refundCost(player.inventory, recovered);
+    for (const link of strandedLinks) {
+      if (link.carrierId) delete state.carriers[link.carrierId];
+      delete state.logisticsLinks[link.id];
+    }
     delete state.buildings[building.id];
     return accept([{ type: 'buildingDemolished', playerId: player.id, buildingId: building.id }]);
   }
@@ -1821,7 +2002,7 @@ export const applyCommand = (
     if (!recipe || !canStartRecipe(building, recipe))
       return reject(building.inventory.ore < 1 ? 'insufficient-ore' : 'inventory-full');
     consumeRecipe(building, recipe);
-    building.progress = recipe.ticks;
+    building.progress = recipeTicksFor(building, recipe.ticks);
     building.productionState = 'working';
     return accept([]);
   }
@@ -2024,8 +2205,17 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
           building.kind === onboardingRules.securingBuildingKind
         )
           reservation.securedTick = state.tick;
+        const upgradedTier = building.upgradeTier;
+        if (upgradedTier) {
+          // A finished tier is a rebuild: it comes out larger, tougher, and at full health.
+          building.tier = upgradedTier;
+          delete building.upgradeTier;
+          building.inventoryCapacity = tieredInventoryCapacity(building.kind, upgradedTier);
+          building.maxHealth = tieredMaxHealth(building.kind, upgradedTier);
+          building.health = building.maxHealth;
+        }
         events.push({
-          type: 'buildingCompleted',
+          type: upgradedTier ? 'buildingUpgraded' : 'buildingCompleted',
           buildingId: building.id,
           playerId: building.ownerId,
         });
@@ -2075,7 +2265,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
           building.progress = 0;
         } else {
           building.productionState = 'working';
-          if (building.progress === 0) building.progress = extractor.ticksPerUnit;
+          if (building.progress === 0) building.progress = extractionTicksFor(building);
           building.progress -= 1;
           if (building.progress === 0) {
             state.minedTiles[tileKey(deposit.x, deposit.y)] =
@@ -2117,7 +2307,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
       building.productionState = 'blocked-output';
     } else if (canStartRecipe(building, recipe)) {
       consumeRecipe(building, recipe);
-      building.progress = recipe.ticks;
+      building.progress = recipeTicksFor(building, recipe.ticks);
       building.productionState = 'working';
     }
   }
@@ -2153,22 +2343,117 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
     }
   }
   endPhase();
-  // Phase 5: logistics.
+  // Phase 5: logistics. Carriers on the road move and unload first, so a hauler that gets
+  // home this tick can be sent out again immediately and a delivery frees target capacity
+  // before the same tick's dispatch measures it.
   endPhase = beginPhase('logistics');
-  const sourceReservations = new Map<string, number>();
   const targetReservations = new Map<string, number>();
-  const logisticsReservations: Array<{
-    link: LogisticsLink;
-    amount: number;
-    travelTicks: number;
-  }> = [];
+  /** Room the target has left for one item, after active batches and earlier dispatches. */
+  const spaceFor = (target: Building, item: ItemId) => {
+    const outputReservation = outputReservationFor(target);
+    const totalOutputReservation = inventoryItems.reduce(
+      (total, reserved) => total + (outputReservation[reserved] ?? 0),
+      0,
+    );
+    return Math.min(
+      target.inventoryCapacity -
+        inventoryTotal(target.inventory) -
+        totalOutputReservation -
+        (targetReservations.get(target.id) ?? 0),
+      INVENTORY_CAPACITY -
+        target.inventory[item] -
+        (outputReservation[item] ?? 0) -
+        (targetReservations.get(`${target.id}:${item}`) ?? 0),
+    );
+  };
+  const reserveSpace = (target: Building, item: ItemId, amount: number) => {
+    targetReservations.set(target.id, (targetReservations.get(target.id) ?? 0) + amount);
+    const stackKey = `${target.id}:${item}`;
+    targetReservations.set(stackKey, (targetReservations.get(stackKey) ?? 0) + amount);
+  };
+  for (const carrier of Object.values(state.carriers).sort((left, right) =>
+    left.id.localeCompare(right.id),
+  )) {
+    const link = state.logisticsLinks[carrier.linkId];
+    const source = link ? state.buildings[link.sourceBuildingId] : undefined;
+    const target = link ? state.buildings[link.targetBuildingId] : undefined;
+    // Both deletion paths — demolition and account removal — recover cargo and drop the
+    // carrier with the link, so an orphan here can only be a corrupted world.
+    if (!link || !source || !target || !link.route?.length) {
+      delete state.carriers[carrier.id];
+      continue;
+    }
+    const steps = link.route.length / 2;
+    const destination = carrier.phase === 'outbound' ? steps : 0;
+    let budget = carrierMovementBudget(state, carrier.ownerId);
+    while (carrier.routeIndex !== destination) {
+      const nextIndex = carrier.routeIndex + (carrier.phase === 'outbound' ? 1 : -1);
+      const next =
+        nextIndex === 0 ? { x: source.x, y: source.y } : routeTile(link.route, nextIndex);
+      const cost = carrierStepCost(state, next.x, next.y);
+      if (cost > budget) break;
+      budget -= cost;
+      carrier.routeIndex = nextIndex;
+      carrier.x = next.x;
+      carrier.y = next.y;
+    }
+    if (carrier.routeIndex !== destination) {
+      link.status = 'in-transit';
+      continue;
+    }
+    if (carrier.phase === 'returning') {
+      delete state.carriers[carrier.id];
+      link.status = 'idle';
+      continue;
+    }
+    if (!acceptsLogisticsItem(target, carrier.item)) {
+      link.status = 'target-reconfigured';
+      continue;
+    }
+    const delivered = Math.min(carrier.cargo, Math.max(0, spaceFor(target, carrier.item)));
+    if (delivered < 1) {
+      // The target filled up while the carrier walked; it waits at the door with its load.
+      link.status = 'target-full';
+      continue;
+    }
+    reserveSpace(target, carrier.item, delivered);
+    target.inventory[carrier.item] += delivered;
+    carrier.cargo -= delivered;
+    link.status = 'transferred';
+    events.push({
+      type: 'carrierDelivered',
+      buildingId: target.id,
+      playerId: carrier.ownerId,
+    });
+    if (carrier.cargo === 0) carrier.phase = 'returning';
+  }
+  let carrierPathVisitsRemaining = CARRIER_PATH_VISITS_PER_TICK;
   for (const link of Object.values(state.logisticsLinks).sort(
     (left, right) => right.priority - left.priority || left.id.localeCompare(right.id),
   )) {
     const source = state.buildings[link.sourceBuildingId];
     const target = state.buildings[link.targetBuildingId];
     if (!source || !target) {
+      if (link.carrierId) delete state.carriers[link.carrierId];
       delete state.logisticsLinks[link.id];
+      continue;
+    }
+    link.carrierId ??= `carrier-${link.id}`;
+    // A link restored from an older world, or one whose only route was blocked, plans here
+    // instead of at creation. The shared budget keeps a world full of them bounded.
+    if (
+      link.route === undefined ||
+      (link.route.length === 0 && state.tick % CARRIER_ROUTE_RETRY_TICKS === 0)
+    ) {
+      if (carrierPathVisitsRemaining <= 0) continue;
+      const planned = planCarrierRoute(state, source, target);
+      carrierPathVisitsRemaining -= planned.visited;
+      link.route = planned.route;
+      link.routeDistance = planned.route.length / 2;
+    }
+    if (state.carriers[link.carrierId]) continue;
+    if (link.route.length === 0) {
+      link.status = 'no-route';
       continue;
     }
     if (link.priority === 0) {
@@ -2179,62 +2464,39 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
       link.status = 'constructing';
       continue;
     }
-    const route = carrierRouteFor(state, source, target);
-    link.carrierId ??= `carrier-${link.id}`;
-    link.routeDistance = route.distance;
-    if ((link.travelTicksRemaining ?? 0) > 0) {
-      link.travelTicksRemaining = (link.travelTicksRemaining ?? 0) - 1;
-      link.status = 'in-transit';
-      continue;
-    }
     if (!acceptsLogisticsItem(target, link.item)) {
       link.status = 'target-reconfigured';
       continue;
     }
-    const sourceKey = `${source.id}:${link.item}`;
-    const sourceAvailable = source.inventory[link.item] - (sourceReservations.get(sourceKey) ?? 0);
-    if (sourceAvailable < 1) {
+    if (source.inventory[link.item] < 1) {
       link.status = 'source-empty';
       continue;
     }
-    const targetKey = `${target.id}:${link.item}`;
-    const outputReservation = outputReservationFor(target);
-    const totalOutputReservation = inventoryItems.reduce(
-      (total, item) => total + (outputReservation[item] ?? 0),
-      0,
+    const load = Math.min(
+      link.capacityPerTrip,
+      source.inventory[link.item],
+      Math.max(0, spaceFor(target, link.item)),
     );
-    const availableCapacity =
-      target.inventoryCapacity -
-      inventoryTotal(target.inventory) -
-      totalOutputReservation -
-      (targetReservations.get(target.id) ?? 0);
-    const availableStack =
-      INVENTORY_CAPACITY -
-      target.inventory[link.item] -
-      (outputReservation[link.item] ?? 0) -
-      (targetReservations.get(targetKey) ?? 0);
-    const amount = Math.min(
-      link.throughputPerTick,
-      sourceAvailable,
-      availableCapacity,
-      availableStack,
-    );
-    if (amount < 1) {
+    if (load < 1) {
       link.status = 'target-full';
       continue;
     }
-    sourceReservations.set(sourceKey, (sourceReservations.get(sourceKey) ?? 0) + amount);
-    targetReservations.set(target.id, (targetReservations.get(target.id) ?? 0) + amount);
-    targetReservations.set(targetKey, (targetReservations.get(targetKey) ?? 0) + amount);
-    logisticsReservations.push({ link, amount, travelTicks: route.travelTicks });
-  }
-  for (const { link, amount, travelTicks } of logisticsReservations) {
-    const source = state.buildings[link.sourceBuildingId]!;
-    const target = state.buildings[link.targetBuildingId]!;
-    source.inventory[link.item] -= amount;
-    target.inventory[link.item] += amount;
-    link.travelTicksRemaining = travelTicks;
-    link.status = 'transferred';
+    // The load leaves the source now and exists only inside the carrier until it arrives,
+    // so a settlement's throughput is bounded by real travel rather than by a cooldown.
+    reserveSpace(target, link.item, load);
+    source.inventory[link.item] -= load;
+    state.carriers[link.carrierId] = {
+      id: link.carrierId,
+      linkId: link.id,
+      ownerId: link.ownerId,
+      x: source.x,
+      y: source.y,
+      item: link.item,
+      cargo: load,
+      routeIndex: 0,
+      phase: 'outbound',
+    };
+    link.status = 'in-transit';
   }
   endPhase();
   // Phase 6: threat-spawning.
@@ -2377,6 +2639,34 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
   endPhase = beginPhase('emit-events-and-mark-changes');
   endPhase();
   return events;
+};
+
+/**
+ * A stored route has to be a walkable chain from the source to the target, because carriers
+ * follow it without re-checking the ground. An empty route is the valid record of a search
+ * that found no way through.
+ */
+const isValidCarrierRoute = (
+  state: WorldState,
+  link: LogisticsLink,
+  source: Building | undefined,
+  target: Building | undefined,
+) => {
+  const route = link.route;
+  if (!route || !source || !target) return true;
+  if (route.length === 0) return true;
+  if (route.length % 2 !== 0 || route.length / 2 > roadRules.maxRouteTiles) return false;
+  let previous = { x: source.x, y: source.y };
+  for (let step = 1; step <= route.length / 2; step += 1) {
+    const tile = routeTile(route, step);
+    if (!Number.isSafeInteger(tile.x) || !Number.isSafeInteger(tile.y)) return false;
+    if (manhattanDistance(previous, tile) !== 1) return false;
+    const isEndpoint =
+      (tile.x === source.x && tile.y === source.y) || (tile.x === target.x && tile.y === target.y);
+    if (!isEndpoint && !isOpenTile(state.seed, tile.x, tile.y)) return false;
+    previous = tile;
+  }
+  return previous.x === target.x && previous.y === target.y;
 };
 
 export const snapshot = (state: WorldState): WorldState => structuredClone(state);
@@ -2528,12 +2818,25 @@ export const inspectWorld = (state: WorldState): string[] => {
       hasInvalidInventory(building.inventory)
     )
       errors.push(`building ${id} has invalid inventory`);
-    const constructionCost = constructionMaterialsFor(building.kind);
+    const constructionCost = maxConstructionMaterialsFor(building.kind);
     if (
       hasInvalidInventory(building.constructionMaterials) ||
       inventoryItems.some((item) => building.constructionMaterials[item] > constructionCost[item])
     )
       errors.push(`building ${id} has invalid construction materials`);
+    if (
+      (building.tier !== 1 && building.tier !== 2) ||
+      (building.tier === 2 && !isUpgradable(building.kind))
+    )
+      errors.push(`building ${id} has an invalid tier`);
+    if (
+      building.upgradeTier !== undefined &&
+      (building.upgradeTier !== 2 ||
+        building.tier !== 1 ||
+        building.constructionTicks === 0 ||
+        !isUpgradable(building.kind))
+    )
+      errors.push(`building ${id} has an invalid pending upgrade`);
     if (
       (isProducer(building.kind) &&
         (!building.recipeId || !recipeIdsFor(building.kind).includes(building.recipeId))) ||
@@ -2591,14 +2894,13 @@ export const inspectWorld = (state: WorldState): string[] => {
   }
   for (const [key, amount] of Object.entries(state.minedTiles)) {
     const [xText, yText] = key.split(':');
+    const x = Number(xText);
+    const y = Number(yText);
     if (
-      !Number.isSafeInteger(Number(xText)) ||
-      !Number.isSafeInteger(Number(yText)) ||
+      !Number.isSafeInteger(x) ||
+      !Number.isSafeInteger(y) ||
       !isNonNegativeInteger(amount) ||
-      amount >
-        (terrainAt(state.seed, Number(xText), Number(yText)) === 'wood'
-          ? resourceDefinitions.wood.yield
-          : resourceDefinitions.ore.yield)
+      amount > (depositAt(state.seed, x, y)?.yield ?? 0)
     )
       errors.push(`mined tile ${key} has an invalid depletion value`);
   }
@@ -2715,11 +3017,11 @@ export const inspectWorld = (state: WorldState): string[] => {
     if (!Number.isInteger(link.priority) || link.priority < 0 || link.priority > 3)
       errors.push(`logistics link ${id} has an invalid priority`);
     if (
-      !Number.isSafeInteger(link.throughputPerTick) ||
-      link.throughputPerTick < 1 ||
-      link.throughputPerTick > logisticsThroughput
+      !Number.isSafeInteger(link.capacityPerTrip) ||
+      link.capacityPerTrip < 1 ||
+      link.capacityPerTrip > logisticsCarrierCapacity
     )
-      errors.push(`logistics link ${id} has an invalid throughput`);
+      errors.push(`logistics link ${id} has an invalid carrier capacity`);
     if (
       ![
         'idle',
@@ -2730,15 +3032,44 @@ export const inspectWorld = (state: WorldState): string[] => {
         'target-reconfigured',
         'constructing',
         'in-transit',
+        'no-route',
       ].includes(link.status)
     )
       errors.push(`logistics link ${id} has an invalid status`);
     if (
       (link.carrierId !== undefined && link.carrierId !== `carrier-${id}`) ||
-      (link.routeDistance !== undefined && !isNonNegativeInteger(link.routeDistance)) ||
-      (link.travelTicksRemaining !== undefined && !isNonNegativeInteger(link.travelTicksRemaining))
+      (link.routeDistance !== undefined && !isNonNegativeInteger(link.routeDistance))
     )
       errors.push(`logistics link ${id} has invalid carrier state`);
+    if (link.route !== undefined && !isValidCarrierRoute(state, link, source, target))
+      errors.push(`logistics link ${id} has an invalid carrier route`);
+  }
+  for (const [id, carrier] of Object.entries(state.carriers)) {
+    registerEntity(carrier.id, 'carrier');
+    if (carrier.id !== id) errors.push(`carrier key ${id} does not match its id`);
+    const link = state.logisticsLinks[carrier.linkId];
+    const steps = (link?.route?.length ?? 0) / 2;
+    if (
+      !link ||
+      link.carrierId !== carrier.id ||
+      carrier.ownerId !== link.ownerId ||
+      carrier.item !== link.item ||
+      !state.players[carrier.ownerId]
+    )
+      errors.push(`carrier ${id} does not belong to a live logistics link`);
+    if (
+      !Number.isSafeInteger(carrier.x) ||
+      !Number.isSafeInteger(carrier.y) ||
+      !isNonNegativeInteger(carrier.cargo) ||
+      carrier.cargo > (link?.capacityPerTrip ?? 0) ||
+      !isNonNegativeInteger(carrier.routeIndex) ||
+      carrier.routeIndex > steps ||
+      (carrier.phase !== 'outbound' && carrier.phase !== 'returning') ||
+      // A hauler only turns for home once it is empty, and never walks out empty.
+      (carrier.phase === 'outbound' && carrier.cargo < 1) ||
+      (carrier.phase === 'returning' && carrier.cargo > 0)
+    )
+      errors.push(`carrier ${id} has invalid journey state`);
   }
   for (const definition of Object.values(cooperativeObjectiveDefinitions)) {
     const objective = state.cooperativeObjectives[definition.id];

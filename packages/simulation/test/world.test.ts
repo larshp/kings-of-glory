@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildings as buildingDefinitions,
+  buildingUpgrades,
   CONTENT_VERSION,
   extractors,
+  recipes,
   renewers,
   resources,
   terrainRules,
@@ -32,6 +34,7 @@ import {
   neighboringChunks,
   nextRandom,
   playerId as toPlayerId,
+  recipeTicksFor,
   runBotScenario,
   runInfrastructureStressScenario,
   profileInfrastructureStressScenario,
@@ -53,6 +56,16 @@ import {
  */
 const TEST_SEED = 117;
 const createWorld = (seed = TEST_SEED, peaceful = true) => createWorldWithSeed(seed, peaceful);
+
+/** Written out rather than imported so a fixture states every stack it expects to exist. */
+const emptyInventoryFixture = () => ({
+  ore: 0,
+  wood: 0,
+  stone: 0,
+  ingot: 0,
+  brick: 0,
+  tool: 0,
+});
 
 const oreTileFor = (world: ReturnType<typeof createWorld>, playerId = 'player-a') => {
   const player = world.players[playerId]!;
@@ -554,7 +567,14 @@ describe('world simulation', () => {
     ).toBe(true);
     const smelter = Object.values(world.buildings).find((building) => building.kind === 'smelter')!;
     expect(world.players['player-a']?.inventory.wood).toBe(2);
-    expect(smelter.constructionMaterials).toEqual({ ore: 0, wood: 3, ingot: 0, tool: 0 });
+    expect(smelter.constructionMaterials).toEqual({
+      ore: 0,
+      wood: 3,
+      stone: 0,
+      ingot: 0,
+      brick: 0,
+      tool: 0,
+    });
     world.players['player-a']!.population.total = 0;
     advanceTick(world);
     expect(smelter).toMatchObject({ constructionTicks: 10, constructionMaterials: { wood: 3 } });
@@ -710,12 +730,7 @@ describe('world simulation', () => {
       progress: 0,
       constructionTicks: 0,
     };
-    expect(deserializeWorld(legacy).buildings.center?.inventory).toEqual({
-      ore: 0,
-      wood: 0,
-      ingot: 0,
-      tool: 0,
-    });
+    expect(deserializeWorld(legacy).buildings.center?.inventory).toEqual(emptyInventoryFixture());
   });
 
   it('upgrades version 11 inventories with an empty tool stack', () => {
@@ -736,7 +751,7 @@ describe('world simulation', () => {
     for (const player of Object.values(legacy.players)) delete player.inventory.tool;
     for (const building of Object.values(legacy.buildings)) delete building.inventory.tool;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(29);
+    expect(migrated.schemaVersion).toBe(30);
     expect(migrated.players['player-a']?.inventory.tool).toBe(0);
     expect(migrated.buildings['center-player-a']?.inventory.tool).toBe(0);
   });
@@ -746,7 +761,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 14;
     delete legacy.randomState;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(29);
+    expect(migrated.schemaVersion).toBe(30);
     expect(migrated.randomState).toBeGreaterThan(0);
     expect(inspectWorld(migrated)).toEqual([]);
   });
@@ -797,7 +812,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 16;
     for (const building of Object.values(legacy.buildings)) delete building.recipeId;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(29);
+    expect(migrated.schemaVersion).toBe(30);
     expect(migrated.buildings['center-player-a']?.recipeId).toBeNull();
     expect(
       Object.values(migrated.buildings).find((building) => building.kind === 'workshop')?.recipeId,
@@ -819,7 +834,7 @@ describe('world simulation', () => {
           targetBuildingId: string;
           item: 'ore';
           priority: 1;
-          throughputPerTick?: number;
+          capacityPerTrip?: number;
           status?: string;
         }
       >;
@@ -835,10 +850,10 @@ describe('world simulation', () => {
       priority: 1,
     };
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(29);
+    expect(migrated.schemaVersion).toBe(30);
     expect(migrated.buildings['center-player-a']?.productionState).toBe('idle');
     expect(migrated.logisticsLinks.legacy).toMatchObject({
-      throughputPerTick: 1,
+      capacityPerTrip: 4,
       status: 'idle',
     });
   });
@@ -853,13 +868,10 @@ describe('world simulation', () => {
     legacy.schemaVersion = 18;
     for (const building of Object.values(legacy.buildings)) delete building.constructionMaterials;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(29);
-    expect(migrated.buildings['center-player-a']?.constructionMaterials).toEqual({
-      ore: 0,
-      wood: 0,
-      ingot: 0,
-      tool: 0,
-    });
+    expect(migrated.schemaVersion).toBe(30);
+    expect(migrated.buildings['center-player-a']?.constructionMaterials).toEqual(
+      emptyInventoryFixture(),
+    );
   });
 
   it('migrates version 12 mined-tile depletion onto deterministic ore deposits', () => {
@@ -873,7 +885,7 @@ describe('world simulation', () => {
     legacy.minedTiles = { '12:0': 3 };
     const node = nearestOreTile(legacy.seed, 12, 0, 16)!;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(29);
+    expect(migrated.schemaVersion).toBe(30);
     expect(migrated.minedTiles[`${node.x}:${node.y}`]).toBe(3);
   });
 
@@ -883,7 +895,7 @@ describe('world simulation', () => {
     void _objectives;
     void _activity;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 20 });
-    expect(migrated.schemaVersion).toBe(29);
+    expect(migrated.schemaVersion).toBe(30);
     expect(migrated.cooperativeObjectives['frontier-beacon']).toMatchObject({
       totalContributed: 0,
       completedTick: null,
@@ -901,7 +913,7 @@ describe('world simulation', () => {
     void _activity;
     void _projects;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 21 });
-    expect(migrated.schemaVersion).toBe(29);
+    expect(migrated.schemaVersion).toBe(30);
     expect(migrated.playerActivity['player-a']).toEqual({
       lastActiveTick: 41,
       raidEligibleTick: 341,
@@ -915,7 +927,7 @@ describe('world simulation', () => {
     const { sharedConstructionProjects: _projects, ...legacy } = current;
     void _projects;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 22 });
-    expect(migrated.schemaVersion).toBe(29);
+    expect(migrated.schemaVersion).toBe(30);
     expect(migrated.sharedConstructionProjects).toEqual({});
     expect(migrated.playerActivity).toEqual(current.playerActivity);
     expect(inspectWorld(migrated)).toEqual([]);
@@ -928,7 +940,7 @@ describe('world simulation', () => {
     const { social: _social, ...legacy } = current;
     void _social;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 23 });
-    expect(migrated.schemaVersion).toBe(29);
+    expect(migrated.schemaVersion).toBe(30);
     expect(migrated.social).toMatchObject({
       playerNames: { 'player-a': 'Settler 1', 'player-b': 'Settler 2' },
       settlementNames: {
@@ -953,7 +965,7 @@ describe('world simulation', () => {
     void _deletedPlayers;
     void _onboardingReservations;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 24 });
-    expect(migrated.schemaVersion).toBe(29);
+    expect(migrated.schemaVersion).toBe(30);
     expect(migrated.deletedPlayers).toEqual({});
     expect(inspectWorld(migrated)).toEqual([]);
   });
@@ -964,7 +976,7 @@ describe('world simulation', () => {
     const { onboardingReservations: _onboardingReservations, ...legacy } = current;
     void _onboardingReservations;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 25 });
-    expect(migrated.schemaVersion).toBe(29);
+    expect(migrated.schemaVersion).toBe(30);
     expect(migrated.onboardingReservations['player-a']).toEqual({
       createdTick: 0,
       expiresTick: 36_000,
@@ -978,7 +990,7 @@ describe('world simulation', () => {
     const { contentVersion: _contentVersion, ...legacy } = current;
     void _contentVersion;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 26 });
-    expect(migrated.schemaVersion).toBe(29);
+    expect(migrated.schemaVersion).toBe(30);
     expect(migrated.contentVersion).toBe(CONTENT_VERSION);
   });
 
@@ -1017,7 +1029,7 @@ describe('world simulation', () => {
       players: legacyPlayers,
     });
     expect(migrated).toMatchObject({
-      schemaVersion: 29,
+      schemaVersion: 30,
       contentVersion: CONTENT_VERSION,
       roads: {},
     });
@@ -1037,15 +1049,112 @@ describe('world simulation', () => {
   });
 
   it('rejects a version 27 snapshot written for incompatible content', () => {
+    // Each schema pins the content version it was written for, so a version 27 snapshot is
+    // measured against content 3 rather than against whatever the world runs now.
     expect(() =>
       deserializeWorld({
         ...createWorld(48),
         schemaVersion: 27,
         contentVersion: CONTENT_VERSION + 1,
       }),
-    ).toThrow(
-      `Unsupported world content version: ${CONTENT_VERSION + 1}; expected ${CONTENT_VERSION}`,
-    );
+    ).toThrow(`Unsupported world content version: ${CONTENT_VERSION + 1}; expected 3`);
+  });
+
+  it('migrates version 29 worlds onto masonry stacks, building tiers, and walking carriers', () => {
+    const current = createWorld(53);
+    joinPlayer(current, 'player-a');
+    const center = current.buildings['center-player-a']!;
+    const source = {
+      ...center,
+      id: toBuildingId('legacy-storage'),
+      kind: 'storage' as const,
+      x: center.x + 1,
+      inventoryCapacity: 200,
+      recipeId: null,
+    };
+    const target = {
+      ...center,
+      id: toBuildingId('legacy-smelter'),
+      kind: 'smelter' as const,
+      x: center.x + 2,
+      recipeId: 'smelt-ore',
+      inventoryCapacity: 20,
+      maxHealth: 10,
+      health: 10,
+    };
+    current.buildings[source.id] = source;
+    current.buildings[target.id] = target;
+    const legacy = {
+      ...current,
+      schemaVersion: 29,
+      contentVersion: 4,
+      // Version 29 had no carrier registry, and its links carried a per-tick throughput
+      // plus a cooldown standing in for the return journey.
+      carriers: undefined,
+      players: Object.fromEntries(
+        Object.entries(current.players).map(([id, player]) => {
+          const { stone: _stone, brick: _brick, ...inventory } = player.inventory;
+          void _stone;
+          void _brick;
+          const { masonry: _masonry, ...unlocked } = player.research.unlocked;
+          void _masonry;
+          return [id, { ...player, inventory, research: { ...player.research, unlocked } }];
+        }),
+      ),
+      buildings: Object.fromEntries(
+        Object.entries(current.buildings).map(([id, building]) => {
+          const { tier: _tier, inventory, constructionMaterials, ...rest } = building;
+          void _tier;
+          const { stone: _inventoryStone, brick: _inventoryBrick, ...legacyInventory } = inventory;
+          void _inventoryStone;
+          void _inventoryBrick;
+          const {
+            stone: _materialStone,
+            brick: _materialBrick,
+            ...legacyMaterials
+          } = constructionMaterials;
+          void _materialStone;
+          void _materialBrick;
+          return [
+            id,
+            { ...rest, inventory: legacyInventory, constructionMaterials: legacyMaterials },
+          ];
+        }),
+      ),
+      logisticsLinks: {
+        'legacy-link': {
+          id: 'legacy-link',
+          ownerId: toPlayerId('player-a'),
+          sourceBuildingId: source.id,
+          targetBuildingId: target.id,
+          item: 'ore' as const,
+          priority: 1 as const,
+          throughputPerTick: 1,
+          carrierId: 'carrier-legacy-link',
+          routeDistance: 0,
+          travelTicksRemaining: 3,
+          status: 'in-transit' as const,
+        },
+      },
+    };
+    const migrated = deserializeWorld(legacy);
+    expect(migrated.schemaVersion).toBe(30);
+    expect(migrated.contentVersion).toBe(CONTENT_VERSION);
+    expect(migrated.carriers).toEqual({});
+    expect(migrated.players['player-a']).toMatchObject({
+      inventory: { stone: 0, brick: 0 },
+      research: { unlocked: { masonry: false } },
+    });
+    expect(migrated.buildings[target.id]).toMatchObject({ tier: 1, inventory: { stone: 0 } });
+    const link = migrated.logisticsLinks['legacy-link']!;
+    expect(link.capacityPerTrip).toBe(4);
+    expect(link).not.toHaveProperty('throughputPerTick');
+    expect(link).not.toHaveProperty('travelTicksRemaining');
+    // The route is left unplanned so the first tick surveys it under the shared budget.
+    expect(link.route).toBeUndefined();
+    advanceTick(migrated);
+    expect(migrated.logisticsLinks['legacy-link']?.route).toEqual([target.x, target.y]);
+    expect(inspectWorld(migrated)).toEqual([]);
   });
 
   it('trims version 27 idempotency and transfer ledgers onto their retention windows', () => {
@@ -1059,7 +1168,7 @@ describe('world simulation', () => {
       ),
     };
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(29);
+    expect(migrated.schemaVersion).toBe(30);
     expect(migrated.processedCommands).toHaveLength(worldRetention.processedCommands);
     expect(migrated.processedCommands.at(0)).toBe('command-25');
     expect(migrated.processedCommands.at(-1)).toBe(
@@ -1662,7 +1771,7 @@ describe('world simulation', () => {
       kind: 'storage',
       x: blockedTile.x,
       y: blockedTile.y,
-      inventory: { ore: 0, wood: 0, ingot: 0, tool: 0 },
+      inventory: { ore: 0, wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 },
       inventoryCapacity: 200,
       populationCapacity: 0,
       jobPriority: 0,
@@ -1979,9 +2088,30 @@ describe('world simulation', () => {
       joinPlayer(world, 'player-a');
       joinPlayer(world, 'player-b');
       joinPlayer(world, 'player-c');
-      world.players['player-a']!.inventory = { ore: 0, wood: 0, ingot: 5, tool: 0 };
-      world.players['player-b']!.inventory = { ore: 0, wood: 0, ingot: 95, tool: 0 };
-      world.players['player-c']!.inventory = { ore: 0, wood: 0, ingot: 5, tool: 0 };
+      world.players['player-a']!.inventory = {
+        ore: 0,
+        wood: 0,
+        stone: 0,
+        ingot: 5,
+        brick: 0,
+        tool: 0,
+      };
+      world.players['player-b']!.inventory = {
+        ore: 0,
+        wood: 0,
+        stone: 0,
+        ingot: 95,
+        brick: 0,
+        tool: 0,
+      };
+      world.players['player-c']!.inventory = {
+        ore: 0,
+        wood: 0,
+        stone: 0,
+        ingot: 5,
+        brick: 0,
+        tool: 0,
+      };
       const transfer = (sender: 'player-a' | 'player-c') =>
         applyCommand(world, {
           id: `capacity-${sender}`,
@@ -2911,6 +3041,384 @@ describe('world simulation', () => {
     expect(inspectWorld(world)).toEqual([]);
   });
 
+  it('quarries stone from a mountain range and fires it into brick', () => {
+    const world = createWorld(47);
+    joinPlayer(world, 'player-a');
+    const player = world.players['player-a']!;
+    player.inventory.wood = 40;
+    player.research.unlocked.metallurgy = true;
+    player.research.unlocked.masonry = true;
+    // A starter plot is nearly clear ground, so claim the sector holding a nearby range and
+    // build the quarry on open ground beside it: the range itself stays unbuildable.
+    const range = (() => {
+      for (let x = player.plot.x - 16; x < player.plot.x + player.plot.size + 16; x += 1)
+        for (let y = player.plot.y - 16; y < player.plot.y + player.plot.size + 16; y += 1)
+          if (terrainAt(world.seed, x, y) === 'mountain') return { x, y };
+      return undefined;
+    })();
+    if (!range) throw new Error('Expected a mountain range near the seeded starter plot');
+    const quarrySite = (() => {
+      for (let offsetX = -extractors.quarry.range; offsetX <= extractors.quarry.range; offsetX += 1)
+        for (
+          let offsetY = -extractors.quarry.range;
+          offsetY <= extractors.quarry.range;
+          offsetY += 1
+        ) {
+          const tile = { x: range.x + offsetX, y: range.y + offsetY };
+          if (
+            Math.abs(offsetX) + Math.abs(offsetY) <= extractors.quarry.range &&
+            terrainAt(world.seed, tile.x, tile.y) === 'grass'
+          )
+            return tile;
+        }
+      return undefined;
+    })();
+    if (!quarrySite) throw new Error('Expected open ground beside the range');
+    for (const tile of [range, quarrySite])
+      player.territoryCells[`${Math.floor(tile.x / 8)}:${Math.floor(tile.y / 8)}`] = true;
+
+    expect(
+      applyCommand(world, {
+        id: 'quarry',
+        playerId: toPlayerId('player-a'),
+        sequence: 1,
+        type: 'placeQuarry',
+        ...quarrySite,
+      }).result.accepted,
+    ).toBe(true);
+    const quarry = Object.values(world.buildings).find((building) => building.kind === 'quarry')!;
+    for (let index = 0; index < buildingDefinitions.quarry.constructionTicks; index += 1)
+      advanceTick(world);
+    expect(quarry.constructionTicks).toBe(0);
+    for (let index = 0; index < extractors.quarry.ticksPerUnit; index += 1) advanceTick(world);
+    expect(quarry.inventory.stone).toBe(1);
+    const worked = extractableTile(world, quarry)!;
+    expect(terrainAt(world.seed, worked.x, worked.y)).toBe('mountain');
+    expect(world.minedTiles[`${worked.x}:${worked.y}`]).toBe(1);
+
+    // The brickworks turns that stone plus timber into brick, so masonry is a real chain
+    // rather than a second name for stone.
+    const brickSite = { x: quarrySite.x, y: quarrySite.y + 1 };
+    if (terrainAt(world.seed, brickSite.x, brickSite.y) !== 'grass')
+      throw new Error('Expected a second open tile beside the quarry');
+    expect(
+      applyCommand(world, {
+        id: 'brickworks',
+        playerId: toPlayerId('player-a'),
+        sequence: 2,
+        type: 'placeBrickworks',
+        ...brickSite,
+      }).result.accepted,
+    ).toBe(true);
+    const brickworks = Object.values(world.buildings).find(
+      (building) => building.kind === 'brickworks',
+    )!;
+    expect(brickworks.recipeId).toBe('fire-brick');
+    for (let index = 0; index < buildingDefinitions.brickworks.constructionTicks; index += 1)
+      advanceTick(world);
+    quarry.jobPriority = 0;
+    brickworks.inventory.stone = 2;
+    brickworks.inventory.wood = 1;
+    for (let index = 0; index <= recipes.fireBrick.ticks; index += 1) advanceTick(world);
+    expect(brickworks.inventory.brick).toBe(1);
+    expect(brickworks.inventory.stone).toBe(0);
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('rejects a quarry with no range in reach and gates the masonry chain behind research', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const player = world.players['player-a']!;
+    player.inventory.wood = 40;
+    const openTile = { x: player.plot.x, y: player.plot.y };
+    expect(
+      applyCommand(world, {
+        id: 'locked-quarry',
+        playerId: toPlayerId('player-a'),
+        sequence: 1,
+        type: 'placeQuarry',
+        ...openTile,
+      }).result,
+    ).toMatchObject({ code: 'technology-locked' });
+    player.research.unlocked.masonry = true;
+    // The seeded starter plot is clear ground, so nothing within range yields stone.
+    expect(
+      applyCommand(world, {
+        id: 'quarry-without-range',
+        playerId: toPlayerId('player-a'),
+        sequence: 2,
+        type: 'placeQuarry',
+        ...openTile,
+      }).result,
+    ).toMatchObject({ code: 'no-deposit-in-range' });
+    expect(player.inventory.wood).toBe(40);
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('raises a brick wall that outlasts timber buildings and blocks a raider route', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const player = world.players['player-a']!;
+    player.research.unlocked.metallurgy = true;
+    player.research.unlocked.masonry = true;
+    player.inventory.brick = 1;
+    const site = { x: player.plot.x, y: player.plot.y };
+    expect(
+      applyCommand(world, {
+        id: 'wall',
+        playerId: toPlayerId('player-a'),
+        sequence: 1,
+        type: 'placeWall',
+        ...site,
+      }).result.accepted,
+    ).toBe(true);
+    expect(player.inventory.brick).toBe(0);
+    const wall = Object.values(world.buildings).find((building) => building.kind === 'wall')!;
+    for (let index = 0; index < buildingDefinitions.wall.constructionTicks; index += 1)
+      advanceTick(world);
+    expect(wall.constructionTicks).toBe(0);
+    // Durability is the point of brick: a wall takes far more punishment than timber.
+    expect(wall.maxHealth).toBeGreaterThan(buildingDefinitions.watchtower.maxHealth * 2);
+    // Walls occupy a tile like any other building, so raider routes have to go around.
+    expect(
+      applyCommand(world, {
+        id: 'wall-on-wall',
+        playerId: toPlayerId('player-a'),
+        sequence: 2,
+        type: 'placeWall',
+        ...site,
+      }).result,
+    ).toMatchObject({ code: 'occupied' });
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('upgrades a smelter into a faster, larger, tougher second tier', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const player = world.players['player-a']!;
+    player.inventory.wood = 20;
+    expect(
+      applyCommand(world, {
+        id: 'smelter',
+        playerId: toPlayerId('player-a'),
+        sequence: 1,
+        type: 'placeSmelter',
+        x: 12,
+        y: 0,
+      }).result.accepted,
+    ).toBe(true);
+    for (let index = 0; index < 10; index += 1) advanceTick(world);
+    const smelter = Object.values(world.buildings).find((building) => building.kind === 'smelter')!;
+    expect(smelter).toMatchObject({ tier: 1, constructionTicks: 0 });
+    const upgrade = buildingUpgrades.smelter;
+
+    const request = (id: string, sequence: number) =>
+      applyCommand(world, {
+        id,
+        playerId: toPlayerId('player-a'),
+        sequence,
+        type: 'upgradeBuilding',
+        buildingId: smelter.id,
+      }).result;
+    expect(request('locked-upgrade', 2)).toMatchObject({ code: 'technology-locked' });
+    player.research.unlocked.masonry = true;
+    expect(request('unaffordable-upgrade', 3)).toMatchObject({ code: 'insufficient-resources' });
+    for (const [item, amount] of Object.entries(upgrade.cost))
+      player.inventory[item as 'tool' | 'brick'] = amount;
+    // An upgrade cannot interrupt a batch whose inputs are already consumed.
+    smelter.progress = 2;
+    expect(request('busy-upgrade', 4)).toMatchObject({ code: 'busy' });
+    smelter.progress = 0;
+
+    expect(request('upgrade', 5).accepted).toBe(true);
+    expect(player.inventory.brick).toBe(0);
+    expect(player.inventory.tool).toBe(0);
+    expect(smelter).toMatchObject({
+      tier: 1,
+      upgradeTier: 2,
+      constructionTicks: upgrade.constructionTicks,
+      productionState: 'constructing',
+    });
+    // The building stops working while the tier is built, and needs a worker like any site.
+    const tierEvents = Array.from({ length: upgrade.constructionTicks }, () =>
+      advanceTick(world),
+    ).flat();
+    expect(tierEvents).toContainEqual({
+      type: 'buildingUpgraded',
+      buildingId: smelter.id,
+      playerId: 'player-a',
+    });
+    expect(smelter.tier).toBe(2);
+    expect(smelter.upgradeTier).toBeUndefined();
+    expect(smelter.inventoryCapacity).toBe(
+      buildingDefinitions.smelter.inventoryCapacity * upgrade.inventoryCapacityMultiplier,
+    );
+    expect(smelter.maxHealth).toBeGreaterThan(buildingDefinitions.smelter.maxHealth);
+    expect(smelter.health).toBe(smelter.maxHealth);
+
+    // The tier is permanent, and the recipe now finishes in fewer ticks than at tier one.
+    expect(request('second-upgrade', 6)).toMatchObject({ code: 'already-upgraded' });
+    expect(recipeTicksFor(smelter, recipes.smeltOre.ticks)).toBeLessThan(recipes.smeltOre.ticks);
+    const tieredTicks = recipeTicksFor(smelter, recipes.smeltOre.ticks);
+    smelter.inventory.ore = 1;
+    // The batch is started with the tier's shorter duration, then counted down from there.
+    advanceTick(world);
+    expect(smelter.progress).toBe(tieredTicks);
+    for (let index = 0; index < tieredTicks; index += 1) advanceTick(world);
+    expect(smelter.inventory.ingot).toBe(1);
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('refunds an upgrade that is cancelled and leaves the working building in place', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const player = world.players['player-a']!;
+    player.inventory.wood = 20;
+    applyCommand(world, {
+      id: 'storage',
+      playerId: toPlayerId('player-a'),
+      sequence: 1,
+      type: 'placeStorage',
+      x: 12,
+      y: 0,
+    });
+    for (let index = 0; index < 10; index += 1) advanceTick(world);
+    const storage = Object.values(world.buildings).find((building) => building.kind === 'storage')!;
+    player.research.unlocked.masonry = true;
+    player.inventory.brick = buildingUpgrades.storage.cost.brick;
+    expect(
+      applyCommand(world, {
+        id: 'upgrade-storage',
+        playerId: toPlayerId('player-a'),
+        sequence: 2,
+        type: 'upgradeBuilding',
+        buildingId: storage.id,
+      }).result.accepted,
+    ).toBe(true);
+    expect(player.inventory.brick).toBe(0);
+    advanceTick(world);
+    expect(
+      applyCommand(world, {
+        id: 'cancel-upgrade',
+        playerId: toPlayerId('player-a'),
+        sequence: 3,
+        type: 'cancelConstruction',
+        buildingId: storage.id,
+      }).result.accepted,
+    ).toBe(true);
+    // Cancelling a tier returns its materials and keeps the tier-one building working,
+    // unlike cancelling a first-time construction, which removes the site entirely.
+    expect(player.inventory.brick).toBe(buildingUpgrades.storage.cost.brick);
+    expect(world.buildings[storage.id]).toBeDefined();
+    expect(storage).toMatchObject({ tier: 1, constructionTicks: 0, productionState: 'idle' });
+    expect(storage.upgradeTier).toBeUndefined();
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('recovers carrier cargo when a linked building is demolished', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const player = world.players['player-a']!;
+    player.inventory.wood = 20;
+    for (const [sequence, type, x] of [
+      [1, 'placeSmelter', 12],
+      [2, 'placeStorage', 16],
+    ] as const)
+      expect(
+        applyCommand(world, {
+          id: `${type}-${x}`,
+          playerId: toPlayerId('player-a'),
+          sequence,
+          type,
+          x,
+          y: 0,
+        }).result.accepted,
+      ).toBe(true);
+    for (let index = 0; index < 10; index += 1) advanceTick(world);
+    const smelter = Object.values(world.buildings).find((building) => building.kind === 'smelter')!;
+    const storage = Object.values(world.buildings).find((building) => building.kind === 'storage')!;
+    smelter.jobPriority = 0;
+    storage.inventory.ore = 4;
+    expect(
+      applyCommand(world, {
+        id: 'demolition-link',
+        playerId: toPlayerId('player-a'),
+        sequence: 3,
+        type: 'createLogisticsLink',
+        sourceBuildingId: storage.id,
+        targetBuildingId: smelter.id,
+        item: 'ore',
+      }).result.accepted,
+    ).toBe(true);
+    advanceTick(world);
+    const link = Object.values(world.logisticsLinks)[0]!;
+    expect(world.carriers[link.carrierId!]?.cargo).toBe(4);
+    expect(storage.inventory.ore).toBe(0);
+    player.inventory.wood = 0;
+    // The four ore exist only inside the carrier, so demolition has to hand them back
+    // rather than let them disappear with the link.
+    expect(
+      applyCommand(world, {
+        id: 'demolish-target',
+        playerId: toPlayerId('player-a'),
+        sequence: 4,
+        type: 'demolish',
+        buildingId: smelter.id,
+      }).result.accepted,
+    ).toBe(true);
+    expect(player.inventory.ore).toBe(4);
+    expect(world.carriers).toEqual({});
+    expect(world.logisticsLinks).toEqual({});
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('returns a loaded carrier to its source when its link is removed', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    world.players['player-a']!.inventory.wood = 20;
+    for (const [sequence, type, x] of [
+      [1, 'placeSmelter', 12],
+      [2, 'placeStorage', 16],
+    ] as const)
+      applyCommand(world, {
+        id: `${type}-${x}`,
+        playerId: toPlayerId('player-a'),
+        sequence,
+        type,
+        x,
+        y: 0,
+      });
+    for (let index = 0; index < 10; index += 1) advanceTick(world);
+    const smelter = Object.values(world.buildings).find((building) => building.kind === 'smelter')!;
+    const storage = Object.values(world.buildings).find((building) => building.kind === 'storage')!;
+    smelter.jobPriority = 0;
+    storage.inventory.ore = 4;
+    applyCommand(world, {
+      id: 'removable-link',
+      playerId: toPlayerId('player-a'),
+      sequence: 3,
+      type: 'createLogisticsLink',
+      sourceBuildingId: storage.id,
+      targetBuildingId: smelter.id,
+      item: 'ore',
+    });
+    advanceTick(world);
+    const link = Object.values(world.logisticsLinks)[0]!;
+    expect(world.carriers[link.carrierId!]?.cargo).toBe(4);
+    expect(
+      applyCommand(world, {
+        id: 'remove-loaded-link',
+        playerId: toPlayerId('player-a'),
+        sequence: 4,
+        type: 'removeLogisticsLink',
+        linkId: link.id,
+      }).result.accepted,
+    ).toBe(true);
+    expect(storage.inventory.ore).toBe(4);
+    expect(world.carriers).toEqual({});
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
   it('lets a staffed forester restore previously harvested timber', () => {
     const world = createWorld();
     joinPlayer(world, 'player-a');
@@ -3175,12 +3683,20 @@ describe('world simulation', () => {
     };
     expect(applyCommand(world, link).result.accepted).toBe(true);
     expect(applyCommand(world, link).result).toMatchObject({ code: 'duplicate-command' });
+    // The first tick loads the carrier: the items leave the source and exist only inside
+    // the carrier until it arrives, so nothing is duplicated at any point on the journey.
     advanceTick(world);
-    expect(storage.inventory.ore).toBe(1);
-    expect(smelter.inventory.ore).toBe(1);
     expect(Object.keys(world.logisticsLinks)).toHaveLength(1);
     const createdLink = Object.values(world.logisticsLinks)[0]!;
-    expect(createdLink).toMatchObject({ throughputPerTick: 1, status: 'transferred' });
+    expect(createdLink).toMatchObject({ capacityPerTrip: 4, status: 'in-transit' });
+    const carrier = world.carriers[createdLink.carrierId!]!;
+    expect(carrier).toMatchObject({ item: 'ore', cargo: 2, phase: 'outbound' });
+    expect(storage.inventory.ore).toBe(0);
+    expect(smelter.inventory.ore).toBe(0);
+    // Storage and smelter are adjacent, so the next tick arrives and unloads.
+    advanceTick(world);
+    expect(smelter.inventory.ore).toBe(2);
+    expect(world.logisticsLinks[createdLink.id]?.status).toBe('transferred');
     expect(
       applyCommand(world, {
         id: 'prioritize-link',
@@ -3192,8 +3708,18 @@ describe('world simulation', () => {
       }).result.accepted,
     ).toBe(true);
     expect(world.logisticsLinks[createdLink.id]?.priority).toBe(3);
+    // Walk the carrier home so the link is free to dispatch again.
+    advanceTick(world);
+    expect(world.carriers[createdLink.carrierId!]).toBeUndefined();
     storage.inventory.ore = 1;
-    smelter.inventory = { ore: smelter.inventoryCapacity - 1, wood: 0, ingot: 0, tool: 0 };
+    smelter.inventory = {
+      ore: smelter.inventoryCapacity - 1,
+      wood: 0,
+      stone: 0,
+      ingot: 0,
+      brick: 0,
+      tool: 0,
+    };
     smelter.progress = 3;
     advanceTick(world);
     expect(world.logisticsLinks[createdLink.id]?.status).toBe('target-full');
@@ -3201,9 +3727,10 @@ describe('world simulation', () => {
     delete world.buildings[storage.id];
     advanceTick(world);
     expect(Object.keys(world.logisticsLinks)).toHaveLength(0);
+    expect(world.carriers).toEqual({});
   });
 
-  it('uses a carrier cooldown for distance and lets an owned road remove it', () => {
+  it('walks a loaded carrier along its route and pays for paving with movement', () => {
     const world = createWorld();
     joinPlayer(world, 'player-a');
     const player = world.players['player-a']!;
@@ -3241,15 +3768,28 @@ describe('world simulation', () => {
       }).result.accepted,
     ).toBe(true);
     const link = Object.values(world.logisticsLinks)[0]!;
+    // The route runs along the row between the two buildings, so it is seven tiles long
+    // and every step is unpaved ground at first.
+    expect(link).toMatchObject({ carrierId: `carrier-${link.id}`, routeDistance: 7 });
+    expect(link.route).toEqual([18, 0, 17, 0, 16, 0, 15, 0, 14, 0, 13, 0, 12, 0]);
     advanceTick(world);
-    expect(link).toMatchObject({
-      carrierId: `carrier-${link.id}`,
-      routeDistance: 7,
-      travelTicksRemaining: 1,
-      status: 'transferred',
-    });
+    const carrier = world.carriers[link.carrierId!]!;
+    expect(carrier).toMatchObject({ cargo: 3, phase: 'outbound', routeIndex: 0 });
+    expect(link.status).toBe('in-transit');
+    // Engineering buys six movement points a tick and unpaved ground costs two, so the
+    // carrier covers three tiles per tick and the whole load is in flight, not duplicated.
     advanceTick(world);
-    expect(link).toMatchObject({ travelTicksRemaining: 0, status: 'in-transit' });
+    expect(carrier).toMatchObject({ routeIndex: 3, x: 16, y: 0 });
+    expect(storage.inventory.ore).toBe(0);
+    expect(smelter.inventory.ore).toBe(0);
+    advanceTick(world);
+    expect(carrier).toMatchObject({ routeIndex: 6, x: 13, y: 0 });
+    advanceTick(world);
+    expect(smelter.inventory.ore).toBe(3);
+    expect(link.status).toBe('transferred');
+    expect(world.carriers[link.carrierId!]?.phase).toBe('returning');
+    // Paving a step on the route halves its cost, so the return journey is measurably
+    // shorter than the outbound one over the same tiles.
     expect(
       applyCommand(world, {
         id: 'road-on-carrier-route',
@@ -3262,10 +3802,66 @@ describe('world simulation', () => {
     ).toBe(true);
     expect(world.roads['13:0']).toBe('player-a');
     advanceTick(world);
-    expect(link).toMatchObject({ travelTicksRemaining: 0, status: 'transferred' });
+    // Three unpaved steps cost six of the six points available; the paved tile costs one,
+    // so the same budget now carries the carrier a fourth tile on the way home.
+    expect(world.carriers[link.carrierId!]).toMatchObject({ routeIndex: 4, x: 15, y: 0 });
     advanceTick(world);
-    expect(link.status).toBe('transferred');
-    expect(smelter.inventory.ore).toBe(3);
+    advanceTick(world);
+    expect(world.carriers[link.carrierId!]).toBeUndefined();
+    expect(link.status).toBe('source-empty');
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('reports a link whose endpoints no open route connects instead of moving items', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const center = world.buildings['center-player-a']!;
+    // Built directly rather than placed, so the fixture can put a storage on the far side of
+    // a wall of water and check that a link across it is reported instead of silently idling.
+    const island = {
+      ...center,
+      id: toBuildingId('island-storage'),
+      kind: 'storage' as const,
+      x: center.x + 40,
+      y: center.y + 40,
+      inventoryCapacity: 200,
+      recipeId: null,
+      productionState: 'idle' as const,
+      inventory: { ore: 5, wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 },
+    };
+    const smelter = {
+      ...center,
+      id: toBuildingId('linked-smelter'),
+      kind: 'smelter' as const,
+      x: center.x + 1,
+      inventoryCapacity: 20,
+      maxHealth: 10,
+      health: 10,
+      recipeId: 'smelt-ore',
+      productionState: 'idle' as const,
+      inventory: emptyInventoryFixture(),
+    };
+    world.buildings[island.id] = island;
+    world.buildings[smelter.id] = smelter;
+    expect(
+      applyCommand(world, {
+        id: 'unreachable-link',
+        playerId: toPlayerId('player-a'),
+        sequence: 1,
+        type: 'createLogisticsLink',
+        sourceBuildingId: island.id,
+        targetBuildingId: smelter.id,
+        item: 'ore',
+      }).result.accepted,
+    ).toBe(true);
+    const link = Object.values(world.logisticsLinks)[0]!;
+    // The bounded search cannot reach 80 tiles away, so the link says so rather than
+    // pretending to work, and no carrier or item is created.
+    expect(link).toMatchObject({ status: 'no-route', route: [], routeDistance: 0 });
+    advanceTick(world);
+    expect(world.carriers).toEqual({});
+    expect(link.status).toBe('no-route');
+    expect(island.inventory.ore).toBe(5);
     expect(inspectWorld(world)).toEqual([]);
   });
 
@@ -3327,10 +3923,16 @@ describe('world simulation', () => {
         priority: 3,
       }).result.accepted,
     ).toBe(true);
+    // The urgent link reserves the last input slot, so only its carrier loads; the normal
+    // link keeps its ore rather than sending a carrier that could not unload on arrival.
     advanceTick(world);
-    expect(smelter.inventory.ore).toBe(smelter.inventoryCapacity);
     expect(urgentSource.inventory.ore).toBe(0);
     expect(normalSource.inventory.ore).toBe(1);
+    expect(world.logisticsLinks[urgentLink.id]?.status).toBe('in-transit');
+    advanceTick(world);
+    expect(smelter.inventory.ore).toBe(smelter.inventoryCapacity);
+    expect(normalSource.inventory.ore).toBe(1);
+    expect(inspectWorld(world)).toEqual([]);
   });
 
   it('preserves recipe material and transport capacity invariants across generated cases', () => {
@@ -3345,7 +3947,7 @@ describe('world simulation', () => {
         id: toBuildingId(sourceId),
         kind: 'storage' as const,
         x: center.x + 1,
-        inventory: { ore: (seed * 7) % 101, wood: 0, ingot: 0, tool: 0 },
+        inventory: { ore: (seed * 7) % 101, wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 },
         inventoryCapacity: 200,
         populationCapacity: 0,
         jobPriority: 0 as const,
@@ -3357,7 +3959,7 @@ describe('world simulation', () => {
         id: toBuildingId(targetId),
         kind: 'smelter' as const,
         x: center.x + 2,
-        inventory: { ore: (seed * 11) % 20, wood: 0, ingot: 0, tool: 0 },
+        inventory: { ore: (seed * 11) % 20, wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 },
         inventoryCapacity: 20,
         populationCapacity: 0,
         jobPriority: 0 as const,
@@ -3378,15 +3980,24 @@ describe('world simulation', () => {
           item: 'ore',
         }).result.accepted,
       ).toBe(true);
-      const before = source.inventory.ore + target.inventory.ore;
-      advanceTick(world);
-      const after = source.inventory.ore + target.inventory.ore;
+      // Ore in flight lives in the carrier, so conservation now spans three places rather
+      // than two: source stock, target stock, and whatever is on the road between them.
+      const inFlight = () =>
+        Object.values(world.carriers).reduce(
+          (total, carrier) => total + (carrier.item === 'ore' ? carrier.cargo : 0),
+          0,
+        );
+      const before = source.inventory.ore + target.inventory.ore + inFlight();
+      // Long enough for a carrier to load, walk one tile, unload, and walk home again.
+      for (let tickIndex = 0; tickIndex < 4; tickIndex += 1) advanceTick(world);
+      const after = source.inventory.ore + target.inventory.ore + inFlight();
       expect(after).toBe(before);
       expect(source.inventory.ore).toBeGreaterThanOrEqual(0);
       expect(target.inventory.ore).toBeGreaterThanOrEqual(0);
       expect(target.inventory.ore + target.inventory.ingot).toBeLessThanOrEqual(
         target.inventoryCapacity,
       );
+      expect(inspectWorld(world)).toEqual([]);
 
       const recipeWorld = createWorld(seed + 100);
       joinPlayer(recipeWorld, 'player-a');
@@ -3396,7 +4007,7 @@ describe('world simulation', () => {
         id: toBuildingId(`property-recipe-${seed}`),
         kind: 'smelter' as const,
         x: recipeCenter.x + 1,
-        inventory: { ore: 1 + (seed % 5), wood: 0, ingot: 0, tool: 0 },
+        inventory: { ore: 1 + (seed % 5), wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 },
         inventoryCapacity: 20,
         populationCapacity: 0,
         jobPriority: 1 as const,
@@ -3472,8 +4083,13 @@ describe('world simulation', () => {
       }).result,
     ).toMatchObject({ code: 'invalid-logistics-link' });
     advanceTick(world);
+    // The ingot leaves the smelter with the carrier and arrives on the following tick,
+    // and no return link exists to carry it back the other way.
     expect(smelter.inventory.ingot).toBe(0);
+    expect(workshop.inventory.ingot).toBe(0);
+    advanceTick(world);
     expect(workshop.inventory.ingot).toBe(1);
+    expect(inspectWorld(world)).toEqual([]);
   });
 
   it('assigns limited workers to the highest-priority smelters deterministically', () => {
@@ -3582,7 +4198,7 @@ describe('world simulation', () => {
     expect(workshop.inventory).toEqual(inventoryBeforeSwitch);
     advanceTick(world);
     expect(workshop.progress).toBe(4);
-    expect(workshop.inventory).toEqual({ ore: 0, wood: 0, ingot: 0, tool: 0 });
+    expect(workshop.inventory).toEqual({ ore: 0, wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 });
     expect(
       applyCommand(world, {
         id: 'change-busy-recipe',
@@ -3616,7 +4232,7 @@ describe('world simulation', () => {
       id: toBuildingId('copy-source'),
       kind: 'workshop' as const,
       x: center.x + 1,
-      inventory: { ore: 0, wood: 0, ingot: 2, tool: 0 },
+      inventory: { ore: 0, wood: 0, stone: 0, ingot: 2, brick: 0, tool: 0 },
       inventoryCapacity: 30,
       populationCapacity: 0,
       jobPriority: 3 as const,
@@ -3627,7 +4243,7 @@ describe('world simulation', () => {
       ...source,
       id: toBuildingId('copy-target'),
       x: center.x + 2,
-      inventory: { ore: 0, wood: 1, ingot: 1, tool: 0 },
+      inventory: { ore: 0, wood: 1, stone: 0, ingot: 1, brick: 0, tool: 0 },
       jobPriority: 0 as const,
       recipeId: 'forge-tool',
     };
@@ -3716,7 +4332,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 7;
     delete legacy.settlements;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(29);
+    expect(migrated.schemaVersion).toBe(30);
     expect(migrated.settlements['settlement-player-a']?.members['player-a']).toBe('owner');
   });
 
@@ -3782,7 +4398,7 @@ describe('world simulation', () => {
       id: toBuildingId('player-a'),
       x: 0.5,
     };
-    world.minedTiles['0:0'] = 11;
+    world.minedTiles['0:0'] = resources.mountain.yield + 1;
     expect(inspectWorld(world)).toEqual(
       expect.arrayContaining([
         'world has an invalid tick',

@@ -28,8 +28,8 @@ export interface Tile {
   readonly y: number;
 }
 
-/** The four carryable items; logistics and transfers are all expressed in them. */
-export type ItemKind = 'ore' | 'wood' | 'ingot' | 'tool';
+/** The carryable items; logistics and transfers are all expressed in them. */
+export type { ItemKind } from '@kings/simulation';
 
 /** Every panel renders as a tab panel that the tab strip shows or hides. */
 export interface TabPanelProps {

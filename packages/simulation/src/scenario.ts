@@ -4,9 +4,12 @@ import {
   advanceTick,
   applyCommand,
   createWorld,
+  emptyInventory,
   inspectWorld,
   isOpenTile,
   joinPlayer,
+  logisticsCarrierCapacity,
+  logisticsRouteFor,
   nearestOreTile,
   stateHash,
   type Building,
@@ -379,7 +382,7 @@ const createInfrastructureStressState = (pairCount: number): WorldState => {
       kind: 'storage',
       x: index * 2,
       y: 0,
-      inventory: { ore: 1, wood: 0, ingot: 0, tool: 0 },
+      inventory: { ...emptyInventory(), ore: 1 },
       inventoryCapacity: 200,
       populationCapacity: 0,
       jobPriority: 0,
@@ -393,11 +396,14 @@ const createInfrastructureStressState = (pairCount: number): WorldState => {
       x: index * 2 + 1,
       maxHealth: 10,
       health: 10,
-      inventory: { ore: 0, wood: 0, ingot: 0, tool: 0 },
+      inventory: emptyInventory(),
       inventoryCapacity: 20,
       jobPriority: 0,
       recipeId: 'smelt-ore',
     };
+    // Routes come from the same planner the create-link command uses, because this fixture
+    // stands in for a world where every link was already established.
+    const route = logisticsRouteFor(state, source, target);
     const link: LogisticsLink = {
       id: `stress-link-${index}`,
       ownerId,
@@ -405,7 +411,10 @@ const createInfrastructureStressState = (pairCount: number): WorldState => {
       targetBuildingId: target.id,
       item: 'ore',
       priority: index % 4 === 0 ? 3 : 1,
-      throughputPerTick: 1,
+      capacityPerTrip: logisticsCarrierCapacity,
+      carrierId: `carrier-stress-link-${index}`,
+      route,
+      routeDistance: route.length / 2,
       status: 'idle',
     };
     state.buildings[sourceId] = source;

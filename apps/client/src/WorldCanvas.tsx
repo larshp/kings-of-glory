@@ -1,7 +1,13 @@
 import { useEffect, useRef } from 'react';
 import { threats as threatDefinitions } from '@kings/content';
 import type { TerrainTile } from '@kings/protocol';
-import type { Building, LandmarkDiscovery, LogisticsLink, Threat } from '@kings/simulation';
+import type {
+  Building,
+  Carrier,
+  LandmarkDiscovery,
+  LogisticsLink,
+  Threat,
+} from '@kings/simulation';
 import type { CameraBindings } from './preferences.js';
 import { drawSprite, type RenderAssets, type SpriteId } from './render-assets.js';
 import {
@@ -56,6 +62,7 @@ export interface WorldCanvasDebugState {
 export const WorldCanvas = ({
   buildings,
   threats,
+  carriers,
   terrain,
   elevation,
   minedTiles,
@@ -82,6 +89,7 @@ export const WorldCanvas = ({
 }: {
   buildings: readonly Building[];
   threats: readonly Threat[];
+  carriers: readonly Carrier[];
   terrain: Readonly<Record<string, TerrainTile>>;
   elevation: Readonly<Record<string, number>>;
   minedTiles: Readonly<Record<string, number>>;
@@ -110,6 +118,7 @@ export const WorldCanvas = ({
   const viewport = useRef<Viewport>({ panX: 0, panY: 0, scale: 1 });
   const latestBuildings = useRef(buildings);
   const latestThreats = useRef(threats);
+  const latestCarriers = useRef(carriers);
   const latestTerrain = useRef(terrain);
   const latestElevation = useRef(elevation);
   const latestMinedTiles = useRef(minedTiles);
@@ -135,6 +144,7 @@ export const WorldCanvas = ({
   const latestDebug = useRef(debug);
   latestBuildings.current = buildings;
   latestThreats.current = threats;
+  latestCarriers.current = carriers;
   latestTerrain.current = terrain;
   latestElevation.current = elevation;
   latestMinedTiles.current = minedTiles;
@@ -276,6 +286,16 @@ export const WorldCanvas = ({
       context.fillStyle = ratio > 0.6 ? '#8fd694' : ratio > 0.3 ? '#f0c060' : '#e2706a';
       context.fillRect(barX, barY, Math.max(1, Math.round(width * ratio)), 4);
     };
+    const drawCargoTally = (x: number, y: number, cargo: number) => {
+      const position = tilePoint(x, y);
+      context.font = 'bold 10px system-ui';
+      context.fillStyle = '#0d1420';
+      context.beginPath();
+      context.roundRect(position.x + TILE_WIDTH / 2 + 4, position.y - 4, 15, 12, 3);
+      context.fill();
+      context.fillStyle = '#f6d365';
+      context.fillText(String(cargo), position.x + TILE_WIDTH / 2 + 8, position.y + 5);
+    };
     const terrainAt = (x: number, y: number) => latestTerrain.current[`${x}:${y}`];
     const levelAt = (x: number, y: number) => latestElevation.current[`${x}:${y}`] ?? 0;
     const sectorOwnerAt = (x: number, y: number) =>
@@ -394,14 +414,24 @@ export const WorldCanvas = ({
         for (let x = chunk.minX; x <= chunk.maxX; x += 1)
           for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
             const resource = latestTerrain.current[`${x}:${y}`];
-            if (resource !== 'ore' && resource !== 'wood') continue;
+            if (resource !== 'ore' && resource !== 'wood' && resource !== 'mountain') continue;
+            const level = levelAt(x, y);
             const point = tilePoint(x, y);
+            const raisedPoint = { x: point.x, y: point.y - level * ELEVATION_STEP };
             diamond(
-              point,
-              resource === 'ore' ? 'rgba(159, 188, 255, 0.32)' : 'rgba(139, 216, 134, 0.28)',
+              raisedPoint,
+              resource === 'ore'
+                ? 'rgba(159, 188, 255, 0.32)'
+                : resource === 'wood'
+                  ? 'rgba(139, 216, 134, 0.28)'
+                  : 'rgba(226, 214, 190, 0.3)',
             );
             context.fillStyle = '#f4f0df';
-            context.fillText(resource === 'ore' ? 'Ore' : 'Wood', point.x + 23, point.y + 21);
+            context.fillText(
+              resource === 'ore' ? 'Ore' : resource === 'wood' ? 'Wood' : 'Stone',
+              raisedPoint.x + 21,
+              raisedPoint.y + 21,
+            );
           }
     }
     /**
@@ -506,11 +536,26 @@ export const WorldCanvas = ({
         );
       },
     }));
+    const carrierDrawables = visibleByIsometricDepth(
+      latestCarriers.current,
+      tileBounds.center,
+      visibleRadius,
+    ).map((carrier) => ({
+      depth: carrier.x + carrier.y,
+      y: carrier.y,
+      order: 3,
+      draw: () => {
+        drawContactShadow(carrier.x, carrier.y, 11);
+        drawEntitySprite('carrier', carrier.x, carrier.y);
+        if (carrier.cargo > 0) drawCargoTally(carrier.x, carrier.y, carrier.cargo);
+      },
+    }));
     for (const drawable of [
       ...raised,
       ...resourceDrawables,
       ...buildingDrawables,
       ...threatDrawables,
+      ...carrierDrawables,
     ].sort(compareIsometricDrawables))
       drawable.draw();
     const operationsOverlay = latestOperationsOverlay.current;
@@ -526,9 +571,17 @@ export const WorldCanvas = ({
         if (!source || !target) continue;
         const sourcePoint = tilePoint(source.x, source.y);
         const targetPoint = tilePoint(target.x, target.y);
+        // Drawn along the route the carrier actually walks, so a detour around a range or
+        // the payoff of a paved stretch is visible instead of implied by a straight line.
+        const route = link.route ?? [];
         context.beginPath();
         context.moveTo(sourcePoint.x + TILE_WIDTH / 2, sourcePoint.y + TILE_HEIGHT / 2);
-        context.lineTo(targetPoint.x + TILE_WIDTH / 2, targetPoint.y + TILE_HEIGHT / 2);
+        for (let step = 0; step < route.length; step += 2) {
+          const point = tilePoint(route[step]!, route[step + 1]!);
+          context.lineTo(point.x + TILE_WIDTH / 2, point.y + TILE_HEIGHT / 2);
+        }
+        if (route.length === 0)
+          context.lineTo(targetPoint.x + TILE_WIDTH / 2, targetPoint.y + TILE_HEIGHT / 2);
         context.strokeStyle = logisticsStatusColor(link.status);
         context.lineWidth = 3;
         context.setLineDash(link.status === 'transferred' ? [] : [5, 3]);
@@ -537,7 +590,7 @@ export const WorldCanvas = ({
         context.fillStyle = '#f4f0df';
         context.font = '10px system-ui';
         context.fillText(
-          `${link.item} ${link.throughputPerTick}/t`,
+          `${link.item} ${link.capacityPerTrip}/trip`,
           (sourcePoint.x + targetPoint.x) / 2 + TILE_WIDTH / 2,
           (sourcePoint.y + targetPoint.y) / 2 + TILE_HEIGHT / 2,
         );
@@ -641,6 +694,9 @@ export const WorldCanvas = ({
           (candidate) => candidate.x === hovered.x && candidate.y === hovered.y,
         ),
         threat: latestThreats.current.find(
+          (candidate) => candidate.x === hovered.x && candidate.y === hovered.y,
+        ),
+        carrier: latestCarriers.current.find(
           (candidate) => candidate.x === hovered.x && candidate.y === hovered.y,
         ),
       });

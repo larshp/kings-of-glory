@@ -9,7 +9,7 @@ import {
 } from '../information-search.js';
 import type { NotificationSeverity } from '../notifications.js';
 import { technologyCostLabel } from './labels.js';
-import type { PlayerView, SendCommand, TabPanelProps } from './types.js';
+import type { ItemKind, PlayerView, SendCommand, TabPanelProps } from './types.js';
 
 type AlertEntry = InformationEntry & { readonly severity: NotificationSeverity };
 
@@ -22,9 +22,7 @@ export interface SettlementPanelProps extends TabPanelProps {
   readonly hasCompletedHearth: boolean;
   readonly exploredChunkCount: number;
   readonly visibleChunkCount: number;
-  readonly canAffordTechnology: (
-    cost: Readonly<Partial<Record<'ore' | 'wood' | 'ingot' | 'tool', number>>>,
-  ) => boolean;
+  readonly canAffordTechnology: (cost: Readonly<Partial<Record<ItemKind, number>>>) => boolean;
   readonly activeAlertEntries: readonly AlertEntry[];
   readonly alertGroups: readonly {
     readonly severity: NotificationSeverity;
@@ -151,6 +149,10 @@ export const SettlementPanel = ({
           <li className={player.research.unlocked['territorial-charter'] ? 'complete' : undefined}>
             Expansion: research the Territorial Charter to claim explored sectors.
           </li>
+          <li className={player.research.unlocked.masonry ? 'complete' : undefined}>
+            Masonry: quarry stone from the ranges, fire it into brick, then raise walls and upgrade
+            buildings to their second tier.
+          </li>
           <li
             className={
               player.research.unlocked.engineering || player.research.unlocked.stewardship
@@ -158,8 +160,8 @@ export const SettlementPanel = ({
                 : undefined
             }
           >
-            Development: choose Engineering for road logistics or Stewardship for renewable timber.
-            This choice is permanent.
+            Development: choose Engineering for faster carriers and roads, or Stewardship for
+            renewable timber. This choice is permanent.
           </li>
         </ol>
         <p>
@@ -188,6 +190,18 @@ export const SettlementPanel = ({
         >
           Research {technologies['territorial-charter'].displayName} (
           {technologyCostLabel(technologies['territorial-charter'].cost)})
+        </button>
+        <button
+          disabled={
+            Boolean(player.research.activeTechnology) ||
+            !player.research.unlocked.metallurgy ||
+            player.research.unlocked.masonry ||
+            !canAffordTechnology(technologies.masonry.cost)
+          }
+          onClick={() => send({ type: 'research', technologyId: 'masonry' })}
+        >
+          Research {technologies.masonry.displayName} (
+          {technologyCostLabel(technologies.masonry.cost)})
         </button>
         <button
           disabled={

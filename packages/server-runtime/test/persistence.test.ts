@@ -284,7 +284,14 @@ describe('durable world recovery', () => {
     expect(Object.keys(message.state.onboardingReservations)).toEqual(['player-a']);
     for (const building of Object.values(message.state.buildings))
       if (building.ownerId === 'player-b')
-        expect(building.inventory).toEqual({ ore: 0, wood: 0, ingot: 0, tool: 0 });
+        expect(building.inventory).toEqual({
+          ore: 0,
+          wood: 0,
+          stone: 0,
+          ingot: 0,
+          brick: 0,
+          tool: 0,
+        });
     expect(Object.values(message.state.territory)).toContain('player-b');
     expect(message.state.processedCommands).toEqual([]);
   });

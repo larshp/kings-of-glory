@@ -1,3 +1,4 @@
+import { logisticsLinks as logisticsDefinitions } from '@kings/content';
 import type { Dispatch, SetStateAction } from 'react';
 import type { ClientWorldState, TerrainTile } from '@kings/protocol';
 import type { Building, SettlementRole } from '@kings/simulation';
@@ -5,11 +6,17 @@ import { displayKey, type ClientPreferences } from '../preferences.js';
 import type { PickedEntity } from '../WorldCanvas.js';
 import {
   buildingLabel,
+  buildingTierLabel,
   extractorForBuilding,
+  extractionDurationForBuilding,
+  ITEM_KINDS,
   renewerForBuilding,
+  recipeDurationForBuilding,
   recipeForBuilding,
   recipeOptionsForBuilding,
   technologyCostLabel,
+  upgradeBenefitLabel,
+  upgradeForBuilding,
   usesWorkers,
 } from './labels.js';
 import type { ItemKind, PlayerView, SendCommand, TabPanelProps, Tile } from './types.js';
@@ -97,9 +104,9 @@ export const BuildPanel = ({
       Map: drag to pan, scroll to zoom, arrows to select, {displayKey(preferences.camera.panUp)}/
       {displayKey(preferences.camera.panLeft)}/{displayKey(preferences.camera.panDown)}/
       {displayKey(preferences.camera.panRight)} to pan. Boulders mark ore deposits and conifers mark
-      timber groves; both thin out as they are worked. An outlined sector is claimed — green is
-      yours, blue is another settlement&apos;s. Timber and ore slow scouts unless paved, while a
-      watchtower beside a mountain gains extra range.
+      timber groves, and a worked range shows cut stone; all three thin out as they are used. An
+      outlined sector is claimed — green is yours, blue is another settlement&apos;s. Timber and ore
+      slow scouts unless paved, while a watchtower beside a mountain gains extra range.
     </p>
     {state && !player && <p>Loading world…</p>}
     {player && (
@@ -182,6 +189,25 @@ export const BuildPanel = ({
           const canMoveItems = role === 'owner' || role === 'logistics';
           const recipe = recipeForBuilding(building);
           const recipeOptions = recipeOptionsForBuilding(building);
+          const upgrade = upgradeForBuilding(building);
+          // A tier is charged to the building's owner, so the panel can only judge the cost
+          // for buildings this player owns. The server remains the authority either way.
+          const upgradeOwner = building.ownerId === playerId ? player : undefined;
+          const upgradeLocked = Boolean(
+            upgrade &&
+            upgradeOwner &&
+            upgrade.requiredTechnology &&
+            !upgradeOwner.research.unlocked[
+              upgrade.requiredTechnology as keyof typeof upgradeOwner.research.unlocked
+            ],
+          );
+          const upgradeAffordable =
+            !upgrade ||
+            !upgradeOwner ||
+            Object.entries(upgrade.cost).every(
+              ([item, amount]) =>
+                upgradeOwner.inventory[item as keyof typeof upgradeOwner.inventory] >= amount,
+            );
           const configurationTargets = manageableBuildings.filter(
             (candidate) =>
               candidate.id !== building.id &&
@@ -199,7 +225,7 @@ export const BuildPanel = ({
               className={building.id === selectedBuildingId ? 'building selected' : 'building'}
               key={building.id}
             >
-              <strong>{buildingLabel(building.kind)}</strong>
+              <strong>{buildingTierLabel(building)}</strong>
               {building.id === selectedBuildingId && <span>Selected on the map</span>}
               {building.ownerId !== playerId && <span>Shared by {building.ownerId}</span>}
               <span>
@@ -212,21 +238,24 @@ export const BuildPanel = ({
                 </span>
               )}
               <span>
-                Inventory: ore {building.inventory.ore} · wood {building.inventory.wood} · ingot{' '}
-                {building.inventory.ingot} · tool {building.inventory.tool}
+                Inventory:{' '}
+                {ITEM_KINDS.map((item) => `${item} ${building.inventory[item]}`).join(' · ')}
               </span>
               {building.populationCapacity > 0 && (
                 <span>Housing capacity: {building.populationCapacity}</span>
               )}
               {building.constructionTicks > 0 ? (
                 <>
-                  <span>Construction: {building.constructionTicks} worker ticks</span>
+                  <span>
+                    {building.upgradeTier ? 'Upgrade' : 'Construction'}:{' '}
+                    {building.constructionTicks} worker ticks
+                  </span>
                   {Object.values(building.constructionMaterials).some((amount) => amount > 0) && (
                     <span>
-                      Delivery remaining: ore {building.constructionMaterials.ore} · wood{' '}
-                      {building.constructionMaterials.wood} · ingot{' '}
-                      {building.constructionMaterials.ingot} · tool{' '}
-                      {building.constructionMaterials.tool}
+                      Delivery remaining:{' '}
+                      {ITEM_KINDS.filter((item) => building.constructionMaterials[item] > 0)
+                        .map((item) => `${item} ${building.constructionMaterials[item]}`)
+                        .join(' · ')}
                     </span>
                   )}
                 </>
@@ -258,7 +287,7 @@ export const BuildPanel = ({
                         </label>
                       )}
                       <span>
-                        Production: {building.progress}/{recipe.ticks} ticks
+                        Production: {building.progress}/{recipeDurationForBuilding(building)} ticks
                       </span>
                       <span>Machine: {building.productionState.replaceAll('-', ' ')}</span>
                       {building.health === building.maxHealth &&
@@ -278,9 +307,8 @@ export const BuildPanel = ({
                   {extractorForBuilding(building) && (
                     <>
                       <span>
-                        Extraction: {building.progress}/
-                        {extractorForBuilding(building)!.ticksPerUnit} ticks per{' '}
-                        {extractorForBuilding(building)!.item}
+                        Extraction: {building.progress}/{extractionDurationForBuilding(building)}{' '}
+                        ticks per {extractorForBuilding(building)!.item}
                       </span>
                       <span>Machine: {building.productionState.replaceAll('-', ' ')}</span>
                       {building.productionState === 'blocked-input' && (
@@ -353,36 +381,23 @@ export const BuildPanel = ({
                       )}
                     </>
                   )}
-                  <button
-                    disabled={!canMoveItems || player.inventory.ore < 1}
-                    onClick={() => transfer(building, 'ore', 'toBuilding')}
-                  >
-                    Load 1 ore
-                  </button>
-                  <button
-                    disabled={!canMoveItems || player.inventory.wood < 1}
-                    onClick={() => transfer(building, 'wood', 'toBuilding')}
-                  >
-                    Load 1 wood
-                  </button>
-                  <button
-                    disabled={!canMoveItems || player.inventory.ingot < 1}
-                    onClick={() => transfer(building, 'ingot', 'toBuilding')}
-                  >
-                    Load 1 ingot
-                  </button>
-                  <button
-                    disabled={!canMoveItems || building.inventory.ingot < 1}
-                    onClick={() => transfer(building, 'ingot', 'toPlayer')}
-                  >
-                    Take 1 ingot
-                  </button>
-                  <button
-                    disabled={!canMoveItems || building.inventory.tool < 1}
-                    onClick={() => transfer(building, 'tool', 'toPlayer')}
-                  >
-                    Take 1 tool
-                  </button>
+                  {building.inventoryCapacity > 0 &&
+                    ITEM_KINDS.map((item) => (
+                      <span className="item-transfer" key={item}>
+                        <button
+                          disabled={!canMoveItems || player.inventory[item] < 1}
+                          onClick={() => transfer(building, item, 'toBuilding')}
+                        >
+                          Load 1 {item}
+                        </button>
+                        <button
+                          disabled={!canMoveItems || building.inventory[item] < 1}
+                          onClick={() => transfer(building, item, 'toPlayer')}
+                        >
+                          Take 1 {item}
+                        </button>
+                      </span>
+                    ))}
                   {building.kind === 'smelter' && (
                     <button
                       disabled={!canBuild}
@@ -397,6 +412,27 @@ export const BuildPanel = ({
                   >
                     Repair
                   </button>
+                  {upgrade && building.tier < upgrade.tier && (
+                    <>
+                      <button
+                        disabled={
+                          !canBuild || upgradeLocked || !upgradeAffordable || building.progress > 0
+                        }
+                        onClick={() => send({ type: 'upgradeBuilding', buildingId: building.id })}
+                      >
+                        Upgrade to tier {upgrade.tier} ({technologyCostLabel(upgrade.cost)})
+                      </button>
+                      <span className="build-reason">
+                        {upgradeLocked
+                          ? 'Masonry research unlocks building tiers.'
+                          : !upgradeAffordable
+                            ? `Needs ${technologyCostLabel(upgrade.cost)} in the owner's stock.`
+                            : building.progress > 0
+                              ? 'Waits for the running batch to finish.'
+                              : `${upgradeBenefitLabel(building)}; stops work for ${upgrade.constructionTicks} worker ticks.`}
+                      </span>
+                    </>
+                  )}
                   {building.kind !== 'settlement-center' && (
                     <button
                       disabled={!canBuild}
@@ -422,8 +458,10 @@ export const BuildPanel = ({
           <h2 id="automation-title">Automation</h2>
           <p>
             Link completed storage or production buildings to a producer. Higher-priority links
-            reserve source and target capacity first. A carrier travels the route between each
-            delivery; roads and Engineering shorten that journey.
+            reserve target capacity first. Each link has one carrier: it loads up to{' '}
+            {logisticsDefinitions.internalInventory.carrierCapacity} items, walks the route,
+            unloads, and walks back, so distance sets a link&apos;s real throughput. Paving the
+            route and Engineering research both shorten the round trip.
           </p>
           <label htmlFor="logistics-source">Source</label>
           <select
@@ -484,6 +522,7 @@ export const BuildPanel = ({
           {logisticsLinks.map((link) => {
             const source = state?.buildings[link.sourceBuildingId];
             const target = state?.buildings[link.targetBuildingId];
+            const carrier = link.carrierId ? state?.carriers[link.carrierId] : undefined;
             const canRemove =
               link.ownerId === playerId ||
               (source &&
@@ -493,8 +532,9 @@ export const BuildPanel = ({
             return (
               <p className="logistics-link" key={link.id}>
                 {link.sourceBuildingId} → {link.targetBuildingId} ({link.item},{' '}
-                {link.throughputPerTick}/delivery, {link.routeDistance ?? 0} route tiles,{' '}
-                {link.travelTicksRemaining ?? 0} travel ticks, {link.status.replaceAll('-', ' ')})
+                {link.capacityPerTrip}/trip, {link.routeDistance ?? 0} route tiles,{' '}
+                {link.status.replaceAll('-', ' ')}
+                {carrier ? `, carrier at ${carrier.x}, ${carrier.y}` : ''})
                 <select
                   aria-label={`Priority for ${link.id}`}
                   disabled={!canRemove}

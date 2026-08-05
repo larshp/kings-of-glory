@@ -1,5 +1,5 @@
 /** Content schemas deliberately use plain data so the same definitions work in builds and on the server. */
-export const CONTENT_VERSION = 4 as const;
+export const CONTENT_VERSION = 5 as const;
 
 export interface ItemDefinition {
   readonly id: string;
@@ -25,6 +25,24 @@ export interface BuildingDefinition {
   readonly serviceSatisfaction?: number;
   readonly defenseDamage?: number;
 }
+/**
+ * A permanent second tier for one building kind. Upgrading re-enters the ordinary
+ * construction pipeline — the building stops working, needs a builder, and consumes
+ * the delivered materials — so a tier is paid for in downtime as well as bricks.
+ *
+ * `workRateMultiplier` scales recipe and extraction durations, so a value below one
+ * is faster; durations are rounded up and never fall below a single tick.
+ */
+export interface BuildingUpgradeDefinition {
+  readonly buildingId: string;
+  readonly tier: 2;
+  readonly cost: Readonly<Record<string, number>>;
+  readonly constructionTicks: number;
+  readonly workRateMultiplier: number;
+  readonly inventoryCapacityMultiplier: number;
+  readonly maxHealthMultiplier: number;
+  readonly requiredTechnology: string | null;
+}
 export interface TechnologyDefinition {
   readonly id: string;
   readonly displayName: string;
@@ -36,11 +54,17 @@ export interface TechnologyDefinition {
 }
 export interface ResourceNodeDefinition {
   readonly id: string;
-  readonly terrain: 'ore' | 'wood';
+  readonly terrain: ResourceTerrain;
   readonly item: string;
   readonly yield: number;
   readonly renewable: boolean;
 }
+/**
+ * Terrain a deposit can sit on. Ore and timber are their own tiles; stone is cut out of
+ * the mountain ranges that already exist, so quarrying gives relief a use beyond blocking
+ * movement without adding a terrain type or moving a single existing tile.
+ */
+export type ResourceTerrain = 'ore' | 'wood' | 'mountain';
 export interface ProducerDefinition {
   readonly buildingId: string;
   readonly recipeIds: readonly string[];
@@ -57,7 +81,7 @@ export interface StorageDefinition {
  */
 export interface ExtractorDefinition {
   readonly buildingId: string;
-  readonly terrain: 'ore' | 'wood';
+  readonly terrain: ResourceTerrain;
   readonly item: string;
   /** Manhattan tiles searched around the extractor for a deposit with yield left. */
   readonly range: number;
@@ -67,7 +91,8 @@ export interface LogisticsLinkDefinition {
   readonly id: string;
   readonly acceptedSourceKinds: readonly string[];
   readonly acceptedTargetKinds: readonly string[];
-  readonly throughputPerTick: number;
+  /** Items one carrier loads for a single round trip along the link's route. */
+  readonly carrierCapacity: number;
 }
 export interface RenewerDefinition {
   readonly buildingId: string;
@@ -88,15 +113,24 @@ export interface CooperativeObjectiveDefinition {
 export const items = {
   ore: { id: 'ore', displayName: 'Ore', stackLimit: 100 },
   wood: { id: 'wood', displayName: 'Wood', stackLimit: 100 },
+  stone: { id: 'stone', displayName: 'Stone', stackLimit: 100 },
   ingot: { id: 'ingot', displayName: 'Ingot', stackLimit: 100 },
+  brick: { id: 'brick', displayName: 'Brick', stackLimit: 100 },
   tool: { id: 'tool', displayName: 'Tool', stackLimit: 100 },
 } as const satisfies Readonly<Record<string, ItemDefinition>>;
 
 export type ItemId = keyof typeof items;
 
+/**
+ * Deposits keyed by the terrain they are cut from, because every rule that reaches for a
+ * deposit starts from a tile: gathering, extraction, and depletion all look up the tile's
+ * terrain. The stone entry therefore lives under `mountain`, the terrain it is quarried
+ * from, rather than under its item name.
+ */
 export const resources = {
   ore: { id: 'ore', terrain: 'ore', item: 'ore', yield: 10, renewable: false },
   wood: { id: 'wood', terrain: 'wood', item: 'wood', yield: 10, renewable: true },
+  mountain: { id: 'stone', terrain: 'mountain', item: 'stone', yield: 12, renewable: false },
 } as const satisfies Readonly<Record<string, ResourceNodeDefinition>>;
 
 /**
@@ -158,6 +192,8 @@ export const recipes = {
     output: { tool: 1 },
     ticks: 4,
   },
+  /** Masonry's core conversion: quarried stone fired with timber into building brick. */
+  fireBrick: { id: 'fire-brick', input: { stone: 2, wood: 1 }, output: { brick: 1 }, ticks: 6 },
 } as const satisfies Readonly<Record<string, RecipeDefinition>>;
 
 export const buildings = {
@@ -265,7 +301,123 @@ export const buildings = {
     constructionTicks: 8,
     requiredTechnology: 'stewardship',
   },
+  quarry: {
+    id: 'quarry',
+    displayName: 'Quarry',
+    cost: { wood: 5 },
+    inventoryCapacity: 20,
+    populationCapacity: 0,
+    maxHealth: 12,
+    constructionTicks: 10,
+    requiredTechnology: 'masonry',
+  },
+  brickworks: {
+    id: 'brickworks',
+    displayName: 'Brickworks',
+    cost: { wood: 5 },
+    inventoryCapacity: 30,
+    populationCapacity: 0,
+    maxHealth: 15,
+    constructionTicks: 12,
+    requiredTechnology: 'masonry',
+    recipe: 'fire-brick',
+  },
+  /**
+   * The first building whose durability is the point. Brick costs a whole production
+   * chain, and buys a wall that outlasts every timber structure by a wide margin while
+   * blocking raider routes exactly as any other building does.
+   */
+  wall: {
+    id: 'wall',
+    displayName: 'Wall',
+    cost: { brick: 1 },
+    inventoryCapacity: 0,
+    populationCapacity: 0,
+    maxHealth: 40,
+    constructionTicks: 6,
+    requiredTechnology: 'masonry',
+  },
 } as const satisfies Readonly<Record<string, BuildingDefinition>>;
+
+/**
+ * Every kind that can be upgraded, and what the tier buys. Producers and extractors gain
+ * throughput, storage gains room, and all of them gain durability. Tools plus brick keep
+ * both the metallurgy and the masonry chains relevant after research finishes.
+ */
+export const buildingUpgrades = {
+  smelter: {
+    buildingId: 'smelter',
+    tier: 2,
+    cost: { tool: 1, brick: 2 },
+    constructionTicks: 12,
+    workRateMultiplier: 0.6,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'masonry',
+  },
+  workshop: {
+    buildingId: 'workshop',
+    tier: 2,
+    cost: { tool: 1, brick: 3 },
+    constructionTicks: 14,
+    workRateMultiplier: 0.6,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'masonry',
+  },
+  brickworks: {
+    buildingId: 'brickworks',
+    tier: 2,
+    cost: { tool: 1, brick: 3 },
+    constructionTicks: 14,
+    workRateMultiplier: 0.6,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'masonry',
+  },
+  mine: {
+    buildingId: 'mine',
+    tier: 2,
+    cost: { tool: 1, brick: 2 },
+    constructionTicks: 12,
+    workRateMultiplier: 0.5,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'masonry',
+  },
+  'lumber-camp': {
+    buildingId: 'lumber-camp',
+    tier: 2,
+    cost: { tool: 1, brick: 2 },
+    constructionTicks: 12,
+    workRateMultiplier: 0.5,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'masonry',
+  },
+  quarry: {
+    buildingId: 'quarry',
+    tier: 2,
+    cost: { tool: 1, brick: 2 },
+    constructionTicks: 12,
+    workRateMultiplier: 0.5,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'masonry',
+  },
+  storage: {
+    buildingId: 'storage',
+    tier: 2,
+    cost: { brick: 4 },
+    constructionTicks: 10,
+    workRateMultiplier: 1,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'masonry',
+  },
+} as const satisfies Readonly<Record<string, BuildingUpgradeDefinition>>;
+
+export type UpgradableBuildingKind = keyof typeof buildingUpgrades;
 
 export const producers = {
   smelter: { buildingId: 'smelter', recipeIds: ['smelt-ore'], defaultRecipeId: 'smelt-ore' },
@@ -273,6 +425,11 @@ export const producers = {
     buildingId: 'workshop',
     recipeIds: ['forge-tool', 'forge-tool-without-wood'],
     defaultRecipeId: 'forge-tool',
+  },
+  brickworks: {
+    buildingId: 'brickworks',
+    recipeIds: ['fire-brick'],
+    defaultRecipeId: 'fire-brick',
   },
 } as const satisfies Readonly<Record<string, ProducerDefinition>>;
 
@@ -289,6 +446,8 @@ export const extractors = {
     range: 4,
     ticksPerUnit: 4,
   },
+  /** Cuts stone out of a range: slower per unit than ore, but every range is a deposit. */
+  quarry: { buildingId: 'quarry', terrain: 'mountain', item: 'stone', range: 4, ticksPerUnit: 5 },
 } as const satisfies Readonly<Record<string, ExtractorDefinition>>;
 
 export const renewers = {
@@ -304,17 +463,34 @@ export const renewers = {
 export const logisticsLinks = {
   internalInventory: {
     id: 'internal-inventory',
-    acceptedSourceKinds: ['storage', 'smelter', 'workshop', 'mine', 'lumber-camp'],
-    acceptedTargetKinds: ['smelter', 'workshop', 'storage'],
-    throughputPerTick: 1,
+    acceptedSourceKinds: [
+      'storage',
+      'smelter',
+      'workshop',
+      'brickworks',
+      'mine',
+      'lumber-camp',
+      'quarry',
+    ],
+    acceptedTargetKinds: ['smelter', 'workshop', 'brickworks', 'storage'],
+    carrierCapacity: 4,
   },
 } as const satisfies Readonly<Record<string, LogisticsLinkDefinition>>;
 
+/**
+ * Roads pay for themselves in movement. `baseTilesPerTick` is the movement budget a
+ * carrier spends each tick; a paved step costs `roadStepCost` and unpaved ground costs
+ * `groundStepCost`, so a route worth paving carries roughly twice as much.
+ */
 export const roadRules = {
   woodCost: 1,
   baseTilesPerTick: 4,
   engineeringTilesPerTick: 6,
   roadDistanceDiscount: 1,
+  roadStepCost: 1,
+  groundStepCost: 2,
+  /** Bounds one link's stored route, and with it the per-carrier state a world retains. */
+  maxRouteTiles: 96,
 } as const;
 
 export const technologies = {
@@ -347,6 +523,18 @@ export const technologies = {
     cost: { tool: 1 },
     ticks: 15,
     exclusiveGroup: 'development-path',
+  },
+  /**
+   * Deliberately outside the exclusive development path: masonry opens the stone chain,
+   * walls, and every building tier, so making it compete with Engineering or Stewardship
+   * would turn one permanent choice into a dead end.
+   */
+  masonry: {
+    id: 'masonry',
+    displayName: 'Masonry',
+    prerequisites: ['metallurgy'],
+    cost: { ingot: 2 },
+    ticks: 18,
   },
 } as const satisfies Readonly<Record<string, TechnologyDefinition>>;
 
@@ -627,9 +815,49 @@ export const validateContent = (): string[] => {
     !Number.isInteger(roadRules.engineeringTilesPerTick) ||
     roadRules.engineeringTilesPerTick < roadRules.baseTilesPerTick ||
     !Number.isInteger(roadRules.roadDistanceDiscount) ||
-    roadRules.roadDistanceDiscount < 1
+    roadRules.roadDistanceDiscount < 1 ||
+    !Number.isInteger(roadRules.roadStepCost) ||
+    roadRules.roadStepCost < 1 ||
+    !Number.isInteger(roadRules.groundStepCost) ||
+    // Paving has to be the cheaper step, or a road would slow its own carriers down.
+    roadRules.groundStepCost <= roadRules.roadStepCost ||
+    // One tick must always advance a carrier at least one unpaved tile.
+    roadRules.baseTilesPerTick < roadRules.groundStepCost ||
+    !Number.isInteger(roadRules.maxRouteTiles) ||
+    roadRules.maxRouteTiles < 1
   )
     errors.push('road rules are invalid');
+  // Widened deliberately: the authored table is `as const`, so comparing its literal
+  // multipliers against their own values would be a type error rather than a check.
+  for (const upgrade of Object.values(buildingUpgrades) as readonly BuildingUpgradeDefinition[]) {
+    const building = buildings[upgrade.buildingId as keyof typeof buildings];
+    if (!building) errors.push(`upgrade references unknown building ${upgrade.buildingId}`);
+    if (!Number.isInteger(upgrade.constructionTicks) || upgrade.constructionTicks < 1)
+      errors.push(`upgrade ${upgrade.buildingId} has invalid construction ticks`);
+    for (const [item, amount] of Object.entries(upgrade.cost)) {
+      if (!(item in items)) errors.push(`upgrade ${upgrade.buildingId} references unknown ${item}`);
+      if (!Number.isInteger(amount) || amount < 1)
+        errors.push(`upgrade ${upgrade.buildingId} has an invalid cost for ${item}`);
+    }
+    if (Object.keys(upgrade.cost).length === 0)
+      errors.push(`upgrade ${upgrade.buildingId} must cost something`);
+    if (
+      !(upgrade.workRateMultiplier > 0) ||
+      upgrade.workRateMultiplier > 1 ||
+      !(upgrade.inventoryCapacityMultiplier >= 1) ||
+      !(upgrade.maxHealthMultiplier >= 1)
+    )
+      errors.push(`upgrade ${upgrade.buildingId} has invalid tier multipliers`);
+    // An upgrade that changed nothing measurable would still cost bricks and downtime.
+    if (
+      upgrade.workRateMultiplier === 1 &&
+      upgrade.inventoryCapacityMultiplier === 1 &&
+      upgrade.maxHealthMultiplier === 1
+    )
+      errors.push(`upgrade ${upgrade.buildingId} grants no benefit`);
+    if (upgrade.requiredTechnology && !(upgrade.requiredTechnology in technologies))
+      errors.push(`upgrade ${upgrade.buildingId} references unknown technology`);
+  }
   for (const entry of Object.values(storage)) {
     const building = buildings[entry.buildingId as keyof typeof buildings];
     if (!building) errors.push(`storage references unknown building ${entry.buildingId}`);
@@ -637,8 +865,8 @@ export const validateContent = (): string[] => {
       errors.push(`storage ${entry.buildingId} capacity does not match its building`);
   }
   for (const link of Object.values(logisticsLinks)) {
-    if (!Number.isInteger(link.throughputPerTick) || link.throughputPerTick < 1)
-      errors.push(`logistics link ${link.id} has invalid throughput`);
+    if (!Number.isInteger(link.carrierCapacity) || link.carrierCapacity < 1)
+      errors.push(`logistics link ${link.id} has an invalid carrier capacity`);
     for (const kind of [...link.acceptedSourceKinds, ...link.acceptedTargetKinds])
       if (!buildings[kind as keyof typeof buildings])
         errors.push(`logistics link ${link.id} references unknown building ${kind}`);

@@ -5,7 +5,7 @@
  * ground-contact origin, and must keep the atlas on the 64-design-pixel grid.
  */
 export const spriteAtlasManifest = {
-  world: { url: '/assets/world-atlas.svg', width: 640, height: 512, sourceScale: 2 },
+  world: { url: '/assets/world-atlas.svg', width: 640, height: 640, sourceScale: 2 },
 } as const;
 
 export type SpriteId =
@@ -19,15 +19,22 @@ export type SpriteId =
   | 'mine'
   | 'lumber-camp'
   | 'forester'
+  | 'quarry'
+  | 'brickworks'
+  | 'wall'
   | 'construction'
   | 'raider'
+  | 'carrier'
   | 'selection'
   | 'ore-node'
   | 'ore-node-low'
   | 'ore-node-spent'
   | 'timber-node'
   | 'timber-node-low'
-  | 'timber-node-spent';
+  | 'timber-node-spent'
+  | 'stone-node'
+  | 'stone-node-low'
+  | 'stone-node-spent';
 
 export interface SpriteFrame {
   readonly atlas: keyof typeof spriteAtlasManifest;
@@ -76,6 +83,13 @@ export const spriteFrames: Readonly<Record<SpriteId, SpriteFrame>> = {
   'timber-node': frame(0, 3),
   'timber-node-low': frame(1, 3),
   'timber-node-spent': frame(2, 3),
+  quarry: frame(3, 3),
+  brickworks: frame(4, 3),
+  wall: frame(0, 4),
+  carrier: frame(1, 4),
+  'stone-node': frame(2, 4),
+  'stone-node-low': frame(3, 4),
+  'stone-node-spent': frame(4, 4),
 };
 
 export type RenderAssets = Readonly<Record<keyof typeof spriteAtlasManifest, HTMLImageElement>>;

@@ -111,7 +111,7 @@ Or start both with `npm run dev`; the npm wrapper uses the Windows command shim 
 
 The server listens on `http://127.0.0.1:3001/health` and WebSocket clients connect on port 3001. Vite serves the client at `http://127.0.0.1:5173`. By default the client connects to the same hostname as the page, so local `127.0.0.1` and LAN development addresses work; set `VITE_SERVER_URL` to override it. Development can fall back to a stable per-tab identity. Production obtains an anonymous account through `POST /session`; the server issues a signed, 30-day, HTTP-only, `SameSite=Strict`, `Secure` cookie and derives WebSocket identity from that cookie instead of trusting the client-supplied player ID.
 
-The current JSON WebSocket protocol is version 4. A client sends `hello`, then receives a `welcome` handshake acknowledgement and a filtered `worldBootstrap`. Newly relevant viewport chunks receive a replacement `chunkSnapshot`; ordinary changes use ordered `stateDelta` messages. Commands receive either `commandAcknowledged` or `commandRejected`, while `ping`/`pong`, `resync`, `maintenance`, and `error` cover connection health and recovery.
+The current JSON WebSocket protocol is version 6. A client sends `hello`, then receives a `welcome` handshake acknowledgement and a filtered `worldBootstrap`. Newly relevant viewport chunks receive a replacement `chunkSnapshot`; ordinary changes use ordered `stateDelta` messages. Commands receive either `commandAcknowledged` or `commandRejected`, while `ping`/`pong`, `resync`, `maintenance`, and `error` cover connection health and recovery.
 
 Players can contribute tools from separate settlements to the global Frontier Beacon objective. The
 server records every contribution, completes the objective at its exact target, and permits one
@@ -128,7 +128,7 @@ New starter land and nearby resource reservations are temporary until the player
 
 The deterministic headless load clients exercise the complete progression loop: gathering, construction, both research tiers, inter-player trade, territory expansion, snapshot reconnect/restore, automated production, watchtower defense, and repairs in response to damage. Load output includes per-behavior action counts so a scenario cannot silently stop covering one of those paths while still producing ticks.
 
-Runtime safety limits are explicit and tested: inbound messages are capped at 64 KiB, each viewport may subscribe to at most 64 chunks, each player may have at most 64 active construction jobs, shared settlements may have three active projects, the global threat path budget is 128 visits per tick, the server accepts at most 256 pending commands, and connections exceeding 1 MiB of buffered outbound data are closed for backpressure. Authoritative world ledgers are bounded so a permanent world reaches a steady state: the duplicate-command window retains the newest 1,024 accepted command IDs and the transfer ledger the newest 1,000 transfers. Retries older than the idempotency window are still rejected, by the per-player command sequence rather than as duplicates. World snapshot schema 28 trims both ledgers when restoring an older world. Concurrent joins and commands share one authoritative mutation queue; a 20-client hot-chunk test covers simultaneous observation and writes.
+Runtime safety limits are explicit and tested: inbound messages are capped at 64 KiB, each viewport may subscribe to at most 64 chunks, each player may have at most 64 active construction jobs, shared settlements may have three active projects, the global threat path budget is 128 visits per tick, the server accepts at most 256 pending commands, and connections exceeding 1 MiB of buffered outbound data are closed for backpressure. Authoritative world ledgers are bounded so a permanent world reaches a steady state: the duplicate-command window retains the newest 1,024 accepted command IDs and the transfer ledger the newest 1,000 transfers. Retries older than the idempotency window are still rejected, by the per-player command sequence rather than as duplicates. World snapshot schema 28 trims both ledgers when restoring an older world. Carrier route planning shares a budget of 128 path visits per tick with the same shape as the threat budget, and one link's stored route is capped at 96 tiles. Concurrent joins and commands share one authoritative mutation queue; a 20-client hot-chunk test covers simultaneous observation and writes.
 
 Conflicting world commands are serialized through one authoritative queue. Regression matrices cover both command orderings for transfer-capacity contention, duplicate transfer retries, permission revocation, invitation acceptance/removal, and ownership transfer/removal. The resulting state conserves resources, applies at most one duplicate retry, observes the permissions valid at each command's linearization point, clears invitations consistently, and retains exactly one settlement owner.
 
@@ -145,11 +145,15 @@ Development runs migrations on startup by default. Staging and production must s
 credential, and start the world host with a separate runtime credential. Production startup rejects
 `MIGRATE_ON_STARTUP=true`; see [the deployment architecture](docs/deployment.md).
 
-Mountain generation has changed deterministic world generation twice: version 2 added mountains, and
-version 3 moved them onto Perlin ridge noise with taller peaks. Each bump rejects any snapshot written
-for an earlier content version: `deserializeWorld` throws `Unsupported world content version`, and the
-server refuses to restore that world rather than silently moving terrain under existing settlements.
-Development worlds must be reset, which the reset policy permits; no persistent world exists yet.
+Every snapshot records the content version it was written for, and `deserializeWorld` refuses one that
+does not match its schema's row in `SNAPSHOT_CONTENT_VERSIONS` rather than reinterpreting it under
+different rules. Additive content is migrated: content version 5 added the masonry chain, building
+tiers, and walking carriers without moving a single tile, so a version 29 world is lifted forward.
+A content change that moves deterministic world generation cannot be, and mountains have done that
+twice — version 2 added mountains, and version 3 moved them onto Perlin ridge noise with taller peaks.
+The correct response to another such change is to drop the rows for every earlier schema, so those
+worlds are rejected instead of having terrain shifted underneath their settlements; development worlds
+must then be reset, which the reset policy permits.
 
 `PERSISTENCE=memory` remains the default for local UI work. PostgreSQL mode journals accepted commands before applying them, saves a completed checkpoint every 300 ticks, retains the newest three completed checkpoints with replayable journal history, and writes one final checkpoint during graceful shutdown. See [001_initial.sql](packages/server-runtime/migrations/001_initial.sql) for the initial schema.
 
@@ -182,19 +186,48 @@ See [the current first-slice baseline](docs/performance-baseline.md) for a repro
 
 ## Current vertical slice
 
-This increment provides a strict TypeScript workspace, a platform-independent deterministic simulation, a versioned JSON WebSocket handshake, a single authoritative world host, durable checkpoint/journal foundations, and a React/Canvas 2D isometric map. Players gather finite ore deposits (gray map tiles) and timber groves (brown map tiles), construct smelters, workshops, storage, housing, and hearths, turn ore into ingots and ingots plus wood into tools, and build recipe-validated links that automate storage-to-smelter and smelter-to-workshop delivery. The HUD explains a producer's actual recipe duration and missing inputs; housing, jobs, and a completed hearth determine settlement wellbeing. Players repair damage from acid rain or raiders. Tests cover deterministic replay, command rejection, resource conservation, content validation, protocol shape validation, snapshot migration, and checkpoint recovery.
+This increment provides a strict TypeScript workspace, a platform-independent deterministic simulation, a versioned JSON WebSocket handshake, a single authoritative world host, durable checkpoint/journal foundations, and a React/Canvas 2D isometric map. Players gather finite ore deposits (gray map tiles) and timber groves (brown map tiles), quarry stone from the mountain ranges, construct smelters, workshops, brickworks, quarries, storage, housing, hearths, and walls, turn ore into ingots, ingots plus wood into tools, and stone plus wood into brick, and build recipe-validated links whose carriers walk their deliveries between buildings. Brick pays for walls and for a permanent second tier on the buildings a settlement depends on. The HUD explains a producer's actual recipe duration at its current tier and its missing inputs; housing, jobs, and a completed hearth determine settlement wellbeing. Players repair damage from acid rain or raiders. Tests cover deterministic replay, command rejection, resource conservation including items in flight, content validation, protocol shape validation, snapshot migration, and checkpoint recovery.
 
 ### Automated extraction
 
-Mines and lumber camps automate the gathering step. Place one within four tiles of a deposit that still
-has yield and, while a settler is assigned to it, it takes one ore or wood into its own inventory every
-four ticks. Extractors spend the same finite deposits as a manual gather, respect the same starting-plot
-resource reservations, share the settlement worker pool and job priorities with smelters and workshops,
-and can be the source of a logistics link. Linking a mine to a smelter and a smelter to a workshop runs
-the whole ore → ingot → tool chain without a single gather click. Storage is also a valid link target so
-raw output can be buffered; storage-to-storage links are rejected. Placing an extractor where no deposit
-with remaining yield is in range is rejected with `no-deposit-in-range`, and the build menu disables the
-button and explains why before the command is sent.
+Mines, lumber camps, and quarries automate the gathering step. Place one within four tiles of a deposit
+that still has yield and, while a settler is assigned to it, it takes one ore, wood, or stone into its
+own inventory every few ticks. Extractors spend the same finite deposits as a manual gather, respect the
+same starting-plot resource reservations, share the settlement worker pool and job priorities with
+smelters, workshops, and brickworks, and can be the source of a logistics link. Linking a mine to a
+smelter and a smelter to a workshop runs the whole ore → ingot → tool chain without a single gather
+click, and a quarry into a brickworks does the same for stone → brick. Storage is also a valid link
+target so raw output can be buffered; storage-to-storage links are rejected. Placing an extractor where
+no deposit with remaining yield is in range is rejected with `no-deposit-in-range`, and the build menu
+disables the button and explains why before the command is sent.
+
+### Masonry, walls, and building tiers
+
+Masonry research opens a second raw material out of terrain the map already had. Every mountain tile is
+a finite stone deposit, so a quarry placed on open ground beside a range cuts stone without any tile
+moving and without ranges becoming passable or buildable. A brickworks fires two stone and one timber
+into a brick, and brick is what durability costs: a wall has well over twice a watchtower's health and
+blocks raider routes the same way every building does.
+
+Brick and tools also buy a permanent second tier for a smelter, workshop, brickworks, mine, lumber camp,
+quarry, or storage. An upgrade re-enters the ordinary construction pipeline — the building stops working,
+a builder delivers its materials over several worker ticks, and it comes back faster, roomier, tougher,
+and at full health — so a tier is paid for in downtime as well as materials. Upgrades wait for a running
+batch rather than discarding consumed inputs, are charged to the building owner's stock, and refund in
+full if cancelled, which leaves the tier-one building working instead of removing it.
+
+### Carriers that walk
+
+Each logistics link owns one carrier. It loads up to four items, walks the link's route tile by tile,
+unloads what the target has room for, and walks home before the link can dispatch again, so a link's
+throughput follows distance rather than a flat per-tick rate. Routes are planned once from the world seed
+and the two building tiles, over open ground only, so a range between two buildings forces a real detour
+and a pair with no way through reports `no-route` instead of quietly idling. A paved step costs one
+movement point against the two an unpaved one costs, and Engineering research raises the per-tick
+movement budget from four to six — which is what makes roads worth their timber. Items in flight belong
+to the carrier alone: they leave the source when it loads and reappear only when it unloads, and
+demolishing an endpoint or removing the link hands them back rather than destroying them. The logistics
+overlay draws the route the carrier actually walks, and the map shows each carrier with its load.
 
 ### Mountains and terrain height
 
@@ -233,9 +266,11 @@ palette by a coordinate hash, which gives organic variation that is identical on
 reload. Ponds and deposits are drawn as surfaces inset into the tile so a ring of ground remains
 visible around them instead of a hard-edged tile of another colour, and each deposit carries clutter —
 boulders or conifers — whose stage shows the remaining yield on the map rather than only in the hover
-tooltip. Sector ownership is drawn as a border along the sides where the owner changes, in green for
-your own claim, so the terrain underneath stays readable. Buildings and raiders get a contact shadow,
-damaged buildings and wounded raiders get a health bar, and tile markers are painted on the ground so
+tooltip. A range only carries stone clutter once a quarry has started working it, so untouched relief
+still reads as terrain rather than as a resource pile. Sector ownership is drawn as a border along the
+sides where the owner changes, in green for your own claim, so the terrain underneath stays readable.
+Buildings, raiders, and carriers get a contact shadow, damaged buildings and wounded raiders get a health
+bar, a loaded carrier states how much it is hauling, and tile markers are painted on the ground so
 sprites occlude them correctly.
 
 ### Interface layout
@@ -246,5 +281,6 @@ that stays visible, and groups everything else into keyboard-navigable **Build**
 are the first thing a new player sees; accessibility options, control rebinding, renderer diagnostics,
 and performance counters live under Settings. The tab strip is a standard ARIA tablist: arrow keys move
 between tabs and Home/End jump to the ends. The build menu is generated from content definitions and
-states the exact reason a placement is unavailable — missing wood, a locked technology, no selected tile,
-or no deposit in range.
+states the exact reason a placement is unavailable — missing materials of any kind, a locked technology,
+no selected tile, or no deposit in range. Each completed building also offers its tier upgrade beside
+repair and demolish, stating the cost, what the tier buys, and the downtime it will cost.

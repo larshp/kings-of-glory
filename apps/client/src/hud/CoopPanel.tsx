@@ -1,6 +1,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { cooperativeObjectives as cooperativeObjectiveDefinitions } from '@kings/content';
 import type { ClientWorldState, DirectoryEntry } from '@kings/protocol';
+import { itemLabel, ITEM_KINDS } from './labels.js';
 import type { ItemKind, PlayerView, SendCommand, TabPanelProps, Tile } from './types.js';
 
 type Settlement = ClientWorldState['settlements'][string];
@@ -353,14 +354,13 @@ export const CoopPanel = ({
         <select
           id="recipient-item"
           value={recipientItem}
-          onChange={(event) =>
-            setRecipientItem(event.target.value as 'ore' | 'wood' | 'ingot' | 'tool')
-          }
+          onChange={(event) => setRecipientItem(event.target.value as ItemKind)}
         >
-          <option value="ore">Ore</option>
-          <option value="wood">Wood</option>
-          <option value="ingot">Ingot</option>
-          <option value="tool">Tool</option>
+          {ITEM_KINDS.map((item) => (
+            <option key={item} value={item}>
+              {itemLabel(item)}
+            </option>
+          ))}
         </select>
         <button
           disabled={!recipientId.trim() || player.inventory[recipientItem] < 1}

@@ -23,7 +23,7 @@ import {
   initialSocialState,
   INVENTORY_CAPACITY,
   isProducer,
-  logisticsThroughput,
+  logisticsCarrierCapacity,
   nearestOreTile,
   plotTerritory,
   terrainAt,
@@ -35,6 +35,7 @@ import {
   type Plot,
   type Population,
   type ResearchState,
+  type SharedConstructionProject,
   type SocialState,
   type Threat,
   type WorldState,
@@ -138,7 +139,7 @@ type LegacyWorldBase = Omit<
 interface Version14World extends LegacyWorldBase {
   schemaVersion: 14;
 }
-type PreFlowLogisticsLink = Omit<LogisticsLink, 'throughputPerTick' | 'status'>;
+type PreFlowLogisticsLink = Omit<LogisticsLink, 'capacityPerTrip' | 'status'>;
 type Version15LogisticsLink = Omit<PreFlowLogisticsLink, 'priority'>;
 type LegacyBuildingWithoutRecipe = Omit<
   Building,
@@ -255,6 +256,49 @@ interface Version24World extends Omit<
 > {
   schemaVersion: 24;
 }
+/** Masonry adds two items, so every inventory written before it is two stacks short. */
+type PreMasonryInventory = Omit<Inventory, 'stone' | 'brick'>;
+type Version29Building = Omit<Building, 'tier' | 'upgradeTier' | 'inventory'> & {
+  inventory: PreMasonryInventory;
+};
+/**
+ * A version 29 link teleported its items and then sat out a cooldown standing in for the
+ * carrier's return journey. Version 30 walks a real route instead, so the cooldown and the
+ * per-tick throughput are replaced by a per-trip capacity and a planned route.
+ */
+type Version29LogisticsLink = Omit<LogisticsLink, 'capacityPerTrip' | 'route'> & {
+  throughputPerTick: number;
+  travelTicksRemaining?: number;
+};
+interface Version29Player extends Omit<PlayerState, 'inventory' | 'research'> {
+  inventory: PreMasonryInventory;
+  research: Omit<ResearchState, 'unlocked'> & {
+    unlocked: Record<'metallurgy' | 'territorial-charter' | 'engineering' | 'stewardship', boolean>;
+  };
+}
+interface Version29World extends Omit<
+  WorldState,
+  | 'schemaVersion'
+  | 'contentVersion'
+  | 'players'
+  | 'buildings'
+  | 'logisticsLinks'
+  | 'carriers'
+  | 'sharedConstructionProjects'
+> {
+  schemaVersion: 29;
+  contentVersion: 4;
+  players: Record<string, Version29Player>;
+  buildings: Record<string, Version29Building>;
+  logisticsLinks: Record<string, Version29LogisticsLink>;
+  sharedConstructionProjects: Record<
+    string,
+    Omit<SharedConstructionProject, 'required' | 'contributed'> & {
+      required: PreMasonryInventory;
+      contributed: PreMasonryInventory;
+    }
+  >;
+}
 interface Version28Player extends Omit<PlayerState, 'discoveries' | 'research'> {
   research: Omit<ResearchState, 'unlocked'> & {
     unlocked: Record<'metallurgy' | 'territorial-charter', boolean>;
@@ -354,6 +398,7 @@ const withThreatPositions = (
     }),
   );
 const migrateInventoryToTools = (inventory: Partial<Inventory>): Inventory => ({
+  ...emptyInventory(),
   ore: inventory.ore ?? 0,
   wood: inventory.wood ?? 0,
   ingot: inventory.ingot ?? 0,
@@ -412,7 +457,7 @@ const withFlowControls = <T extends PreFlowLogisticsLink>(
   Object.fromEntries(
     Object.entries(links).map(([id, link]) => [
       id,
-      { ...link, throughputPerTick: logisticsThroughput, status: 'idle' },
+      { ...link, capacityPerTrip: logisticsCarrierCapacity, status: 'idle' },
     ]),
   ) as Record<string, LogisticsLink>;
 const socialStateForExistingWorld = (
@@ -463,40 +508,101 @@ const onboardingReservationsForExistingWorld = (
       ];
     }),
   );
-const migrateVersion28 = (state: Version28World): WorldState => ({
+const withMasonryStacks = (inventory: PreMasonryInventory): Inventory => ({
+  ...inventory,
+  stone: 0,
+  brick: 0,
+});
+
+/**
+ * Version 30 adds the masonry chain, permanent building tiers, and carriers that walk. Every
+ * existing building starts at tier one, and links keep their endpoints but drop the cooldown:
+ * their route is left unplanned so the first tick surveys it under the shared route budget.
+ */
+const migrateVersion29 = (state: Version29World): WorldState => ({
   ...state,
-  schemaVersion: 29,
+  schemaVersion: 30,
   contentVersion: CONTENT_VERSION,
-  roads: {},
+  carriers: {},
   players: Object.fromEntries(
     Object.entries(state.players).map(([id, player]) => [
       id,
       {
         ...player,
-        discoveries: {},
+        inventory: withMasonryStacks(player.inventory),
         research: {
           ...player.research,
-          unlocked: {
-            ...player.research.unlocked,
-            engineering: false,
-            stewardship: false,
-          },
+          unlocked: { ...player.research.unlocked, masonry: false },
         },
       },
     ]),
   ),
-  logisticsLinks: Object.fromEntries(
-    Object.entries(state.logisticsLinks).map(([id, link]) => [
+  buildings: Object.fromEntries(
+    Object.entries(state.buildings).map(([id, building]) => [
       id,
       {
-        ...link,
-        carrierId: `carrier-${id}`,
-        routeDistance: 0,
-        travelTicksRemaining: 0,
+        ...building,
+        inventory: withMasonryStacks(building.inventory),
+        constructionMaterials: withMasonryStacks(building.constructionMaterials),
+        tier: 1 as const,
+      },
+    ]),
+  ),
+  logisticsLinks: Object.fromEntries(
+    Object.entries(state.logisticsLinks).map(([id, link]) => {
+      const { throughputPerTick, travelTicksRemaining, ...retained } = link;
+      void throughputPerTick;
+      void travelTicksRemaining;
+      return [id, { ...retained, capacityPerTrip: logisticsCarrierCapacity }];
+    }),
+  ),
+  sharedConstructionProjects: Object.fromEntries(
+    Object.entries(state.sharedConstructionProjects).map(([id, project]) => [
+      id,
+      {
+        ...project,
+        required: withMasonryStacks(project.required),
+        contributed: withMasonryStacks(project.contributed),
       },
     ]),
   ),
 });
+
+const migrateVersion28 = (state: Version28World): WorldState =>
+  migrateVersion29({
+    ...state,
+    schemaVersion: 29,
+    contentVersion: 4,
+    roads: {},
+    players: Object.fromEntries(
+      Object.entries(state.players).map(([id, player]) => [
+        id,
+        {
+          ...player,
+          discoveries: {},
+          research: {
+            ...player.research,
+            unlocked: {
+              ...player.research.unlocked,
+              engineering: false,
+              stewardship: false,
+            },
+          },
+        },
+      ]),
+    ),
+    logisticsLinks: Object.fromEntries(
+      Object.entries(state.logisticsLinks).map(([id, link]) => [
+        id,
+        {
+          ...link,
+          carrierId: `carrier-${id}`,
+          routeDistance: 0,
+          travelTicksRemaining: 0,
+        },
+      ]),
+    ),
+  } as unknown as Version29World);
 
 /** Version 27 worlds kept every command ID ever accepted; trim them to the retention window. */
 const migrateVersion27 = (state: Version27World): WorldState =>
@@ -798,7 +904,8 @@ const migrateVersion2 = (legacy: Version2World): WorldState =>
  * Version 16 is the one step that does not chain onward by itself, so it names both.
  */
 const SNAPSHOT_MIGRATIONS: Record<number, (candidate: unknown) => WorldState> = {
-  29: (candidate) => candidate as WorldState,
+  30: (candidate) => candidate as WorldState,
+  29: (candidate) => migrateVersion29(candidate as Version29World),
   28: (candidate) => migrateVersion28(candidate as Version28World),
   27: (candidate) => migrateVersion27(candidate as Version27World),
   26: (candidate) => migrateVersion26(candidate as Version26World),
@@ -828,18 +935,38 @@ const SNAPSHOT_MIGRATIONS: Record<number, (candidate: unknown) => WorldState> = 
   2: (candidate) => migrateVersion2(candidate as Version2World),
 };
 
+/**
+ * The content version each schema was written for. Snapshots from version 27 onwards record
+ * their own content version, and a snapshot that does not match its schema's row is refused
+ * rather than reinterpreted under different rules.
+ *
+ * Additive content — new items, buildings, recipes, or technologies — can be migrated, which
+ * is why each older schema keeps its row. A content change that moves deterministic world
+ * generation cannot: mountains did that twice, and the correct response is to drop the rows
+ * for every earlier schema so those worlds are rejected instead of having terrain shifted
+ * underneath their settlements.
+ */
+const SNAPSHOT_CONTENT_VERSIONS: Readonly<Record<number, number>> = {
+  27: 3,
+  28: 3,
+  29: 4,
+  30: CONTENT_VERSION,
+};
+
 /** Forward-only snapshot migration kept inside the platform-independent simulation. */
 export const deserializeWorld = (raw: unknown): WorldState => {
   const candidate = structuredClone(raw) as { schemaVersion?: number; contentVersion?: number };
-  // Snapshots from version 27 onwards record the content version they were written for.
+  const expectedContentVersion =
+    candidate.schemaVersion === undefined
+      ? undefined
+      : SNAPSHOT_CONTENT_VERSIONS[candidate.schemaVersion];
   if (
     candidate.schemaVersion !== undefined &&
     candidate.schemaVersion >= 27 &&
-    ((candidate.schemaVersion >= 29 && candidate.contentVersion !== CONTENT_VERSION) ||
-      (candidate.schemaVersion < 29 && candidate.contentVersion !== 3))
+    candidate.contentVersion !== expectedContentVersion
   )
     throw new Error(
-      `Unsupported world content version: ${String(candidate.contentVersion)}; expected ${CONTENT_VERSION}`,
+      `Unsupported world content version: ${String(candidate.contentVersion)}; expected ${String(expectedContentVersion ?? CONTENT_VERSION)}`,
     );
   const migrate =
     candidate.schemaVersion === undefined

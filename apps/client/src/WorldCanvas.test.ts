@@ -97,7 +97,7 @@ describe('visibleByIsometricDepth', () => {
         building: undefined,
         threat: undefined,
       }),
-    ).toEqual(expect.arrayContaining(['Resource remaining: 6/10', 'Reachable for gathering']));
+    ).toEqual(expect.arrayContaining(['ore remaining: 6/10', 'Reachable for gathering']));
     expect(
       tileHoverLines({
         tile: { x: 2, y: 3 },
@@ -111,7 +111,7 @@ describe('visibleByIsometricDepth', () => {
         building: undefined,
         threat: undefined,
       }),
-    ).toEqual(expect.arrayContaining(['Resource remaining: 0/10', 'Out of gathering range']));
+    ).toEqual(expect.arrayContaining(['wood remaining: 0/10', 'Out of gathering range']));
   });
 
   it('uses the authoritative plot-center gathering range', () => {
@@ -126,11 +126,18 @@ describe('visibleByIsometricDepth', () => {
     expect(logisticsStatusColor('in-transit')).toBe('#a88cf0');
     expect(logisticsStatusColor('target-full')).toBe('#f4b860');
     expect(logisticsStatusColor('target-reconfigured')).toBe('#de7780');
+    expect(logisticsStatusColor('no-route')).toBe('#de7780');
   });
 
-  it('labels the configured producer rate from shared recipe content', () => {
-    expect(productionRateLabel({ recipeId: 'smelt-ore' })).toBe('1 ingot/3t');
-    expect(productionRateLabel({ recipeId: null })).toBe('no recipe');
+  it('labels the configured producer rate at the building tier that will run it', () => {
+    expect(productionRateLabel({ kind: 'smelter', tier: 1, recipeId: 'smelt-ore' })).toBe(
+      '1 ingot/3t',
+    );
+    // A tier-two smelter finishes the same recipe faster, so the overlay must say so.
+    expect(productionRateLabel({ kind: 'smelter', tier: 2, recipeId: 'smelt-ore' })).toBe(
+      '1 ingot/2t',
+    );
+    expect(productionRateLabel({ kind: 'smelter', tier: 1, recipeId: null })).toBe('no recipe');
   });
 
   it('culls off-map entities before applying a stable isometric depth order', () => {
@@ -285,7 +292,13 @@ describe('visibleByIsometricDepth', () => {
         building: undefined,
         threat: undefined,
       }),
-    ).toEqual(['Tile 9, 9', 'Mountain · height 3 · Unclaimed territory', 'Not buildable']);
+    ).toEqual([
+      'Tile 9, 9',
+      'Mountain · height 3 · quarriable stone · Unclaimed territory',
+      'stone remaining: 12/12',
+      'Out of gathering range',
+      'Not buildable',
+    ]);
   });
 
   it('shows remaining deposit yield through the drawn clutter', () => {

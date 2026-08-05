@@ -59,7 +59,7 @@ const normalizedReason = (reason: string) => reason.normalize('NFKC').replace(/\
 const clone = <T>(value: T): T => structuredClone(value);
 const validActor = (actorId: string) => /^[A-Za-z0-9._@-]{3,64}$/.test(actorId);
 const inventoryTotal = (inventory: Inventory) =>
-  inventory.ore + inventory.wood + inventory.ingot + inventory.tool;
+  Object.values(inventory).reduce((total, amount) => total + amount, 0);
 const auditTarget = (mutation: AdministrativeMutation) => {
   if (mutation.type === 'setPlayerInventory') return mutation.playerId;
   if (mutation.type === 'setSettlementOwner') return mutation.settlementId;

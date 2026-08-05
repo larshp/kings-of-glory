@@ -14,7 +14,13 @@ export type SharedProjectBuildingKind =
   | 'watchtower'
   | 'mine'
   | 'lumber-camp'
-  | 'forester';
+  | 'forester'
+  | 'quarry'
+  | 'brickworks'
+  | 'wall';
+
+/** Every item a command can name. Inventories, links, and transfers all speak this set. */
+export type ItemKind = 'ore' | 'wood' | 'stone' | 'ingot' | 'brick' | 'tool';
 
 /** Maps every placement command onto the building kind it creates. */
 export const PLACEMENT_KINDS = {
@@ -27,8 +33,26 @@ export const PLACEMENT_KINDS = {
   placeMine: 'mine',
   placeLumberCamp: 'lumber-camp',
   placeForester: 'forester',
+  placeQuarry: 'quarry',
+  placeBrickworks: 'brickworks',
+  placeWall: 'wall',
 } as const satisfies Readonly<Record<string, SharedProjectBuildingKind>>;
 export type PlacementCommandType = keyof typeof PLACEMENT_KINDS;
+
+/**
+ * One placement command per building kind, derived from `PLACEMENT_KINDS` so a new
+ * building needs a single entry there rather than another hand-written variant.
+ */
+export type PlacementCommand = {
+  readonly [Type in PlacementCommandType]: {
+    readonly id: string;
+    readonly playerId: PlayerId;
+    readonly sequence: number;
+    readonly type: Type;
+    readonly x: number;
+    readonly y: number;
+  };
+}[PlacementCommandType];
 
 export const playerId = (value: string): PlayerId => value as PlayerId;
 export const buildingId = (value: string): BuildingId => value as BuildingId;
@@ -51,83 +75,12 @@ export const tileCoordinate = (x: number, y: number): TileCoordinate =>
   coordinate<TileCoordinate>(x, y, 'Tile');
 
 export type Command =
+  | PlacementCommand
   | {
       readonly id: string;
       readonly playerId: PlayerId;
       readonly sequence: number;
       readonly type: 'gather';
-      readonly x: number;
-      readonly y: number;
-    }
-  | {
-      readonly id: string;
-      readonly playerId: PlayerId;
-      readonly sequence: number;
-      readonly type: 'placeSmelter';
-      readonly x: number;
-      readonly y: number;
-    }
-  | {
-      readonly id: string;
-      readonly playerId: PlayerId;
-      readonly sequence: number;
-      readonly type: 'placeWorkshop';
-      readonly x: number;
-      readonly y: number;
-    }
-  | {
-      readonly id: string;
-      readonly playerId: PlayerId;
-      readonly sequence: number;
-      readonly type: 'placeStorage';
-      readonly x: number;
-      readonly y: number;
-    }
-  | {
-      readonly id: string;
-      readonly playerId: PlayerId;
-      readonly sequence: number;
-      readonly type: 'placeHousing';
-      readonly x: number;
-      readonly y: number;
-    }
-  | {
-      readonly id: string;
-      readonly playerId: PlayerId;
-      readonly sequence: number;
-      readonly type: 'placeHearth';
-      readonly x: number;
-      readonly y: number;
-    }
-  | {
-      readonly id: string;
-      readonly playerId: PlayerId;
-      readonly sequence: number;
-      readonly type: 'placeWatchtower';
-      readonly x: number;
-      readonly y: number;
-    }
-  | {
-      readonly id: string;
-      readonly playerId: PlayerId;
-      readonly sequence: number;
-      readonly type: 'placeMine';
-      readonly x: number;
-      readonly y: number;
-    }
-  | {
-      readonly id: string;
-      readonly playerId: PlayerId;
-      readonly sequence: number;
-      readonly type: 'placeLumberCamp';
-      readonly x: number;
-      readonly y: number;
-    }
-  | {
-      readonly id: string;
-      readonly playerId: PlayerId;
-      readonly sequence: number;
-      readonly type: 'placeForester';
       readonly x: number;
       readonly y: number;
     }
@@ -169,7 +122,8 @@ export type Command =
       readonly playerId: PlayerId;
       readonly sequence: number;
       readonly type: 'research';
-      readonly technologyId: 'metallurgy' | 'territorial-charter' | 'engineering' | 'stewardship';
+      readonly technologyId:
+        'metallurgy' | 'territorial-charter' | 'engineering' | 'stewardship' | 'masonry';
     }
   | {
       readonly id: string;
@@ -184,7 +138,7 @@ export type Command =
       readonly sequence: number;
       readonly type: 'transfer';
       readonly buildingId: BuildingId;
-      readonly item: 'ore' | 'wood' | 'ingot' | 'tool';
+      readonly item: ItemKind;
       readonly amount: number;
       readonly direction: 'toBuilding' | 'toPlayer';
     }
@@ -194,7 +148,7 @@ export type Command =
       readonly sequence: number;
       readonly type: 'transferToPlayer';
       readonly targetPlayerId: PlayerId;
-      readonly item: 'ore' | 'wood' | 'ingot' | 'tool';
+      readonly item: ItemKind;
       readonly amount: number;
     }
   | {
@@ -306,7 +260,7 @@ export type Command =
       readonly type: 'createLogisticsLink';
       readonly sourceBuildingId: BuildingId;
       readonly targetBuildingId: BuildingId;
-      readonly item: 'ore' | 'wood' | 'ingot' | 'tool';
+      readonly item: ItemKind;
     }
   | {
       readonly id: string;
@@ -379,7 +333,7 @@ export type Command =
       readonly sequence: number;
       readonly type: 'contributeToSharedConstructionProject';
       readonly projectId: string;
-      readonly item: 'ore' | 'wood' | 'ingot' | 'tool';
+      readonly item: ItemKind;
       readonly amount: number;
     }
   | {
@@ -402,6 +356,13 @@ export type Command =
       readonly sequence: number;
       readonly type: 'demolish';
       readonly buildingId: BuildingId;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'upgradeBuilding';
+      readonly buildingId: BuildingId;
     };
 
 export type RejectionCode =
@@ -415,6 +376,8 @@ export type RejectionCode =
   | 'occupied'
   | 'insufficient-wood'
   | 'insufficient-ore'
+  | 'upgrade-unavailable'
+  | 'already-upgraded'
   | 'insufficient-resources'
   | 'unknown-building'
   | 'unknown-scout'

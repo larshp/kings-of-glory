@@ -13,6 +13,7 @@ import {
   CHUNK_SIZE,
   deserializeWorld,
   diffWorld,
+  emptyInventory,
   joinPlayer,
   snapshot,
   elevationAt,
@@ -470,6 +471,7 @@ export class GlobalWorldHost {
       state.threats = {};
       state.scouts = {};
       state.logisticsLinks = {};
+      state.carriers = {};
       state.roads = {};
       state.sharedConstructionProjects = {};
       state.cooperativeObjectives = Object.fromEntries(
@@ -538,7 +540,7 @@ export class GlobalWorldHost {
       if (building.ownerId !== playerId && !isShared && !relevantChunks.has(chunk))
         delete state.buildings[id];
       else if (building.ownerId !== playerId && !canViewInventory)
-        building.inventory = { ore: 0, wood: 0, ingot: 0, tool: 0 };
+        building.inventory = emptyInventory();
     }
     for (const [id, threat] of Object.entries(state.threats))
       if (!state.buildings[threat.targetBuildingId]) delete state.threats[id];
@@ -552,6 +554,13 @@ export class GlobalWorldHost {
       Object.entries(state.logisticsLinks).filter(
         ([, link]) =>
           state.buildings[link.sourceBuildingId] && state.buildings[link.targetBuildingId],
+      ),
+    );
+    state.carriers = Object.fromEntries(
+      Object.entries(state.carriers).filter(
+        ([, carrier]) =>
+          Boolean(state.logisticsLinks[carrier.linkId]) ||
+          relevantChunks.has(chunkKeyFor(carrier.x, carrier.y)),
       ),
     );
     state.roads = Object.fromEntries(
@@ -676,7 +685,7 @@ export class GlobalWorldHost {
       const canViewInventory = sharedRoles.some((role) => role === 'owner' || role === 'logistics');
       buildings[id] =
         building.ownerId !== playerId && !canViewInventory
-          ? { ...building, inventory: { ore: 0, wood: 0, ingot: 0, tool: 0 } }
+          ? { ...building, inventory: emptyInventory() }
           : building;
     }
     const threats = Object.fromEntries(
@@ -691,6 +700,15 @@ export class GlobalWorldHost {
     const logisticsLinks = Object.fromEntries(
       Object.entries(source.logisticsLinks).filter(
         ([, link]) => buildings[link.sourceBuildingId] && buildings[link.targetBuildingId],
+      ),
+    );
+    // A carrier is visible with the link it serves, and otherwise as a unit on an
+    // observed tile, exactly like a foreign scout walking past.
+    const carriers = Object.fromEntries(
+      Object.entries(source.carriers).filter(
+        ([, carrier]) =>
+          Boolean(logisticsLinks[carrier.linkId]) ||
+          relevantChunks.has(chunkKeyFor(carrier.x, carrier.y)),
       ),
     );
     const roads = Object.fromEntries(
@@ -769,6 +787,7 @@ export class GlobalWorldHost {
       ),
       settlements,
       logisticsLinks,
+      carriers,
       roads,
       cooperativeObjectives,
       playerActivity: source.playerActivity[playerId]

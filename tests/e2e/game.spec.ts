@@ -36,16 +36,22 @@ const openHudTab = async (
   await expect(page.locator(`#hud-panel-${tab}`)).toBeVisible();
 };
 
+/** Reads the header resource bar, which lists one `Name count` pair per carryable item. */
 const inventory = async (page: Page) => {
   const text = await page.locator('aside.hud p.resource-bar').first().innerText();
-  const values = text.match(/^Ore (\d+) .* Wood (\d+) .* Ingot (\d+) .* Tool (\d+)$/);
-  if (!values) throw new Error(`Could not parse inventory summary: ${text}`);
-  return {
-    ore: Number(values[1]),
-    wood: Number(values[2]),
-    ingot: Number(values[3]),
-    tool: Number(values[4]),
-  };
+  const amounts = new Map(
+    [...text.matchAll(/([A-Za-z]+) (\d+)/g)].map(([, item, amount]) => [
+      item!.toLowerCase(),
+      Number(amount),
+    ]),
+  );
+  const required = ['ore', 'wood', 'stone', 'ingot', 'brick', 'tool'] as const;
+  for (const item of required)
+    if (!amounts.has(item)) throw new Error(`Could not parse ${item} in inventory: ${text}`);
+  return Object.fromEntries(required.map((item) => [item, amounts.get(item)!])) as Record<
+    (typeof required)[number],
+    number
+  >;
 };
 
 const gatherResource = async (page: Page, resource: 'ore' | 'wood') => {
@@ -66,7 +72,7 @@ const gatherResource = async (page: Page, resource: 'ore' | 'wood') => {
     if ((await inventory(page))[resource] > before) {
       await expect(canvas).toHaveAttribute(
         'aria-description',
-        /Resource remaining: \d+\/10.*Reachable for gathering/,
+        new RegExp(`${resource} remaining: \\d+/10.*Reachable for gathering`),
       );
       return;
     }
@@ -81,7 +87,9 @@ const gatherTo = async (page: Page, resource: 'ore' | 'wood', minimum: number) =
   while ((await inventory(page))[resource] < minimum) {
     const before = (await inventory(page))[resource];
     const remainingBefore = Number(
-      (await canvas.getAttribute('aria-description'))?.match(/Resource remaining: (\d+)\/10/)?.[1],
+      (await canvas.getAttribute('aria-description'))?.match(
+        new RegExp(`${resource} remaining: (\\d+)/10`),
+      )?.[1],
     );
     await page.getByRole('button', { name: `Gather ${resource}` }).click();
     await page.waitForTimeout(300);
@@ -89,7 +97,7 @@ const gatherTo = async (page: Page, resource: 'ore' | 'wood', minimum: number) =
     else
       await expect(canvas).toHaveAttribute(
         'aria-description',
-        new RegExp(`Resource remaining: ${remainingBefore - 1}/10`),
+        new RegExp(`${resource} remaining: ${remainingBefore - 1}/10`),
       );
   }
 };

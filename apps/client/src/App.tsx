@@ -21,14 +21,20 @@ import {
   type DirectoryEntry,
   type WorldMapChunkSummary,
 } from '@kings/protocol';
-import { type Building, type SettlementRole } from '@kings/simulation';
+import { type Building, type ItemKind, type SettlementRole } from '@kings/simulation';
 import { CoopPanel } from './hud/CoopPanel.js';
 import { SettingsPanel } from './hud/SettingsPanel.js';
 import { fallbackPlayerId, playerIdPromise } from './connection-status.js';
 import { useGameConnection } from './useGameConnection.js';
 import { BuildPanel } from './hud/BuildPanel.js';
 import { SettlementPanel } from './hud/SettlementPanel.js';
-import { amountLabel, recipeForBuilding } from './hud/labels.js';
+import {
+  amountLabel,
+  depositLabel,
+  itemLabel,
+  ITEM_KINDS,
+  recipeForBuilding,
+} from './hud/labels.js';
 import { WorldPanel } from './hud/WorldPanel.js';
 import { initialCameraFocus, WorldCanvas } from './WorldCanvas.js';
 import type {
@@ -93,11 +99,11 @@ export const App = () => {
   const [selectedEntity, setSelectedEntity] = useState<PickedEntity>();
   const [hoveredTile, setHoveredTile] = useState<{ x: number; y: number }>();
   const [recipientId, setRecipientId] = useState('');
-  const [recipientItem, setRecipientItem] = useState<'ore' | 'wood' | 'ingot' | 'tool'>('ingot');
+  const [recipientItem, setRecipientItem] = useState<ItemKind>('ingot');
   const [inviteeId, setInviteeId] = useState('');
   const [logisticsSourceId, setLogisticsSourceId] = useState('');
   const [logisticsTargetId, setLogisticsTargetId] = useState('');
-  const [logisticsItem, setLogisticsItem] = useState<'ore' | 'wood' | 'ingot' | 'tool'>('ore');
+  const [logisticsItem, setLogisticsItem] = useState<ItemKind>('ore');
   const [preferences, setPreferences] = useState(() =>
     loadPreferences(localStorage.getItem(PREFERENCE_STORAGE_KEY)),
   );
@@ -230,9 +236,7 @@ export const App = () => {
   }, [notice.seq, notice.text]);
 
   const player = state?.players[playerId];
-  const canAffordTechnology = (
-    cost: Readonly<Partial<Record<'ore' | 'wood' | 'ingot' | 'tool', number>>>,
-  ) => {
+  const canAffordTechnology = (cost: Readonly<Partial<Record<ItemKind, number>>>) => {
     if (!player) return false;
     return Object.entries(cost).every(
       ([item, amount]) => player.inventory[item as keyof typeof player.inventory] >= (amount ?? 0),
@@ -407,11 +411,8 @@ export const App = () => {
   const selectedTerritoryOwner = selectedTile
     ? state?.territory[`${Math.floor(selectedTile.x / 8)}:${Math.floor(selectedTile.y / 8)}`]
     : undefined;
-  const transfer = (
-    building: Building,
-    item: 'ore' | 'wood' | 'ingot' | 'tool',
-    direction: 'toBuilding' | 'toPlayer',
-  ) => send({ type: 'transfer', buildingId: building.id, item, amount: 1, direction });
+  const transfer = (building: Building, item: ItemKind, direction: 'toBuilding' | 'toPlayer') =>
+    send({ type: 'transfer', buildingId: building.id, item, amount: 1, direction });
   const frontier = plot ? { x: plot.x + 16, y: plot.y } : { x: 0, y: 0 };
   const activeThreats = state
     ? Object.values(state.threats).filter((threat) => {
@@ -443,10 +444,9 @@ export const App = () => {
   const logisticsItems = logisticsTarget
     ? (() => {
         // Storage buffers any item; producers only accept their configured recipe inputs.
-        if (logisticsTarget.kind === 'storage')
-          return ['ore', 'wood', 'ingot', 'tool'] as Array<'ore' | 'wood' | 'ingot' | 'tool'>;
+        if (logisticsTarget.kind === 'storage') return ITEM_KINDS;
         const recipe = recipeForBuilding(logisticsTarget);
-        return Object.keys(recipe?.input ?? {}) as Array<'ore' | 'wood' | 'ingot' | 'tool'>;
+        return Object.keys(recipe?.input ?? {}) as ItemKind[];
       })()
     : [];
   const actionTile = selectedTile ?? (plot ? { x: plot.x, y: plot.y } : { x: 0, y: 0 });
@@ -478,37 +478,43 @@ export const App = () => {
       ['placeSmelter', 'smelter'],
       ['placeMine', 'mine'],
       ['placeLumberCamp', 'lumber-camp'],
+      ['placeQuarry', 'quarry'],
       ['placeForester', 'forester'],
       ['placeStorage', 'storage'],
       ['placeHousing', 'housing'],
       ['placeHearth', 'hearth'],
       ['placeWorkshop', 'workshop'],
+      ['placeBrickworks', 'brickworks'],
       ['placeWatchtower', 'watchtower'],
+      ['placeWall', 'wall'],
     ] as const
   ).map(([commandType, kind]) => {
     const definition = buildingDefinitions[kind];
-    const cost = definition.cost.wood;
+    const cost = Object.entries(definition.cost) as Array<[ItemKind, number]>;
     const requiredTechnology = definition.requiredTechnology as TechnologyId | null;
     const locked = Boolean(requiredTechnology && !player?.research.unlocked[requiredTechnology]);
-    const affordable = (player?.inventory.wood ?? 0) >= cost;
-    const extractor = kind in extractorDefinitions ? (kind as 'mine' | 'lumber-camp') : undefined;
+    const missing = cost.filter(([item, amount]) => (player?.inventory[item] ?? 0) < amount);
+    const extractor =
+      kind in extractorDefinitions ? (kind as keyof typeof extractorDefinitions) : undefined;
     const missingDeposit = Boolean(extractor && placement && !depositInRange(extractor, placement));
     const reason = !placement
       ? 'Select a buildable tile inside your territory.'
       : locked
         ? `${technologies[requiredTechnology!].displayName} required.`
-        : !affordable
-          ? `Needs ${cost - (player?.inventory.wood ?? 0)} more wood.`
+        : missing.length > 0
+          ? `Needs ${missing
+              .map(([item, amount]) => `${amount - (player?.inventory[item] ?? 0)} more ${item}`)
+              .join(' and ')}.`
           : missingDeposit
-            ? `No ${extractorDefinitions[extractor!].terrain === 'ore' ? 'ore deposit' : 'timber grove'} within ${extractorDefinitions[extractor!].range} tiles.`
+            ? `No ${depositLabel(extractorDefinitions[extractor!].terrain)} within ${extractorDefinitions[extractor!].range} tiles.`
             : extractor
               ? `Extracts 1 ${extractorDefinitions[extractor].item} every ${extractorDefinitions[extractor].ticksPerUnit} ticks while staffed.`
               : '';
     return {
       commandType,
       kind,
-      label: `Place ${definition.displayName.toLowerCase()} (${cost} wood)`,
-      disabled: !placement || locked || !affordable || missingDeposit,
+      label: `Place ${definition.displayName.toLowerCase()} (${amountLabel(definition.cost)})`,
+      disabled: !placement || locked || missing.length > 0 || missingDeposit,
       reason,
     };
   });
@@ -710,6 +716,7 @@ export const App = () => {
       <WorldCanvas
         buildings={Object.values(state?.buildings ?? {})}
         threats={Object.values(state?.threats ?? {})}
+        carriers={Object.values(state?.carriers ?? {})}
         terrain={state?.terrain ?? {}}
         elevation={state?.elevation ?? {}}
         minedTiles={state?.minedTiles ?? {}}
@@ -744,8 +751,7 @@ export const App = () => {
           <p className="status">{status}</p>
           {player && (
             <p className="resource-bar">
-              Ore {player.inventory.ore} · Wood {player.inventory.wood} · Ingot{' '}
-              {player.inventory.ingot} · Tool {player.inventory.tool}
+              {ITEM_KINDS.map((item) => `${itemLabel(item)} ${player.inventory[item]}`).join(' · ')}
             </p>
           )}
           {player && nextOnboardingStep && (

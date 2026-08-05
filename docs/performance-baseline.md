@@ -93,6 +93,37 @@ The next-largest phase was then construction/production at 2.168711 ms/tick. Thi
 benefits viewport-interest state because visible chunks now derive from the same owner-local entity
 sets rather than rescanning every building for every player.
 
+## 2026-08-05 masonry chain, building tiers, and walking carriers
+
+Content version 5 added the stone/brick chain, permanent building tiers, and carriers that walk their
+deliveries instead of teleporting them behind a cooldown. Carriers are the only one of the three that
+adds per-tick simulation work, so the `1000 100` infrastructure profile was re-measured. The dense
+fixture now produces 2,001 buildings, 1,000 links, and hash `156e93a7`. Two runs measured the logistics
+phase at 1.225 and 1.547 ms/tick, which is no worse than the 1.994 ms/tick recorded for that phase
+before the change: a carrier plans its route once and then advances by integer movement points each
+tick, replacing the per-tick route derivation the previous cooldown model performed for every link.
+Absolute timings remain machine-dependent, so treat the phase shape rather than the exact numbers as
+the comparison.
+
+```json
+{
+  "perTickMs": {
+    "advance-clock": 0.009907,
+    "research-and-population": 2.168331,
+    "construction-and-production": 2.170581,
+    "environmental-events": 0.00785,
+    "logistics": 1.225311,
+    "threat-spawning": 0.000424,
+    "threat-navigation-and-combat": 0.881149,
+    "emit-events-and-mark-changes": 0.000206
+  }
+}
+```
+
+All phases together consumed 6.46 ms/tick, inside the 20 ms first-slice budget. The paired dense load
+run (`load -- 20 1000 50`) reported 323.78 ticks/second, hash `9351c3a2`, 1,000 entities, and 85
+accepted repairs, so the scenario still covers the defense path at target density.
+
 ## Measured single-process threshold bracket
 
 These are local development measurements, not hosting promises. The first-slice tick budget is

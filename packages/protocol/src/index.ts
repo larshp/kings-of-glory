@@ -1,5 +1,5 @@
 import { PLACEMENT_KINDS } from '@kings/simulation';
-import type { Command, CommandResult, WorldState } from '@kings/simulation';
+import type { Command, CommandResult, ItemKind, WorldState } from '@kings/simulation';
 
 export type TerrainTile = 'grass' | 'water' | 'ore' | 'wood' | 'mountain';
 export interface ChunkInterest {
@@ -61,7 +61,7 @@ export interface ClientWorldState extends Omit<
 export type ClientWorldDelta = Partial<ClientWorldState>;
 
 /** Bump whenever a client can no longer safely interpret server state messages. */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 export const MAX_MESSAGE_BYTES = 64 * 1024;
 export const MAX_INTEREST_CHUNKS = 64;
 
@@ -118,8 +118,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object';
 const isIdentifier = (value: unknown): value is string =>
   typeof value === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(value);
-const isItem = (value: unknown): value is 'ore' | 'wood' | 'ingot' | 'tool' =>
-  value === 'ore' || value === 'wood' || value === 'ingot' || value === 'tool';
+const ITEM_KINDS: readonly ItemKind[] = ['ore', 'wood', 'stone', 'ingot', 'brick', 'tool'];
+const isItem = (value: unknown): value is ItemKind =>
+  typeof value === 'string' && (ITEM_KINDS as readonly string[]).includes(value);
 const sharedBuildingKinds: readonly string[] = Object.values(PLACEMENT_KINDS);
 const isSharedBuildingKind = (value: unknown) =>
   typeof value === 'string' && sharedBuildingKinds.includes(value);
@@ -161,7 +162,8 @@ const isCommand = (value: unknown): value is Command => {
       value.technologyId === 'metallurgy' ||
       value.technologyId === 'territorial-charter' ||
       value.technologyId === 'engineering' ||
-      value.technologyId === 'stewardship'
+      value.technologyId === 'stewardship' ||
+      value.technologyId === 'masonry'
     );
   if (value.type === 'contributeToObjective')
     return (
@@ -252,7 +254,8 @@ const isCommand = (value: unknown): value is Command => {
     value.type === 'smelt' ||
     value.type === 'repair' ||
     value.type === 'cancelConstruction' ||
-    value.type === 'demolish'
+    value.type === 'demolish' ||
+    value.type === 'upgradeBuilding'
   )
     return isIdentifier(value.buildingId);
   return (

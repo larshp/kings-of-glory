@@ -76,7 +76,14 @@ describe('serialized world conflicts', () => {
     const clients = Array.from({ length: 20 }, () => connection());
     await Promise.all(clients.map((client, index) => host.connect(client, `hotspot-${index}`)));
     for (const client of clients) host.setInterest(client, [{ x: 0, y: 0 }]);
-    host.world.players['hotspot-0']!.inventory = { ore: 0, wood: 0, ingot: 0, tool: 0 };
+    host.world.players['hotspot-0']!.inventory = {
+      ore: 0,
+      wood: 0,
+      stone: 0,
+      ingot: 0,
+      brick: 0,
+      tool: 0,
+    };
 
     await Promise.all(
       clients.slice(1).map((client, index) =>
@@ -119,9 +126,30 @@ describe('serialized world conflicts', () => {
     await host.connect(alice, 'player-a');
     await host.connect(bob, 'player-b');
     await host.connect(carol, 'player-c');
-    host.world.players['player-a']!.inventory = { ore: 0, wood: 0, ingot: 5, tool: 0 };
-    host.world.players['player-b']!.inventory = { ore: 0, wood: 0, ingot: 95, tool: 0 };
-    host.world.players['player-c']!.inventory = { ore: 0, wood: 0, ingot: 5, tool: 0 };
+    host.world.players['player-a']!.inventory = {
+      ore: 0,
+      wood: 0,
+      stone: 0,
+      ingot: 5,
+      brick: 0,
+      tool: 0,
+    };
+    host.world.players['player-b']!.inventory = {
+      ore: 0,
+      wood: 0,
+      stone: 0,
+      ingot: 95,
+      brick: 0,
+      tool: 0,
+    };
+    host.world.players['player-c']!.inventory = {
+      ore: 0,
+      wood: 0,
+      stone: 0,
+      ingot: 5,
+      brick: 0,
+      tool: 0,
+    };
 
     const first = host.command(alice, {
       id: 'overlap-transfer-a',

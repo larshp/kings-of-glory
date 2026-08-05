@@ -1,9 +1,9 @@
-import { playerId } from './commands.js';
+import { buildingId, playerId } from './commands.js';
+import { deserializeWorld } from './migrations.js';
 import {
   advanceTick,
   applyCommand,
   createWorld,
-  deserializeWorld,
   inspectWorld,
   isOpenTile,
   joinPlayer,
@@ -375,7 +375,7 @@ const createInfrastructureStressState = (pairCount: number): WorldState => {
     const targetId = `stress-smelter-${index}`;
     const source: Building = {
       ...center,
-      id: sourceId as never,
+      id: buildingId(sourceId),
       kind: 'storage',
       x: index * 2,
       y: 0,
@@ -388,7 +388,7 @@ const createInfrastructureStressState = (pairCount: number): WorldState => {
     };
     const target: Building = {
       ...source,
-      id: targetId as never,
+      id: buildingId(targetId),
       kind: 'smelter',
       x: index * 2 + 1,
       maxHealth: 10,

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { applyCommand, createWorld, inspectWorld, joinPlayer } from '@kings/simulation';
+import {
+  applyCommand,
+  buildingId as toBuildingId,
+  createWorld,
+  inspectWorld,
+  joinPlayer,
+  playerId as toPlayerId,
+} from '@kings/simulation';
 import {
   applyAdministrativeMutation,
   GlobalWorldHost,
@@ -18,10 +25,10 @@ describe('administrative governance', () => {
     world.players['player-a']!.inventory.ore = 3;
     applyCommand(world, {
       id: 'admin-visible-transfer',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'transferToPlayer',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
       item: 'ore',
       amount: 1,
     });
@@ -55,15 +62,15 @@ describe('administrative governance', () => {
     joinPlayer(world, 'player-b');
     applyCommand(world, {
       id: 'invite-admin-owner',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'inviteToSettlement',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     applyCommand(world, {
       id: 'accept-admin-owner',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 1,
       type: 'acceptSettlementInvite',
       settlementId: 'settlement-player-a',
@@ -130,7 +137,7 @@ describe('administrative governance', () => {
     joinPlayer(world, 'player-b');
     applyCommand(world, {
       id: 'moderated-message',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'sendChatMessage',
       channel: 'global',
@@ -138,7 +145,7 @@ describe('administrative governance', () => {
     });
     applyCommand(world, {
       id: 'moderation-report',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 1,
       type: 'reportChatMessage',
       messageId: 'moderated-message',

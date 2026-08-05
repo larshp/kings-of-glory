@@ -12,12 +12,14 @@ import {
   applyCommand,
   createWorld,
   chunkKeyFor,
+  CHUNK_SIZE,
   deserializeWorld,
   diffWorld,
   joinPlayer,
   snapshot,
   elevationAt,
   terrainAt,
+  tileKey,
   TICK_PIPELINE,
   type TickPhase,
   type WorldState,
@@ -34,6 +36,38 @@ export interface Connection {
   send(message: string): void;
   close(code?: number, reason?: string): void;
 }
+
+/**
+ * Expands chunk keys into their tiles and records what the client is allowed to see of
+ * each one. Terrain is filled only when `terrain` is given: between deltas a client's
+ * terrain map is usually carried forward unchanged, while elevation is always rewritten.
+ */
+const fillChunkTiles = (
+  seed: number,
+  chunks: Iterable<string>,
+  terrain: Record<string, TerrainTile> | undefined,
+  elevation: Record<string, number>,
+) => {
+  for (const chunk of chunks) {
+    const [chunkX, chunkY] = chunk.split(':').map(Number);
+    for (let localX = 0; localX < CHUNK_SIZE; localX += 1)
+      for (let localY = 0; localY < CHUNK_SIZE; localY += 1) {
+        const x = chunkX! * CHUNK_SIZE + localX;
+        const y = chunkY! * CHUNK_SIZE + localY;
+        const key = tileKey(x, y);
+        if (terrain) terrain[key] = terrainAt(seed, x, y);
+        elevation[key] = elevationAt(seed, x, y);
+      }
+  }
+};
+
+/** Claimed sectors, flattened to the owner each one belongs to. */
+const territoryBySector = (players: WorldState['players']): Record<string, string> =>
+  Object.fromEntries(
+    Object.values(players).flatMap((owner) =>
+      Object.keys(owner.territoryCells).map((sector) => [sector, owner.id]),
+    ),
+  );
 
 export interface WorldHostMetrics {
   readonly acceptedCommands: number;
@@ -93,9 +127,11 @@ export const worldMapPageFor = (
       wood: 0,
       mountain: 0,
     };
-    for (let localX = 0; localX < 16; localX += 1)
-      for (let localY = 0; localY < 16; localY += 1)
-        terrain[terrainAt(state.seed, chunkX * 16 + localX, chunkY * 16 + localY)] += 1;
+    for (let localX = 0; localX < CHUNK_SIZE; localX += 1)
+      for (let localY = 0; localY < CHUNK_SIZE; localY += 1)
+        terrain[
+          terrainAt(state.seed, chunkX * CHUNK_SIZE + localX, chunkY * CHUNK_SIZE + localY)
+        ] += 1;
     const buildings = Object.values(state.buildings).filter(
       (building) => chunkKeyFor(building.x, building.y) === `${chunkX}:${chunkY}`,
     );
@@ -373,9 +409,12 @@ export class GlobalWorldHost {
   setInterest(connection: Connection, chunks: readonly { x: number; y: number }[]): void {
     const connectionState = this.#connections.get(connection);
     if (!connectionState) return;
-    const visibleChunks = new Set(chunks.map((chunk) => chunkKeyFor(chunk.x * 16, chunk.y * 16)));
+    // Interest arrives in chunk coordinates, so key it off that chunk's origin tile.
+    const keyFor = (chunk: { x: number; y: number }) =>
+      chunkKeyFor(chunk.x * CHUNK_SIZE, chunk.y * CHUNK_SIZE);
+    const visibleChunks = new Set(chunks.map(keyFor));
     const addedChunks = chunks.filter(
-      (chunk) => !connectionState.visibleChunks?.has(chunkKeyFor(chunk.x * 16, chunk.y * 16)),
+      (chunk) => !connectionState.visibleChunks?.has(keyFor(chunk)),
     );
     connectionState.visibleChunks = visibleChunks;
     // Interest snapshots may be requested between broadcasts, after administrative
@@ -541,11 +580,7 @@ export class GlobalWorldHost {
     const livePlayer = this.#world.players[playerId];
     if (livePlayer) return this.filteredStateFor(playerId, livePlayer, requestedChunks, previous);
     const state = snapshot(this.#world);
-    const territory: Record<string, string> = Object.fromEntries(
-      Object.values(state.players).flatMap((owner) =>
-        Object.keys(owner.territoryCells).map((sector) => [sector, owner.id]),
-      ),
-    );
+    const territory = territoryBySector(state.players);
     const player = state.players[playerId];
     if (!player) {
       state.players = {};
@@ -696,18 +731,7 @@ export class GlobalWorldHost {
     state.social.reports = [];
     const terrain: Record<string, TerrainTile> = {};
     const elevation: Record<string, number> = {};
-    for (const chunk of relevantChunks) {
-      const [xText, yText] = chunk.split(':');
-      const chunkX = Number(xText);
-      const chunkY = Number(yText);
-      for (let localX = 0; localX < 16; localX += 1)
-        for (let localY = 0; localY < 16; localY += 1) {
-          const x = chunkX * 16 + localX;
-          const y = chunkY * 16 + localY;
-          terrain[`${x}:${y}`] = terrainAt(this.#world.seed, x, y);
-          elevation[`${x}:${y}`] = elevationAt(this.#world.seed, x, y);
-        }
-    }
+    fillChunkTiles(this.#world.seed, relevantChunks, terrain, elevation);
     const { seed, randomState, deletedPlayers, ...visibleState } = state;
     void seed;
     void randomState;
@@ -828,32 +852,20 @@ export class GlobalWorldHost {
     const previousTerrain = previous?.terrain;
     const canReuseTerrain =
       previousTerrain !== undefined &&
-      Object.keys(previousTerrain).length === relevantChunks.size * 16 * 16 &&
+      Object.keys(previousTerrain).length === relevantChunks.size * CHUNK_SIZE * CHUNK_SIZE &&
       [...relevantChunks].every((chunk) => {
         const [xText, yText] = chunk.split(':');
-        return previousTerrain[`${Number(xText) * 16}:${Number(yText) * 16}`] !== undefined;
+        return (
+          previousTerrain[tileKey(Number(xText) * CHUNK_SIZE, Number(yText) * CHUNK_SIZE)] !==
+          undefined
+        );
       });
     const terrain: Record<string, TerrainTile> = canReuseTerrain ? previousTerrain : {};
     const elevation: Record<string, number> =
       canReuseTerrain && previous?.elevation ? previous.elevation : {};
     if (!canReuseTerrain || elevation !== previous?.elevation)
-      for (const chunk of relevantChunks) {
-        const [xText, yText] = chunk.split(':');
-        const chunkX = Number(xText);
-        const chunkY = Number(yText);
-        for (let localX = 0; localX < 16; localX += 1)
-          for (let localY = 0; localY < 16; localY += 1) {
-            const x = chunkX * 16 + localX;
-            const y = chunkY * 16 + localY;
-            if (!canReuseTerrain) terrain[`${x}:${y}`] = terrainAt(source.seed, x, y);
-            elevation[`${x}:${y}`] = elevationAt(source.seed, x, y);
-          }
-      }
-    const territory: Record<string, string> = Object.fromEntries(
-      Object.values(source.players).flatMap((owner) =>
-        Object.keys(owner.territoryCells).map((sector) => [sector, owner.id]),
-      ),
-    );
+      fillChunkTiles(source.seed, relevantChunks, canReuseTerrain ? undefined : terrain, elevation);
+    const territory = territoryBySector(source.players);
     const visibleState = {
       schemaVersion: source.schemaVersion,
       contentVersion: source.contentVersion,

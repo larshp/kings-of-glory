@@ -1,4 +1,5 @@
 export * from './world.js';
+export * from './migrations.js';
 export * from './commands.js';
 export * from './changes.js';
 export * from './fixed-step.js';

@@ -13,6 +13,7 @@ import {
   advanceTick,
   chunkCoordinate,
   chunkCoordinateFor,
+  buildingId as toBuildingId,
   createWorld as createWorldWithSeed,
   deserializeWorld,
   FixedStepRunner,
@@ -28,6 +29,7 @@ import {
   nearestResourceTile,
   neighboringChunks,
   nextRandom,
+  playerId as toPlayerId,
   runBotScenario,
   runInfrastructureStressScenario,
   profileInfrastructureStressScenario,
@@ -76,7 +78,7 @@ const placeExtractor = (
       if (reserved.some((tile) => tile.x === x && tile.y === y)) continue;
       const outcome = applyCommand(world, {
         id: `${type}-${x}-${y}`,
-        playerId: playerId as never,
+        playerId: toPlayerId(playerId),
         sequence,
         type,
         x,
@@ -154,7 +156,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'build-on-mountain',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'placeStorage',
         ...mountain,
@@ -166,7 +168,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'scout-mountain',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'moveScout',
         scoutId: scout.id,
@@ -223,7 +225,7 @@ describe('world simulation', () => {
     world.tick = initialExpiry - 1;
     const gathered = applyCommand(world, {
       id: 'active-onboarding',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'gather',
       ...oreTileFor(world),
@@ -234,7 +236,7 @@ describe('world simulation', () => {
     const center = world.buildings['center-player-a']!;
     world.buildings['smelter-player-a-test'] = {
       ...structuredClone(center),
-      id: 'smelter-player-a-test' as never,
+      id: toBuildingId('smelter-player-a-test'),
       kind: 'smelter',
       x: center.x - 1,
       recipeId: 'smelt-ore',
@@ -287,7 +289,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(after, {
         id: 'gather-dirty',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'gather',
         ...ore,
@@ -350,14 +352,14 @@ describe('world simulation', () => {
       joinPlayer(world, 'player-a');
       applyCommand(world, {
         id: 'gather-1',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'gather',
         ...oreTileFor(world),
       });
       applyCommand(world, {
         id: 'build-1',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'placeSmelter',
         x: 12,
@@ -374,7 +376,7 @@ describe('world simulation', () => {
     joinPlayer(first, 'player-a');
     applyCommand(first, {
       id: 'storage',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'placeStorage',
       x: 12,
@@ -382,7 +384,7 @@ describe('world simulation', () => {
     });
     applyCommand(first, {
       id: 'housing',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'placeHousing',
       x: 13,
@@ -425,7 +427,7 @@ describe('world simulation', () => {
     joinPlayer(world, 'player-a');
     const command = {
       id: 'gather-1',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'gather' as const,
       ...oreTileFor(world),
@@ -446,7 +448,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'fractional-gather',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'gather',
         x: 0.5,
@@ -456,7 +458,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'fractional-sequence',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1.5,
         type: 'gather',
         ...oreTileFor(world),
@@ -471,7 +473,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'build',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'placeSmelter',
         x: 12,
@@ -483,7 +485,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'smelt-early',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'smelt',
         buildingId: smelter.id,
@@ -494,7 +496,7 @@ describe('world simulation', () => {
     expect(smelter.productionState).toBe('blocked-input');
     applyCommand(world, {
       id: 'gather',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'gather',
       ...oreTileFor(world),
@@ -502,7 +504,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'load-ore',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 3,
         type: 'transfer',
         buildingId: smelter.id,
@@ -514,7 +516,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'smelt',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 4,
         type: 'smelt',
         buildingId: smelter.id,
@@ -531,7 +533,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'build-delivered-smelter',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'placeSmelter',
         x: 12,
@@ -557,7 +559,7 @@ describe('world simulation', () => {
     for (let index = 0; index < MAX_ACTIVE_CONSTRUCTIONS_PER_PLAYER; index += 1)
       world.buildings[`queued-${index}`] = {
         ...structuredClone(center),
-        id: `queued-${index}` as never,
+        id: toBuildingId(`queued-${index}`),
         x: 1_000 + index,
         constructionTicks: 1,
         productionState: 'constructing',
@@ -566,7 +568,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'construction-over-limit',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'placeStorage',
         x: 12,
@@ -597,7 +599,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'gather-grass',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'gather',
         ...grassTile,
@@ -606,7 +608,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'gather-ore',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'gather',
         ...oreTileFor(world),
@@ -622,7 +624,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'gather-wood',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'gather',
         ...woodTile,
@@ -636,7 +638,7 @@ describe('world simulation', () => {
     joinPlayer(world, 'player-a');
     applyCommand(world, {
       id: 'build',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'placeSmelter',
       x: 12,
@@ -646,14 +648,14 @@ describe('world simulation', () => {
     for (let index = 0; index < 10; index += 1) advanceTick(world);
     applyCommand(world, {
       id: 'gather',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'gather',
       ...oreTileFor(world),
     });
     applyCommand(world, {
       id: 'load',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 3,
       type: 'transfer',
       buildingId: smelter.id,
@@ -667,7 +669,7 @@ describe('world simulation', () => {
     expect(smelter.inventory.ingot).toBe(1);
     applyCommand(world, {
       id: 'unload',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 4,
       type: 'transfer',
       buildingId: smelter.id,
@@ -771,7 +773,7 @@ describe('world simulation', () => {
     joinPlayer(world, 'player-a');
     world.buildings['legacy-workshop'] = {
       ...world.buildings['center-player-a']!,
-      id: 'legacy-workshop' as never,
+      id: toBuildingId('legacy-workshop'),
       kind: 'workshop',
       x: world.buildings['center-player-a']!.x + 1,
       recipeId: 'forge-tool',
@@ -1013,7 +1015,7 @@ describe('world simulation', () => {
     const issue = (sequence: number) =>
       applyCommand(world, {
         id: `command-${sequence}`,
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence,
         type: 'explore',
         x: sequence % 32,
@@ -1056,7 +1058,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'housing',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'placeHousing',
         x: 12,
@@ -1084,7 +1086,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'research-metal',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'research',
         technologyId: 'metallurgy',
@@ -1095,7 +1097,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'research-charter',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'research',
         technologyId: 'territorial-charter',
@@ -1107,7 +1109,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'claim-frontier',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 3,
         type: 'claimTerritory',
         x: 24,
@@ -1117,7 +1119,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'claim-before-explore',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 4,
         type: 'claimTerritory',
         x: 32,
@@ -1126,7 +1128,7 @@ describe('world simulation', () => {
     ).toMatchObject({ code: 'not-explored' });
     applyCommand(world, {
       id: 'explore',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 5,
       type: 'explore',
       x: 32,
@@ -1135,7 +1137,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'claim',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 6,
         type: 'claimTerritory',
         x: 32,
@@ -1153,7 +1155,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'survey-distant-chunk',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'explore',
         x: 48,
@@ -1176,7 +1178,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'other-player-scout',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 1,
         type: 'moveScout',
         scoutId: scout.id,
@@ -1186,7 +1188,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'move-own-scout',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'moveScout',
         scoutId: scout.id,
@@ -1210,7 +1212,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'smelter',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'placeSmelter',
         x: 12,
@@ -1220,7 +1222,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'workshop-too-early',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'placeWorkshop',
         x: 13,
@@ -1230,7 +1232,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'research',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'research',
         technologyId: 'metallurgy',
@@ -1240,7 +1242,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'workshop',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 3,
         type: 'placeWorkshop',
         x: 13,
@@ -1263,7 +1265,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'smelter',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'placeSmelter',
         x: 12,
@@ -1273,7 +1275,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'tower',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'placeWatchtower',
         x: 13,
@@ -1284,7 +1286,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'research-metallurgy',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'research',
         technologyId: 'metallurgy',
@@ -1294,7 +1296,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'tower',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 3,
         type: 'placeWatchtower',
         x: 13,
@@ -1320,7 +1322,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'smelter',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'placeSmelter',
         x: 12,
@@ -1340,7 +1342,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'smelter',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'placeSmelter',
         x: 12,
@@ -1360,7 +1362,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'repair',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'repair',
         buildingId: damaged.id,
@@ -1374,7 +1376,7 @@ describe('world simulation', () => {
     joinPlayer(world, 'player-a');
     applyCommand(world, {
       id: 'smelter',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'placeSmelter',
       x: 12,
@@ -1389,7 +1391,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'repair',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'repair',
         buildingId: smelter.id,
@@ -1404,7 +1406,7 @@ describe('world simulation', () => {
     joinPlayer(world, 'player-a');
     applyCommand(world, {
       id: 'smelter',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'placeSmelter',
       x: 12,
@@ -1464,7 +1466,7 @@ describe('world simulation', () => {
     };
     world.buildings['dynamic-blocker'] = {
       ...target,
-      id: 'dynamic-blocker' as never,
+      id: toBuildingId('dynamic-blocker'),
       kind: 'storage',
       x: blockedTile.x,
       y: blockedTile.y,
@@ -1549,7 +1551,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'steal-spawn-resource',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 1,
         type: 'gather',
         ...resource!,
@@ -1558,7 +1560,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'gather-reserved-resource',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'gather',
         ...resource!,
@@ -1584,7 +1586,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'surround-settlement',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'claimTerritory',
         x: targetX,
@@ -1596,7 +1598,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'block-settlement-access',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'placeStorage',
         x: player.plot.x,
@@ -1638,7 +1640,7 @@ describe('world simulation', () => {
     const center = world.buildings['center-player-a']!;
     const target = {
       ...center,
-      id: 'offline-storage' as never,
+      id: toBuildingId('offline-storage'),
       kind: 'storage' as const,
       x: center.x + 1,
       health: 6,
@@ -1664,7 +1666,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'return-online',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'explore',
         x: center.x,
@@ -1682,7 +1684,7 @@ describe('world simulation', () => {
     const center = world.buildings['center-player-a']!;
     const target = {
       ...center,
-      id: 'combat-storage' as never,
+      id: toBuildingId('combat-storage'),
       kind: 'storage' as const,
       x: center.x + 1,
       health: 10,
@@ -1691,7 +1693,7 @@ describe('world simulation', () => {
     };
     const tower = {
       ...center,
-      id: 'combat-tower' as never,
+      id: toBuildingId('combat-tower'),
       kind: 'watchtower' as const,
       x: center.x + 2,
       y: center.y + 1,
@@ -1725,7 +1727,7 @@ describe('world simulation', () => {
       const center = left.buildings[`center-${id}`]!;
       left.buildings[`durable-${id}`] = {
         ...center,
-        id: `durable-${id}` as never,
+        id: toBuildingId(`durable-${id}`),
         kind: 'storage',
         x: center.x + 1,
         y: center.y + 1,
@@ -1753,10 +1755,10 @@ describe('world simulation', () => {
     joinPlayer(world, 'player-b');
     const command = {
       id: 'gift',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'transferToPlayer' as const,
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
       item: 'wood' as const,
       amount: 2,
     };
@@ -1791,10 +1793,10 @@ describe('world simulation', () => {
       const transfer = (sender: 'player-a' | 'player-c') =>
         applyCommand(world, {
           id: `capacity-${sender}`,
-          playerId: sender as never,
+          playerId: toPlayerId(sender),
           sequence: 1,
           type: 'transferToPlayer',
-          targetPlayerId: 'player-b' as never,
+          targetPlayerId: toPlayerId('player-b'),
           item: 'ingot',
           amount: 5,
         }).result;
@@ -1816,26 +1818,26 @@ describe('world simulation', () => {
       joinPlayer(world, 'player-b');
       applyCommand(world, {
         id: `invite-${removeFirst}`,
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'inviteToSettlement',
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-b' as never,
+        targetPlayerId: toPlayerId('player-b'),
       });
       const accept = {
         id: `accept-${removeFirst}`,
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 1,
         type: 'acceptSettlementInvite' as const,
         settlementId: 'settlement-player-a',
       };
       const remove = {
         id: `remove-${removeFirst}`,
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'removeSettlementMember' as const,
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-b' as never,
+        targetPlayerId: toPlayerId('player-b'),
       };
       const results = removeFirst
         ? [applyCommand(world, remove).result, applyCommand(world, accept).result]
@@ -1859,15 +1861,15 @@ describe('world simulation', () => {
       joinPlayer(world, 'player-b');
       applyCommand(world, {
         id: `invite-owner-${removeFirst}`,
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'inviteToSettlement',
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-b' as never,
+        targetPlayerId: toPlayerId('player-b'),
       });
       applyCommand(world, {
         id: `accept-owner-${removeFirst}`,
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 1,
         type: 'acceptSettlementInvite',
         settlementId: 'settlement-player-a',
@@ -1875,36 +1877,36 @@ describe('world simulation', () => {
       const first = removeFirst
         ? applyCommand(world, {
             id: 'remove-before-transfer',
-            playerId: 'player-a' as never,
+            playerId: toPlayerId('player-a'),
             sequence: 2,
             type: 'removeSettlementMember',
             settlementId: 'settlement-player-a',
-            targetPlayerId: 'player-b' as never,
+            targetPlayerId: toPlayerId('player-b'),
           }).result
         : applyCommand(world, {
             id: 'transfer-before-remove',
-            playerId: 'player-a' as never,
+            playerId: toPlayerId('player-a'),
             sequence: 2,
             type: 'transferSettlementOwnership',
             settlementId: 'settlement-player-a',
-            targetPlayerId: 'player-b' as never,
+            targetPlayerId: toPlayerId('player-b'),
           }).result;
       const second = removeFirst
         ? applyCommand(world, {
             id: 'transfer-after-remove',
-            playerId: 'player-a' as never,
+            playerId: toPlayerId('player-a'),
             sequence: 3,
             type: 'transferSettlementOwnership',
             settlementId: 'settlement-player-a',
-            targetPlayerId: 'player-b' as never,
+            targetPlayerId: toPlayerId('player-b'),
           }).result
         : applyCommand(world, {
             id: 'remove-after-transfer',
-            playerId: 'player-a' as never,
+            playerId: toPlayerId('player-a'),
             sequence: 3,
             type: 'removeSettlementMember',
             settlementId: 'settlement-player-a',
-            targetPlayerId: 'player-b' as never,
+            targetPlayerId: toPlayerId('player-b'),
           }).result;
       return { world, first, second };
     };
@@ -1930,7 +1932,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'contribute-a',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'contributeToObjective',
         objectiveId: 'frontier-beacon',
@@ -1940,7 +1942,7 @@ describe('world simulation', () => {
     ).toMatchObject({ accepted: true });
     const completion = applyCommand(world, {
       id: 'contribute-b',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 1,
       type: 'contributeToObjective',
       objectiveId: 'frontier-beacon',
@@ -1963,7 +1965,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'claim-without-contribution',
-        playerId: 'player-c' as never,
+        playerId: toPlayerId('player-c'),
         sequence: 1,
         type: 'claimObjectiveReward',
         objectiveId: 'frontier-beacon',
@@ -1971,7 +1973,7 @@ describe('world simulation', () => {
     ).toMatchObject({ accepted: false, code: 'objective-contribution-required' });
     const claim = {
       id: 'claim-a',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'claimObjectiveReward' as const,
       objectiveId: 'frontier-beacon' as const,
@@ -2000,15 +2002,15 @@ describe('world simulation', () => {
     joinPlayer(world, 'player-c');
     applyCommand(world, {
       id: 'invite-project-builder',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'inviteToSettlement',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     applyCommand(world, {
       id: 'accept-project-builder',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 1,
       type: 'acceptSettlementInvite',
       settlementId: 'settlement-player-a',
@@ -2031,7 +2033,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'member-cannot-create-project',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 2,
         type: 'createSharedConstructionProject',
         settlementId: 'settlement-player-a',
@@ -2041,16 +2043,16 @@ describe('world simulation', () => {
     ).toMatchObject({ code: 'settlement-permission-denied' });
     applyCommand(world, {
       id: 'make-project-builder',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'setSettlementRole',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
       role: 'builder',
     });
     const creation = applyCommand(world, {
       id: 'shared-storage',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 2,
       type: 'createSharedConstructionProject',
       settlementId: 'settlement-player-a',
@@ -2062,7 +2064,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'outsider-project-contribution',
-        playerId: 'player-c' as never,
+        playerId: toPlayerId('player-c'),
         sequence: 1,
         type: 'contributeToSharedConstructionProject',
         projectId,
@@ -2072,7 +2074,7 @@ describe('world simulation', () => {
     ).toMatchObject({ code: 'not-settlement-member' });
     const contribution = {
       id: 'builder-project-contribution',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 3,
       type: 'contributeToSharedConstructionProject' as const,
       projectId,
@@ -2083,7 +2085,7 @@ describe('world simulation', () => {
     expect(applyCommand(world, contribution).result).toMatchObject({ code: 'duplicate-command' });
     const completion = applyCommand(world, {
       id: 'owner-project-contribution',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 3,
       type: 'contributeToSharedConstructionProject',
       projectId,
@@ -2116,11 +2118,11 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'transfer-project-owner',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 4,
         type: 'transferSettlementOwnership',
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-b' as never,
+        targetPlayerId: toPlayerId('player-b'),
       }).result.accepted,
     ).toBe(true);
     expect(world.buildings[project.buildingId!]?.ownerId).toBe('player-b');
@@ -2135,7 +2137,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'name-a',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'setPlayerName',
         name: '  Álpha   One  ',
@@ -2145,7 +2147,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'duplicate-name',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 1,
         type: 'setPlayerName',
         name: 'A\u0301LPHA ONE',
@@ -2154,7 +2156,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'moderated-name',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 1,
         type: 'setPlayerName',
         name: 'System Herald',
@@ -2163,7 +2165,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'name-b',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 1,
         type: 'setPlayerName',
         name: 'Beta Two',
@@ -2172,7 +2174,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'settlement-name',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'setSettlementName',
         settlementId: 'settlement-player-a',
@@ -2183,7 +2185,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'unauthorized-settlement-name',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 2,
         type: 'setSettlementName',
         settlementId: 'settlement-player-a',
@@ -2194,7 +2196,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'chat-a-1',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 3,
         type: 'sendChatMessage',
         channel: 'global',
@@ -2210,7 +2212,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'chat-too-fast',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 4,
         type: 'sendChatMessage',
         channel: 'global',
@@ -2220,17 +2222,17 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'block-a',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 2,
         type: 'setPlayerBlocked',
-        targetPlayerId: 'player-a' as never,
+        targetPlayerId: toPlayerId('player-a'),
         blocked: true,
       }).result.accepted,
     ).toBe(true);
     expect(
       applyCommand(world, {
         id: 'report-a',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 3,
         type: 'reportChatMessage',
         messageId: 'chat-a-1',
@@ -2246,7 +2248,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'report-a-again',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 4,
         type: 'reportChatMessage',
         messageId: 'chat-a-1',
@@ -2257,7 +2259,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'chat-a-2',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 4,
         type: 'sendChatMessage',
         channel: 'global',
@@ -2267,7 +2269,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'outsider-settlement-chat',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 4,
         type: 'sendChatMessage',
         channel: 'settlement',
@@ -2277,15 +2279,15 @@ describe('world simulation', () => {
     ).toMatchObject({ code: 'not-settlement-member' });
     applyCommand(world, {
       id: 'invite-chat-member',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 5,
       type: 'inviteToSettlement',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     applyCommand(world, {
       id: 'accept-chat-member',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 4,
       type: 'acceptSettlementInvite',
       settlementId: 'settlement-player-a',
@@ -2293,7 +2295,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'settlement-chat',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 5,
         type: 'sendChatMessage',
         channel: 'settlement',
@@ -2312,17 +2314,17 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'invite',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'inviteToSettlement',
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-b' as never,
+        targetPlayerId: toPlayerId('player-b'),
       }).result.accepted,
     ).toBe(true);
     expect(
       applyCommand(world, {
         id: 'accept',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 1,
         type: 'acceptSettlementInvite',
         settlementId: 'settlement-player-a',
@@ -2330,16 +2332,16 @@ describe('world simulation', () => {
     ).toBe(true);
     applyCommand(world, {
       id: 'make-builder',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'setSettlementRole',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
       role: 'builder',
     });
     applyCommand(world, {
       id: 'build',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 3,
       type: 'placeSmelter',
       x: 12,
@@ -2351,7 +2353,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'repair',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 2,
         type: 'repair',
         buildingId: smelter.id,
@@ -2361,7 +2363,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'blocked-load',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 3,
         type: 'transfer',
         buildingId: smelter.id,
@@ -2373,17 +2375,17 @@ describe('world simulation', () => {
     world.players['player-b']!.inventory.ore = 1;
     applyCommand(world, {
       id: 'make-logistics',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 4,
       type: 'setSettlementRole',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
       role: 'logistics',
     });
     expect(
       applyCommand(world, {
         id: 'load',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 3,
         type: 'transfer',
         buildingId: smelter.id,
@@ -2396,7 +2398,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'owner-cannot-leave',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 5,
         type: 'leaveSettlement',
         settlementId: 'settlement-player-a',
@@ -2410,15 +2412,15 @@ describe('world simulation', () => {
     joinPlayer(world, 'player-b');
     applyCommand(world, {
       id: 'invite',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'inviteToSettlement',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     applyCommand(world, {
       id: 'accept',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 1,
       type: 'acceptSettlementInvite',
       settlementId: 'settlement-player-a',
@@ -2426,11 +2428,11 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'transfer-owner',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'transferSettlementOwnership',
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-b' as never,
+        targetPlayerId: toPlayerId('player-b'),
       }).result.accepted,
     ).toBe(true);
     expect(world.settlements['settlement-player-a']).toMatchObject({
@@ -2440,7 +2442,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'leave-after-transfer',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 3,
         type: 'leaveSettlement',
         settlementId: 'settlement-player-a',
@@ -2456,15 +2458,15 @@ describe('world simulation', () => {
     joinPlayer(world, 'player-b');
     applyCommand(world, {
       id: 'invite-a',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'inviteToSettlement',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     applyCommand(world, {
       id: 'accept-b',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 1,
       type: 'acceptSettlementInvite',
       settlementId: 'settlement-player-a',
@@ -2472,7 +2474,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'delete-while-owner',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'deleteAccount',
         confirmation: 'DELETE',
@@ -2480,23 +2482,23 @@ describe('world simulation', () => {
     ).toMatchObject({ code: 'cannot-delete-settlement-owner' });
     applyCommand(world, {
       id: 'transfer-owner',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'transferSettlementOwnership',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     applyCommand(world, {
       id: 'invite-deleting-player',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 2,
       type: 'inviteToSettlement',
       settlementId: 'settlement-player-b',
-      targetPlayerId: 'player-a' as never,
+      targetPlayerId: toPlayerId('player-a'),
     });
     applyCommand(world, {
       id: 'farewell-message',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 3,
       type: 'sendChatMessage',
       channel: 'global',
@@ -2504,7 +2506,7 @@ describe('world simulation', () => {
     });
     applyCommand(world, {
       id: 'report-farewell',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 3,
       type: 'reportChatMessage',
       messageId: 'farewell-message',
@@ -2512,16 +2514,16 @@ describe('world simulation', () => {
     });
     applyCommand(world, {
       id: 'block-a',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 4,
       type: 'setPlayerBlocked',
-      targetPlayerId: 'player-a' as never,
+      targetPlayerId: toPlayerId('player-a'),
       blocked: true,
     });
     expect(
       applyCommand(world, {
         id: 'delete-unconfirmed',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 4,
         type: 'deleteAccount',
         confirmation: 'delete',
@@ -2529,7 +2531,7 @@ describe('world simulation', () => {
     ).toMatchObject({ code: 'account-deletion-confirmation-required' });
     const deletion = applyCommand(world, {
       id: 'delete-confirmed',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 4,
       type: 'deleteAccount',
       confirmation: 'DELETE',
@@ -2558,7 +2560,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'deleted-retry',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 5,
         type: 'gather',
         x: 0,
@@ -2575,31 +2577,31 @@ describe('world simulation', () => {
     joinPlayer(world, 'player-b');
     applyCommand(world, {
       id: 'invite',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'inviteToSettlement',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     applyCommand(world, {
       id: 'accept',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 1,
       type: 'acceptSettlementInvite',
       settlementId: 'settlement-player-a',
     });
     applyCommand(world, {
       id: 'make-builder',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'setSettlementRole',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
       role: 'builder',
     });
     applyCommand(world, {
       id: 'build',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 3,
       type: 'placeSmelter',
       x: 12,
@@ -2610,7 +2612,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'builder-priority',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 2,
         type: 'setJobPriority',
         buildingId: smelter.id,
@@ -2620,18 +2622,18 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'remove-member',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 4,
         type: 'removeSettlementMember',
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-b' as never,
+        targetPlayerId: toPlayerId('player-b'),
       }).result.accepted,
     ).toBe(true);
     expect(world.settlements['settlement-player-a']?.members['player-b']).toBeUndefined();
     expect(
       applyCommand(world, {
         id: 'revoked-priority',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 3,
         type: 'setJobPriority',
         buildingId: smelter.id,
@@ -2641,11 +2643,11 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'remove-owner',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 5,
         type: 'removeSettlementMember',
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-a' as never,
+        targetPlayerId: toPlayerId('player-a'),
       }).result,
     ).toMatchObject({ code: 'cannot-remove-settlement-owner' });
   });
@@ -2655,7 +2657,7 @@ describe('world simulation', () => {
     joinPlayer(world, 'player-a');
     applyCommand(world, {
       id: 'storage',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'placeStorage',
       x: 12,
@@ -2666,7 +2668,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'cancel',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'cancelConstruction',
         buildingId: storage.id,
@@ -2682,7 +2684,12 @@ describe('world simulation', () => {
     const { building: mine, x, y } = placeExtractor(world, 'placeMine', 1);
     expect(mine.kind).toBe('mine');
     expect(mine.jobPriority).toBe(1);
-    const deposit = extractableTile(world, { kind: 'mine', ownerId: 'player-a' as never, x, y })!;
+    const deposit = extractableTile(world, {
+      kind: 'mine',
+      ownerId: toPlayerId('player-a'),
+      x,
+      y,
+    })!;
     expect(deposit).toBeDefined();
     expect(terrainAt(world.seed, deposit.x, deposit.y)).toBe('ore');
 
@@ -2702,7 +2709,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'gather-same-deposit',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'gather',
         ...deposit,
@@ -2745,14 +2752,14 @@ describe('world simulation', () => {
     const site = { x: player.plot.x, y: player.plot.y };
     const hasGroveInRange = extractableTile(world, {
       kind: 'lumber-camp',
-      ownerId: 'player-a' as never,
+      ownerId: toPlayerId('player-a'),
       ...site,
     });
     if (!hasGroveInRange) {
       expect(
         applyCommand(world, {
           id: 'camp',
-          playerId: 'player-a' as never,
+          playerId: toPlayerId('player-a'),
           sequence: 1,
           type: 'placeLumberCamp',
           ...site,
@@ -2785,7 +2792,7 @@ describe('world simulation', () => {
       expect(
         applyCommand(world, {
           id: `${type}-${x}`,
-          playerId: 'player-a' as never,
+          playerId: toPlayerId('player-a'),
           sequence,
           type,
           x,
@@ -2802,7 +2809,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'mine-to-smelter',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 5,
         type: 'createLogisticsLink',
         sourceBuildingId: mine.id,
@@ -2813,7 +2820,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'mine-to-storage',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 6,
         type: 'createLogisticsLink',
         sourceBuildingId: mine.id,
@@ -2824,7 +2831,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'storage-to-storage',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 7,
         type: 'createLogisticsLink',
         sourceBuildingId: storage!.id,
@@ -2837,7 +2844,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'prefer-smelter',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 8,
         type: 'setLogisticsPriority',
         linkId: `link-${mine.id}-${smelter.id}-ore`,
@@ -2871,7 +2878,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'smelter',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'placeSmelter',
         x: 12,
@@ -2892,7 +2899,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'pause-mine',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 3,
         type: 'setJobPriority',
         buildingId: mine.id,
@@ -2910,7 +2917,7 @@ describe('world simulation', () => {
     joinPlayer(world, 'player-a');
     applyCommand(world, {
       id: 'smelter',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'placeSmelter',
       x: 12,
@@ -2918,7 +2925,7 @@ describe('world simulation', () => {
     });
     applyCommand(world, {
       id: 'storage',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'placeStorage',
       x: 13,
@@ -2930,7 +2937,7 @@ describe('world simulation', () => {
     storage.inventory.ore = 2;
     const link = {
       id: 'link',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 3,
       type: 'createLogisticsLink' as const,
       sourceBuildingId: storage.id,
@@ -2948,7 +2955,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'prioritize-link',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 4,
         type: 'setLogisticsPriority',
         linkId: createdLink.id,
@@ -2979,7 +2986,7 @@ describe('world simulation', () => {
       expect(
         applyCommand(world, {
           id: `${type}-${x}`,
-          playerId: 'player-a' as never,
+          playerId: toPlayerId('player-a'),
           sequence,
           type,
           x,
@@ -3004,7 +3011,7 @@ describe('world simulation', () => {
       expect(
         applyCommand(world, {
           id: `priority-link-${sequence}`,
-          playerId: 'player-a' as never,
+          playerId: toPlayerId('player-a'),
           sequence,
           type: 'createLogisticsLink',
           sourceBuildingId,
@@ -3018,7 +3025,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'set-urgent-link-priority',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 6,
         type: 'setLogisticsPriority',
         linkId: urgentLink.id,
@@ -3040,7 +3047,7 @@ describe('world simulation', () => {
       const targetId = `property-smelter-${seed}`;
       const source = {
         ...center,
-        id: sourceId as never,
+        id: toBuildingId(sourceId),
         kind: 'storage' as const,
         x: center.x + 1,
         inventory: { ore: (seed * 7) % 101, wood: 0, ingot: 0, tool: 0 },
@@ -3052,7 +3059,7 @@ describe('world simulation', () => {
       };
       const target = {
         ...center,
-        id: targetId as never,
+        id: toBuildingId(targetId),
         kind: 'smelter' as const,
         x: center.x + 2,
         inventory: { ore: (seed * 11) % 20, wood: 0, ingot: 0, tool: 0 },
@@ -3068,7 +3075,7 @@ describe('world simulation', () => {
       expect(
         applyCommand(world, {
           id: `property-link-${seed}`,
-          playerId: 'player-a' as never,
+          playerId: toPlayerId('player-a'),
           sequence: 1,
           type: 'createLogisticsLink',
           sourceBuildingId: source.id,
@@ -3091,7 +3098,7 @@ describe('world simulation', () => {
       const recipeCenter = recipeWorld.buildings['center-player-a']!;
       const recipeSmelter = {
         ...recipeCenter,
-        id: `property-recipe-${seed}` as never,
+        id: toBuildingId(`property-recipe-${seed}`),
         kind: 'smelter' as const,
         x: recipeCenter.x + 1,
         inventory: { ore: 1 + (seed % 5), wood: 0, ingot: 0, tool: 0 },
@@ -3119,7 +3126,7 @@ describe('world simulation', () => {
     world.players['player-a']!.inventory.ingot = 1;
     applyCommand(world, {
       id: 'smelter',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'placeSmelter',
       x: 12,
@@ -3127,7 +3134,7 @@ describe('world simulation', () => {
     });
     applyCommand(world, {
       id: 'research',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'research',
       technologyId: 'metallurgy',
@@ -3135,7 +3142,7 @@ describe('world simulation', () => {
     for (let index = 0; index < 10; index += 1) advanceTick(world);
     applyCommand(world, {
       id: 'workshop',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 3,
       type: 'placeWorkshop',
       x: 13,
@@ -3150,7 +3157,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'ingot-link',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 4,
         type: 'createLogisticsLink',
         sourceBuildingId: smelter.id,
@@ -3161,7 +3168,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'wrong-input',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 5,
         type: 'createLogisticsLink',
         sourceBuildingId: workshop.id,
@@ -3180,7 +3187,7 @@ describe('world simulation', () => {
     world.players['player-a']!.inventory.wood = 6;
     applyCommand(world, {
       id: 'first-smelter',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'placeSmelter',
       x: 12,
@@ -3188,7 +3195,7 @@ describe('world simulation', () => {
     });
     applyCommand(world, {
       id: 'second-smelter',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'placeSmelter',
       x: 13,
@@ -3201,7 +3208,7 @@ describe('world simulation', () => {
     const highPriority = smelters[1]!;
     applyCommand(world, {
       id: 'high-priority',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 3,
       type: 'setJobPriority',
       buildingId: highPriority.id,
@@ -3227,7 +3234,7 @@ describe('world simulation', () => {
     ] as const)
       applyCommand(world, {
         id: `equal-priority-${sequence}`,
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence,
         type: 'placeSmelter',
         x,
@@ -3253,7 +3260,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'workshop',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'placeWorkshop',
         x: 12,
@@ -3269,7 +3276,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'set-alternate-recipe',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'setRecipe',
         buildingId: workshop.id,
@@ -3284,7 +3291,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'change-busy-recipe',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 3,
         type: 'setRecipe',
         buildingId: workshop.id,
@@ -3296,7 +3303,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'invalid-recipe',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 4,
         type: 'setRecipe',
         buildingId: workshop.id,
@@ -3311,7 +3318,7 @@ describe('world simulation', () => {
     const center = world.buildings['center-player-a']!;
     const source = {
       ...center,
-      id: 'copy-source' as never,
+      id: toBuildingId('copy-source'),
       kind: 'workshop' as const,
       x: center.x + 1,
       inventory: { ore: 0, wood: 0, ingot: 2, tool: 0 },
@@ -3323,7 +3330,7 @@ describe('world simulation', () => {
     };
     const target = {
       ...source,
-      id: 'copy-target' as never,
+      id: toBuildingId('copy-target'),
       x: center.x + 2,
       inventory: { ore: 0, wood: 1, ingot: 1, tool: 0 },
       jobPriority: 0 as const,
@@ -3335,7 +3342,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'copy-config',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'copyBuildingConfiguration',
         sourceBuildingId: source.id,
@@ -3351,7 +3358,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'copy-active-target',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'copyBuildingConfiguration',
         sourceBuildingId: source.id,
@@ -3367,7 +3374,7 @@ describe('world simulation', () => {
     expect(world.players['player-a']?.population.satisfaction).toBe(60);
     applyCommand(world, {
       id: 'smelter',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'placeSmelter',
       x: 12,
@@ -3378,7 +3385,7 @@ describe('world simulation', () => {
     const smelter = Object.values(world.buildings).find((building) => building.kind === 'smelter')!;
     applyCommand(world, {
       id: 'pause-work',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'setJobPriority',
       buildingId: smelter.id,
@@ -3394,7 +3401,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'hearth',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'placeHearth',
         x: 12,
@@ -3423,7 +3430,7 @@ describe('world simulation', () => {
     joinPlayer(world, 'player-a');
     applyCommand(world, {
       id: 'build',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'placeSmelter',
       x: 12,
@@ -3435,7 +3442,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'repair',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'repair',
         buildingId: smelter.id,
@@ -3446,7 +3453,7 @@ describe('world simulation', () => {
     expect(
       applyCommand(world, {
         id: 'demolish',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 3,
         type: 'demolish',
         buildingId: smelter.id,
@@ -3460,8 +3467,8 @@ describe('world simulation', () => {
     joinPlayer(world, 'player-a');
     world.buildings.invalid = {
       ...world.buildings['center-player-a']!,
-      id: 'invalid',
-      ownerId: 'missing-player' as never,
+      id: toBuildingId('invalid'),
+      ownerId: toPlayerId('missing-player'),
       x: 12,
       y: 0,
     };
@@ -3477,7 +3484,7 @@ describe('world simulation', () => {
     world.players['player-a']!.population.total = -1;
     world.buildings.invalid = {
       ...world.buildings['center-player-a']!,
-      id: 'player-a' as never,
+      id: toBuildingId('player-a'),
       x: 0.5,
     };
     world.minedTiles['0:0'] = 11;

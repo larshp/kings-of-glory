@@ -10,7 +10,6 @@ import {
   cooperativeObjectives as cooperativeObjectiveDefinitions,
   extractors as extractorDefinitions,
   logisticsLinks as logisticsDefinitions,
-  producers as producerDefinitions,
   recipes,
   resources as resourceDefinitions,
   technologies,
@@ -18,13 +17,19 @@ import {
   type TechnologyId,
 } from '@kings/content';
 import {
-  PROTOCOL_VERSION,
   type ClientWorldState,
   type DirectoryEntry,
-  type ServerMessage,
   type WorldMapChunkSummary,
 } from '@kings/protocol';
 import { type Building, type SettlementRole } from '@kings/simulation';
+import { CoopPanel } from './hud/CoopPanel.js';
+import { SettingsPanel } from './hud/SettingsPanel.js';
+import { fallbackPlayerId, playerIdPromise } from './connection-status.js';
+import { useGameConnection } from './useGameConnection.js';
+import { BuildPanel } from './hud/BuildPanel.js';
+import { SettlementPanel } from './hud/SettlementPanel.js';
+import { amountLabel, recipeForBuilding } from './hud/labels.js';
+import { WorldPanel } from './hud/WorldPanel.js';
 import { initialCameraFocus, WorldCanvas } from './WorldCanvas.js';
 import type {
   OperationsOverlay,
@@ -32,22 +37,18 @@ import type {
   WorldCanvasDebugState,
   WorldCanvasMetrics,
 } from './WorldCanvas.js';
-import { loadRenderAssets, spriteAtlasManifest, type RenderAssets } from './render-assets.js';
+import { loadRenderAssets, type RenderAssets } from './render-assets.js';
 import {
-  informationCategories,
   searchInformation,
   type InformationCategory,
   type InformationEntry,
 } from './information-search.js';
 import { groupNotifications, type NotificationSeverity } from './notifications.js';
-import { synchronizeWorld } from './world-sync.js';
 import {
-  defaultPreferences,
   displayKey,
   loadPreferences,
   PREFERENCE_STORAGE_KEY,
   type CameraAction,
-  type ClientPreferences,
   withCameraBinding,
 } from './preferences.js';
 import './style.css';
@@ -57,111 +58,6 @@ import './style.css';
 // prints would dial an unreachable `127.0.0.1:3001`. `localhost` resolves to a
 // relayed address on both sides, so dev always dials it regardless of page host.
 // Built clients keep following the page hostname so LAN and deployed hosts work.
-const defaultServerHost = import.meta.env.DEV
-  ? 'localhost'
-  : window.location.hostname || 'localhost';
-const defaultServerUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${defaultServerHost}:3001`;
-const serverUrl = import.meta.env.VITE_SERVER_URL ?? defaultServerUrl;
-const sessionUrl = new URL(serverUrl);
-sessionUrl.protocol = sessionUrl.protocol === 'wss:' ? 'https:' : 'http:';
-sessionUrl.pathname = '/session';
-sessionUrl.search = '';
-sessionUrl.hash = '';
-const storedPlayerId = sessionStorage.getItem('kings-dev-player-id');
-const fallbackPlayerId = storedPlayerId ?? `dev-${crypto.randomUUID().slice(0, 8)}`;
-const playerIdPromise = (async () => {
-  let resolvedPlayerId = fallbackPlayerId;
-  try {
-    const response = await fetch(sessionUrl, { method: 'POST', credentials: 'include' });
-    if (response.ok) {
-      const session = (await response.json()) as { playerId?: unknown };
-      if (typeof session.playerId === 'string') resolvedPlayerId = session.playerId;
-    }
-  } catch {
-    // Development remains usable while the local server starts; production WebSockets require a session.
-  }
-  sessionStorage.setItem('kings-dev-player-id', resolvedPlayerId);
-  return resolvedPlayerId;
-})();
-
-const rejectionMessage = (code: string | undefined) => {
-  const messages: Record<string, string> = {
-    'invalid-coordinate': 'That map coordinate is invalid.',
-    'out-of-range': 'That tile is too far from your settlement.',
-    'resource-depleted': 'That deposit is exhausted. Try another resource tile.',
-    'no-deposit-in-range':
-      'Build extractors beside a deposit that still has yield: mines need ore, lumber camps need timber.',
-    'outside-plot': 'Build inside your claimed territory.',
-    'protected-area': 'That area preserves another settlement or its access route.',
-    'reserved-resource': 'That resource is reserved for the nearest starting settlement.',
-    occupied: 'Another building already occupies that tile.',
-    'insufficient-wood': 'Gather more wood before starting this construction.',
-    'insufficient-ore': 'Gather or transfer more ore first.',
-    'insufficient-resources': 'Gather, craft, or transfer the required resources first.',
-    'inventory-full': 'Move or use items to make inventory space.',
-    'construction-incomplete': 'Wait for construction to finish before using this building.',
-    busy: 'Wait for the current production batch to finish before changing its recipe.',
-    'invalid-recipe': 'That recipe cannot run in this building.',
-    'incompatible-building': 'Copy settings only between completed producers of the same kind.',
-    'building-destroyed': 'Repair or demolish the destroyed building first.',
-    'technology-locked': 'Research the required technology first.',
-    'unknown-objective': 'That cooperative objective is no longer available.',
-    'objective-complete': 'That cooperative objective is already complete.',
-    'objective-incomplete': 'The objective must be completed before rewards can be claimed.',
-    'objective-contribution-required': 'Contribute before claiming this objective reward.',
-    'reward-already-claimed': 'You already claimed this objective reward.',
-    'unknown-project': 'That shared construction project no longer exists.',
-    'project-complete': 'That shared construction project is already fully funded.',
-    'project-limit-reached': 'Complete an active settlement project before starting another.',
-    'construction-limit-reached':
-      'Complete or cancel an active construction before starting another.',
-    'invalid-name':
-      'Use the allowed length and only letters, numbers, spaces, periods, apostrophes, or hyphens.',
-    'name-taken': 'That name is already in use.',
-    'content-rejected': 'That text was rejected by the world moderation rules.',
-    'chat-rate-limited': 'Wait a few world ticks before sending another message.',
-    'invalid-message': 'Enter a non-empty message within the length limit.',
-    'unknown-message': 'That chat message is no longer available.',
-    'already-reported': 'You already reported that message.',
-    'cannot-block-self': 'You cannot block yourself.',
-    'not-explored': 'Explore that area before claiming it.',
-    'not-adjacent': 'Claim a sector next to your existing territory.',
-    'unknown-recipient': 'That recipient has not joined this world yet.',
-    'unknown-settlement': 'That settlement is no longer available.',
-    'settlement-permission-denied': 'Your settlement role does not permit that action.',
-    'settlement-invite-missing': 'You do not have an active invitation to that settlement.',
-    'already-settlement-member': 'That player is already a member of this settlement.',
-    'not-settlement-member': 'That player is not a member of this settlement.',
-    'cannot-leave-settlement-owner': 'Transfer ownership before leaving your own settlement.',
-    'cannot-remove-settlement-owner': 'Transfer ownership before removing the current owner.',
-    'cannot-transfer-settlement-ownership-to-self':
-      'Choose another settlement member as the owner.',
-    'cannot-delete-settlement-owner':
-      'Transfer ownership of every settlement before deleting this account.',
-    'account-deletion-confirmation-required': 'Type DELETE exactly to confirm account deletion.',
-    'account-deleted': 'This player identity has been permanently deleted.',
-    unauthorized: 'Your connection cannot perform that action for this player.',
-    'persistence-failed': 'The world could not save your action. It was not applied.',
-  };
-  return messages[code ?? ''] ?? `Action rejected: ${code ?? 'unknown reason'}.`;
-};
-
-const setConnectionIndicator = (message: string, hidden = false) => {
-  const indicator = document.getElementById('connection-indicator');
-  if (!indicator) return;
-  indicator.textContent = message;
-  indicator.hidden = hidden;
-};
-const technologyCostLabel = (
-  cost: Readonly<Partial<Record<'ore' | 'wood' | 'ingot' | 'tool', number>>>,
-) =>
-  Object.entries(cost)
-    .map(([item, amount]) => `${amount} ${item}${amount === 1 ? '' : 's'}`)
-    .join(', ');
-const amountLabel = (amounts: object) =>
-  Object.entries(amounts as Readonly<Record<string, number>>)
-    .map(([item, amount]) => `${amount} ${item}`)
-    .join(', ');
 /**
  * The HUD is grouped so the panel a player needs during play is never buried under
  * settings. Build stays first because it holds the moment-to-moment actions.
@@ -174,24 +70,6 @@ const HUD_TABS = [
   { id: 'settings', label: 'Settings' },
 ] as const;
 type HudTabId = (typeof HUD_TABS)[number]['id'];
-
-const recipeForBuilding = (building: Building) =>
-  Object.values(recipes).find((recipe) => recipe.id === building.recipeId);
-const buildingLabel = (kind: Building['kind']) => buildingDefinitions[kind].displayName;
-const extractorForBuilding = (building: Building) =>
-  extractorDefinitions[building.kind as keyof typeof extractorDefinitions];
-/** Extractors and recipe producers share the settlement's worker pool and job priorities. */
-const usesWorkers = (building: Building) =>
-  Boolean(producerDefinitions[building.kind as keyof typeof producerDefinitions]) ||
-  Boolean(extractorForBuilding(building));
-const recipeOptionsForBuilding = (building: Building) => {
-  const producer = producerDefinitions[building.kind as keyof typeof producerDefinitions];
-  return producer
-    ? Object.values(recipes).filter((recipe) =>
-        (producer.recipeIds as readonly string[]).includes(recipe.id),
-      )
-    : [];
-};
 
 export const App = () => {
   const [identity, setIdentity] = useState({ playerId: fallbackPlayerId, ready: false });
@@ -291,183 +169,23 @@ export const App = () => {
     };
   }, []);
 
-  useEffect(() => {
-    if (!identity.ready) return;
-    let stopped = false;
-    let retryTimer: number | undefined;
-    let heartbeatTimer: number | undefined;
-    let attempts = 0;
-    let reconnectAllowed = true;
-    let activeConnection: WebSocket | undefined;
-    const connect = () => {
-      setStatus(attempts === 0 ? 'Connecting' : 'Reconnecting');
-      const connection = new WebSocket(serverUrl);
-      activeConnection = connection;
-      socket.current = connection;
-      connection.onopen = () => {
-        if (stopped || socket.current !== connection) {
-          connection.close();
-          return;
-        }
-        setConnectionIndicator('Connected to the server. Loading your world…');
-        attempts = 0;
-        connection.send(JSON.stringify({ type: 'hello', version: PROTOCOL_VERSION, playerId }));
-        messageCount.current.sent += 1;
-        setStatus('Connected');
-        heartbeatTimer = window.setInterval(() => {
-          if (connection.readyState === WebSocket.OPEN) {
-            connection.send(JSON.stringify({ type: 'ping', nonce: crypto.randomUUID() }));
-            messageCount.current.sent += 1;
-          }
-        }, 15_000);
-      };
-      connection.onerror = () => {
-        setConnectionIndicator('Network error. Retrying the game server connection…');
-        notify('The connection encountered a network error. Retrying…');
-      };
-      connection.onclose = (event) => {
-        if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
-        heartbeatTimer = undefined;
-        if (stopped || !reconnectAllowed) return;
-        if (event.code === 1012) {
-          reconnectAllowed = false;
-          setStatus('Maintenance');
-          setConnectionIndicator('The game server is under maintenance. Please try again shortly.');
-          notify('The server is saving the world for maintenance. Your actions are paused.');
-          return;
-        }
-        if (event.code === 1002 && event.reason === 'Client upgrade required') {
-          reconnectAllowed = false;
-          setStatus('Upgrade required');
-          setConnectionIndicator(
-            'This game client is incompatible with the server. Refresh to update.',
-          );
-          notify('A newer game client is required. Refresh this page after it is deployed.');
-          return;
-        }
-        setConnectionIndicator(
-          `Server connection closed (${event.code}${event.reason ? `: ${event.reason}` : ''}). Retrying…`,
-        );
-        notify(
-          `Connection closed (${event.code}${event.reason ? `: ${event.reason}` : ''}). Retrying…`,
-        );
-        attempts += 1;
-        retryTimer = window.setTimeout(connect, Math.min(5_000, 250 * 2 ** Math.min(attempts, 5)));
-      };
-      connection.onmessage = ({ data }) => {
-        if (stopped || socket.current !== connection) return;
-        let message: ServerMessage;
-        try {
-          message = JSON.parse(data) as ServerMessage;
-        } catch {
-          setConnectionIndicator('The server sent an unreadable update. Reconnecting…');
-          notify('The server sent an unreadable update. Reconnecting…');
-          connection.close(1002, 'Malformed server message');
-          return;
-        }
-        messageCount.current.received += 1;
-        if (message.type === 'worldMapPage') {
-          setWorldMap((current) => ({
-            chunks: message.page.after
-              ? [
-                  ...(current?.chunks ?? []),
-                  ...message.page.chunks.filter(
-                    (chunk) =>
-                      !current?.chunks.some(
-                        (existing) => existing.x === chunk.x && existing.y === chunk.y,
-                      ),
-                  ),
-                ]
-              : [...message.page.chunks],
-            ...(message.page.nextCursor ? { nextCursor: message.page.nextCursor } : {}),
-            totalExploredChunks: message.page.totalExploredChunks,
-          }));
-          setWorldMapLoading(false);
-        }
-        if (message.type === 'directoryPage') {
-          setDirectory((current) => ({
-            entries: message.page.after
-              ? [...(current?.entries ?? []), ...message.page.entries]
-              : [...message.page.entries],
-            ...(message.page.nextCursor ? { nextCursor: message.page.nextCursor } : {}),
-          }));
-        }
-        if (message.type === 'welcome') {
-          setStatus('Connected');
-        }
-        const updateStartedAt = performance.now();
-        const synchronization = synchronizeWorld(
-          { version: stateVersion.current, state: clientWorldState.current },
-          message,
-        );
-        if (synchronization.sync.state !== clientWorldState.current) {
-          setConnectionIndicator('Game world connected.', true);
-          stateVersion.current = synchronization.sync.version;
-          clientWorldState.current = synchronization.sync.state;
-          resyncRequested.current = false;
-          setState(synchronization.sync.state);
-          setUpdateApplicationMs(performance.now() - updateStartedAt);
-        }
-        if (
-          message.type === 'worldBootstrap' &&
-          synchronization.sync.state &&
-          !synchronization.sync.state.players[playerId]
-        ) {
-          sessionStorage.removeItem('kings-dev-player-id');
-          window.location.reload();
-          return;
-        }
-        if (
-          synchronization.needsResync &&
-          !resyncRequested.current &&
-          connection.readyState === WebSocket.OPEN
-        ) {
-          resyncRequested.current = true;
-          setStatus('Resynchronizing');
-          connection.send(JSON.stringify({ type: 'resync', version: stateVersion.current ?? 0 }));
-          messageCount.current.sent += 1;
-        }
-        if (message.type === 'commandAcknowledged') {
-          const pending = pendingCommands.current.get(message.result.commandId);
-          if (pending) {
-            if (pending.message) notify(pending.message);
-            pendingCommands.current.delete(message.result.commandId);
-            pending.onAcknowledged?.();
-          }
-        }
-        if (message.type === 'commandRejected') {
-          pendingCommands.current.delete(message.result.commandId);
-          notify(rejectionMessage(message.result.code));
-        }
-        if (message.type === 'maintenance') {
-          reconnectAllowed = false;
-          setStatus('Maintenance');
-          setConnectionIndicator(message.message);
-          notify(message.message);
-        }
-        if (message.type === 'error') {
-          notify(message.message ?? 'Connection error');
-          if (message.code === 'version-mismatch') {
-            reconnectAllowed = false;
-            setStatus('Upgrade required');
-            setConnectionIndicator(
-              'This game client is incompatible with the server. Refresh to update.',
-            );
-            notify('A newer game client is required. Refresh this page after it is deployed.');
-            connection.close(1002, 'Client upgrade required');
-          }
-        }
-      };
-    };
-    connect();
-    return () => {
-      stopped = true;
-      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
-      if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
-      if (socket.current === activeConnection) socket.current = undefined;
-      activeConnection?.close();
-    };
-  }, [identity.ready, playerId]);
+  useGameConnection({
+    identity,
+    playerId,
+    socket,
+    clientWorldState,
+    stateVersion,
+    resyncRequested,
+    pendingCommands,
+    messageCount,
+    setState,
+    setStatus,
+    setWorldMap,
+    setWorldMapLoading,
+    setDirectory,
+    setUpdateApplicationMs,
+    notify,
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -1091,1441 +809,117 @@ export const App = () => {
             </button>
           ))}
         </nav>
-        <div
-          aria-labelledby="hud-tab-build"
-          className="hud-panel"
+        <BuildPanel
           hidden={hudTab !== 'build'}
-          id="hud-panel-build"
-          role="tabpanel"
-          tabIndex={0}
-        >
-          <p className="map-help">
-            Map: drag to pan, scroll to zoom, arrows to select,{' '}
-            {displayKey(preferences.camera.panUp)}/{displayKey(preferences.camera.panLeft)}/
-            {displayKey(preferences.camera.panDown)}/{displayKey(preferences.camera.panRight)} to
-            pan. Boulders mark ore deposits and conifers mark timber groves; both thin out as they
-            are worked. An outlined sector is claimed — green is yours, blue is another
-            settlement&apos;s.
-          </p>
-          {state && !player && <p>Loading world…</p>}
-          {player && (
-            <>
-              <p>
-                Selected tile: {actionTile.x}, {actionTile.y}
-                {selectedResource === 'ore'
-                  ? ' (ore deposit)'
-                  : selectedResource === 'wood'
-                    ? ' (timber grove)'
-                    : ''}
-              </p>
-              {selectedEntity && (
-                <p>
-                  Selected {selectedEntity.type}:{' '}
-                  {selectedEntity.type === 'building'
-                    ? (() => {
-                        const selected = state.buildings[selectedEntity.id];
-                        return selected ? buildingLabel(selected.kind) : selectedEntity.id;
-                      })()
-                    : `raider ${selectedEntity.id}`}
-                </p>
-              )}
-              {selectedTile && (
-                <p>
-                  Sector:{' '}
-                  {selectedTerritoryOwner ? `claimed by ${selectedTerritoryOwner}` : 'unclaimed'}
-                </p>
-              )}
-              <p className={selectedTile && !placement ? 'threat-active' : ''}>
-                {selectedTile
-                  ? placement
-                    ? 'Selected tile is buildable'
-                    : 'Selected tile cannot be built on'
-                  : 'Select a tile to choose a build site'}
-              </p>
-              <button
-                disabled={selectedResource !== 'ore' && selectedResource !== 'wood'}
-                onClick={() =>
-                  send(
-                    { type: 'gather', ...actionTile },
-                    selectedResource === 'wood' ? 'Gathered wood.' : 'Gathered ore.',
-                  )
-                }
-              >
-                Gather{' '}
-                {selectedResource === 'ore'
-                  ? 'ore'
-                  : selectedResource === 'wood'
-                    ? 'wood'
-                    : 'resource'}
-              </button>
-              <h2>Construction</h2>
-              <ul className="build-menu">
-                {buildMenu.map((entry) => (
-                  <li key={entry.kind}>
-                    <button
-                      disabled={entry.disabled}
-                      onClick={() => placement && send({ type: entry.commandType, ...placement })}
-                    >
-                      {entry.label}
-                    </button>
-                    {entry.reason && <span className="build-reason">{entry.reason}</span>}
-                  </li>
-                ))}
-              </ul>
-              <h2>Buildings</h2>
-              {manageableBuildings.map((building) => {
-                const role = roleForBuilding(building);
-                const canBuild = role === 'owner' || role === 'builder';
-                const canMoveItems = role === 'owner' || role === 'logistics';
-                const recipe = recipeForBuilding(building);
-                const recipeOptions = recipeOptionsForBuilding(building);
-                const configurationTargets = manageableBuildings.filter(
-                  (candidate) =>
-                    candidate.id !== building.id &&
-                    candidate.kind === building.kind &&
-                    candidate.constructionTicks === 0,
-                );
-                const missingInputs = recipe
-                  ? Object.entries(recipe.input).filter(
-                      ([item, amount]) =>
-                        building.inventory[item as keyof typeof building.inventory] < amount,
-                    )
-                  : [];
-                return (
-                  <section
-                    className={
-                      building.id === selectedBuildingId ? 'building selected' : 'building'
-                    }
-                    key={building.id}
-                  >
-                    <strong>{buildingLabel(building.kind)}</strong>
-                    {building.id === selectedBuildingId && <span>Selected on the map</span>}
-                    {building.ownerId !== playerId && <span>Shared by {building.ownerId}</span>}
-                    <span>
-                      Health {building.health}/{building.maxHealth}
-                    </span>
-                    {building.health < building.maxHealth && (
-                      <span className="alert">
-                        Damaged by a threat or acid rain. Repair to restore production and protect
-                        this building.
-                      </span>
-                    )}
-                    <span>
-                      Inventory: ore {building.inventory.ore} · wood {building.inventory.wood} ·
-                      ingot {building.inventory.ingot} · tool {building.inventory.tool}
-                    </span>
-                    {building.populationCapacity > 0 && (
-                      <span>Housing capacity: {building.populationCapacity}</span>
-                    )}
-                    {building.constructionTicks > 0 ? (
-                      <>
-                        <span>Construction: {building.constructionTicks} worker ticks</span>
-                        {Object.values(building.constructionMaterials).some(
-                          (amount) => amount > 0,
-                        ) && (
-                          <span>
-                            Delivery remaining: ore {building.constructionMaterials.ore} · wood{' '}
-                            {building.constructionMaterials.wood} · ingot{' '}
-                            {building.constructionMaterials.ingot} · tool{' '}
-                            {building.constructionMaterials.tool}
-                          </span>
-                        )}
-                      </>
-                    ) : (
-                      <>
-                        {recipe && (
-                          <>
-                            {recipeOptions.length > 1 && (
-                              <label>
-                                Recipe
-                                <select
-                                  disabled={!canBuild || building.progress > 0}
-                                  value={building.recipeId ?? ''}
-                                  onChange={(event) =>
-                                    send({
-                                      type: 'setRecipe',
-                                      buildingId: building.id,
-                                      recipeId: event.target.value,
-                                    })
-                                  }
-                                >
-                                  {recipeOptions.map((option) => (
-                                    <option key={option.id} value={option.id}>
-                                      {option.id}: {technologyCostLabel(option.input)} →{' '}
-                                      {technologyCostLabel(option.output)}
-                                    </option>
-                                  ))}
-                                </select>
-                              </label>
-                            )}
-                            <span>
-                              Production: {building.progress}/{recipe.ticks} ticks
-                            </span>
-                            <span>Machine: {building.productionState.replaceAll('-', ' ')}</span>
-                            {building.health === building.maxHealth &&
-                              building.jobPriority > 0 &&
-                              building.progress === 0 &&
-                              missingInputs.length > 0 && (
-                                <span className="alert">
-                                  Stalled: needs{' '}
-                                  {missingInputs
-                                    .map(([item, amount]) => `${amount} ${item}`)
-                                    .join(' and ')}
-                                  .
-                                </span>
-                              )}
-                          </>
-                        )}
-                        {extractorForBuilding(building) && (
-                          <>
-                            <span>
-                              Extraction: {building.progress}/
-                              {extractorForBuilding(building)!.ticksPerUnit} ticks per{' '}
-                              {extractorForBuilding(building)!.item}
-                            </span>
-                            <span>Machine: {building.productionState.replaceAll('-', ' ')}</span>
-                            {building.productionState === 'blocked-input' && (
-                              <span className="alert">
-                                Stalled: every deposit within{' '}
-                                {extractorForBuilding(building)!.range} tiles is exhausted. Demolish
-                                and rebuild beside another deposit.
-                              </span>
-                            )}
-                            {building.productionState === 'blocked-output' && (
-                              <span className="alert">
-                                Stalled: this store is full. Withdraw items or link it to storage.
-                              </span>
-                            )}
-                          </>
-                        )}
-                        {usesWorkers(building) && (
-                          <>
-                            <label>
-                              Job priority
-                              <select
-                                disabled={!canBuild}
-                                value={building.jobPriority}
-                                onChange={(event) =>
-                                  send({
-                                    type: 'setJobPriority',
-                                    buildingId: building.id,
-                                    priority: Number(event.target.value),
-                                  })
-                                }
-                              >
-                                <option value={0}>Paused</option>
-                                <option value={1}>Normal</option>
-                                <option value={2}>High</option>
-                                <option value={3}>Urgent</option>
-                              </select>
-                            </label>
-                            {configurationTargets.length > 0 && (
-                              <label>
-                                Copy settings to
-                                <select
-                                  defaultValue=""
-                                  disabled={!canBuild || building.progress > 0}
-                                  onChange={(event) => {
-                                    if (!event.target.value) return;
-                                    send({
-                                      type: 'copyBuildingConfiguration',
-                                      sourceBuildingId: building.id,
-                                      targetBuildingId: event.target.value,
-                                    });
-                                    event.target.value = '';
-                                  }}
-                                >
-                                  <option value="">Choose producer</option>
-                                  {configurationTargets.map((target) => (
-                                    <option key={target.id} value={target.id}>
-                                      {target.id}
-                                    </option>
-                                  ))}
-                                </select>
-                              </label>
-                            )}
-                          </>
-                        )}
-                        <button
-                          disabled={!canMoveItems || player.inventory.ore < 1}
-                          onClick={() => transfer(building, 'ore', 'toBuilding')}
-                        >
-                          Load 1 ore
-                        </button>
-                        <button
-                          disabled={!canMoveItems || player.inventory.wood < 1}
-                          onClick={() => transfer(building, 'wood', 'toBuilding')}
-                        >
-                          Load 1 wood
-                        </button>
-                        <button
-                          disabled={!canMoveItems || player.inventory.ingot < 1}
-                          onClick={() => transfer(building, 'ingot', 'toBuilding')}
-                        >
-                          Load 1 ingot
-                        </button>
-                        <button
-                          disabled={!canMoveItems || building.inventory.ingot < 1}
-                          onClick={() => transfer(building, 'ingot', 'toPlayer')}
-                        >
-                          Take 1 ingot
-                        </button>
-                        <button
-                          disabled={!canMoveItems || building.inventory.tool < 1}
-                          onClick={() => transfer(building, 'tool', 'toPlayer')}
-                        >
-                          Take 1 tool
-                        </button>
-                        {building.kind === 'smelter' && (
-                          <button
-                            disabled={!canBuild}
-                            onClick={() => send({ type: 'smelt', buildingId: building.id })}
-                          >
-                            Start smelting
-                          </button>
-                        )}
-                        <button
-                          disabled={!canBuild || building.health >= building.maxHealth}
-                          onClick={() => send({ type: 'repair', buildingId: building.id })}
-                        >
-                          Repair
-                        </button>
-                        {building.kind !== 'settlement-center' && (
-                          <button
-                            disabled={!canBuild}
-                            onClick={() => send({ type: 'demolish', buildingId: building.id })}
-                          >
-                            Demolish
-                          </button>
-                        )}
-                      </>
-                    )}
-                    {building.constructionTicks > 0 && building.kind !== 'settlement-center' && (
-                      <button
-                        disabled={!canBuild}
-                        onClick={() =>
-                          send({ type: 'cancelConstruction', buildingId: building.id })
-                        }
-                      >
-                        Cancel construction
-                      </button>
-                    )}
-                  </section>
-                );
-              })}
-              <section className="automation-panel" aria-labelledby="automation-title">
-                <h2 id="automation-title">Automation</h2>
-                <p>
-                  Link completed storage or production buildings to a producer. Higher-priority
-                  links reserve source and target capacity first; each link uses its configured
-                  throughput.
-                </p>
-                <label htmlFor="logistics-source">Source</label>
-                <select
-                  id="logistics-source"
-                  value={logisticsSourceId}
-                  onChange={(event) => setLogisticsSourceId(event.target.value)}
-                >
-                  <option value="">Choose source</option>
-                  {logisticsSources.map((building) => (
-                    <option key={building.id} value={building.id}>
-                      {building.id}
-                    </option>
-                  ))}
-                </select>
-                <label htmlFor="logistics-target">Producer target</label>
-                <select
-                  id="logistics-target"
-                  value={logisticsTargetId}
-                  onChange={(event) => setLogisticsTargetId(event.target.value)}
-                >
-                  <option value="">Choose producer</option>
-                  {logisticsTargets.map((building) => (
-                    <option key={building.id} value={building.id}>
-                      {building.id}
-                    </option>
-                  ))}
-                </select>
-                <label htmlFor="logistics-item">Input item</label>
-                <select
-                  id="logistics-item"
-                  value={logisticsItems.includes(logisticsItem) ? logisticsItem : ''}
-                  onChange={(event) =>
-                    setLogisticsItem(event.target.value as 'ore' | 'wood' | 'ingot' | 'tool')
-                  }
-                >
-                  <option value="">Choose input</option>
-                  {logisticsItems.map((item) => (
-                    <option key={item} value={item}>
-                      {item}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  disabled={
-                    !logisticsSourceId ||
-                    !logisticsTargetId ||
-                    !logisticsItems.includes(logisticsItem)
-                  }
-                  onClick={() =>
-                    send({
-                      type: 'createLogisticsLink',
-                      sourceBuildingId: logisticsSourceId,
-                      targetBuildingId: logisticsTargetId,
-                      item: logisticsItem,
-                    })
-                  }
-                >
-                  Create input link
-                </button>
-                {logisticsLinks.map((link) => {
-                  const source = state?.buildings[link.sourceBuildingId];
-                  const target = state?.buildings[link.targetBuildingId];
-                  const canRemove =
-                    link.ownerId === playerId ||
-                    (source &&
-                      target &&
-                      ['owner', 'logistics'].includes(roleForBuilding(source) ?? '') &&
-                      ['owner', 'logistics'].includes(roleForBuilding(target) ?? ''));
-                  return (
-                    <p className="logistics-link" key={link.id}>
-                      {link.sourceBuildingId} → {link.targetBuildingId} ({link.item},{' '}
-                      {link.throughputPerTick}/tick, {link.status.replaceAll('-', ' ')})
-                      <select
-                        aria-label={`Priority for ${link.id}`}
-                        disabled={!canRemove}
-                        value={link.priority}
-                        onChange={(event) =>
-                          send({
-                            type: 'setLogisticsPriority',
-                            linkId: link.id,
-                            priority: Number(event.target.value),
-                          })
-                        }
-                      >
-                        <option value={0}>Paused</option>
-                        <option value={1}>Normal</option>
-                        <option value={2}>High</option>
-                        <option value={3}>Urgent</option>
-                      </select>
-                      <button
-                        disabled={!canRemove}
-                        onClick={() => send({ type: 'removeLogisticsLink', linkId: link.id })}
-                      >
-                        Remove
-                      </button>
-                    </p>
-                  );
-                })}
-              </section>
-            </>
-          )}
-        </div>
-        <div
-          aria-labelledby="hud-tab-settlement"
-          className="hud-panel"
+          state={state}
+          player={player}
+          playerId={playerId}
+          preferences={preferences}
+          selectedTile={selectedTile}
+          selectedEntity={selectedEntity}
+          selectedBuildingId={selectedBuildingId}
+          selectedResource={selectedResource}
+          selectedTerritoryOwner={selectedTerritoryOwner}
+          actionTile={actionTile}
+          placement={placement}
+          buildMenu={buildMenu}
+          manageableBuildings={manageableBuildings}
+          roleForBuilding={roleForBuilding}
+          logisticsLinks={logisticsLinks}
+          logisticsSources={logisticsSources}
+          logisticsTargets={logisticsTargets}
+          logisticsItems={logisticsItems}
+          logisticsSourceId={logisticsSourceId}
+          setLogisticsSourceId={setLogisticsSourceId}
+          logisticsTargetId={logisticsTargetId}
+          setLogisticsTargetId={setLogisticsTargetId}
+          logisticsItem={logisticsItem}
+          setLogisticsItem={setLogisticsItem}
+          transfer={transfer}
+          send={send}
+        />
+        <SettlementPanel
           hidden={hudTab !== 'settlement'}
-          id="hud-panel-settlement"
-          role="tabpanel"
-          tabIndex={0}
-        >
-          {player && (
-            <>
-              <p>
-                Plot: {plot?.x}, {plot?.y}
-              </p>
-              <p>
-                Settlers {player.population.total}/{player.population.capacity} · Satisfaction{' '}
-                {player.population.satisfaction}
-              </p>
-              <p>
-                Jobs: {player.population.employed} employed · {player.population.unemployed}{' '}
-                available
-              </p>
-              <p>
-                Exploration: {exploredChunkCount} explored · {visibleChunkCount} currently visible
-              </p>
-              <section className="notification-center" aria-labelledby="notification-center-title">
-                <h2 id="notification-center-title">Notifications</h2>
-                {activeAlertEntries.length === 0 ? (
-                  <p className="notification-clear">No active settlement alerts.</p>
-                ) : (
-                  <>
-                    <p aria-live="polite">
-                      {activeAlertEntries.length} active alert
-                      {activeAlertEntries.length === 1 ? '' : 's'}, grouped by severity.
-                    </p>
-                    {alertGroups.map((group) => (
-                      <details
-                        className={`notification-group ${group.severity}`}
-                        key={group.severity}
-                      >
-                        <summary>
-                          {group.severity}: {group.notifications.length}
-                        </summary>
-                        <ul>
-                          {group.notifications.map((alert) => (
-                            <li key={alert.id}>
-                              <strong>{alert.title}</strong> — {alert.detail}
-                            </li>
-                          ))}
-                        </ul>
-                      </details>
-                    ))}
-                  </>
-                )}
-              </section>
-              <section className="settlement-stats" aria-labelledby="settlement-stats-title">
-                <h2 id="settlement-stats-title">Settlement needs</h2>
-                <p>
-                  Shelter:{' '}
-                  {player.population.capacity >= player.population.total ? 'met' : 'shortage'} (
-                  {player.population.total}/{player.population.capacity})
-                </p>
-                <p>
-                  Work: {player.population.employed}/{player.population.total} settlers assigned
-                </p>
-                <p>Wellbeing: {hasCompletedHearth ? 'hearth active' : 'hearth needed'}</p>
-              </section>
-              <section className="onboarding" aria-labelledby="getting-started-title">
-                <h2 id="getting-started-title">Getting started</h2>
-                {onboardingReservation && (
-                  <p className="onboarding-reservation">
-                    {onboardingReservation.securedTick === null
-                      ? `Starter reservation is temporary until your smelter is complete. Active commands extend it; current expiry is world tick ${onboardingReservation.expiresTick}.`
-                      : `Starter reservation secured at world tick ${onboardingReservation.securedTick}.`}
-                  </p>
-                )}
-                {/* The next step lives in the always-visible HUD header. */}
-                <ol>
-                  {onboardingSteps.map((step) => (
-                    <li className={step.complete ? 'complete' : undefined} key={step.text}>
-                      {step.complete ? 'Done: ' : ''}
-                      {step.text}
-                    </li>
-                  ))}
-                </ol>
-              </section>
-              <h2>Progression</h2>
-              <p>
-                <strong>{progressionEra}</strong>
-              </p>
-              <ol className="progression-milestones">
-                <li className="complete">Founding: establish production and shelter.</li>
-                <li className={player.research.unlocked.metallurgy ? 'complete' : undefined}>
-                  Industry: research Metallurgy to unlock workshops and watchtowers.
-                </li>
-                <li
-                  className={
-                    player.research.unlocked['territorial-charter'] ? 'complete' : undefined
-                  }
-                >
-                  Expansion: research the Territorial Charter to claim explored sectors.
-                </li>
-              </ol>
-              <p>
-                Research: {player.research.activeTechnology ?? 'idle'} (
-                {player.research.ticksRemaining} ticks)
-              </p>
-              <button
-                disabled={
-                  Boolean(player.research.activeTechnology) ||
-                  player.research.unlocked.metallurgy ||
-                  !canAffordTechnology(technologies.metallurgy.cost)
-                }
-                onClick={() => send({ type: 'research', technologyId: 'metallurgy' })}
-              >
-                Research {technologies.metallurgy.displayName} (
-                {technologyCostLabel(technologies.metallurgy.cost)})
-              </button>
-              <button
-                disabled={
-                  Boolean(player.research.activeTechnology) ||
-                  !player.research.unlocked.metallurgy ||
-                  player.research.unlocked['territorial-charter'] ||
-                  !canAffordTechnology(technologies['territorial-charter'].cost)
-                }
-                onClick={() => send({ type: 'research', technologyId: 'territorial-charter' })}
-              >
-                Research {technologies['territorial-charter'].displayName} (
-                {technologyCostLabel(technologies['territorial-charter'].cost)})
-              </button>
-              <section className="information-browser" aria-labelledby="information-browser-title">
-                <h2 id="information-browser-title">Settlement information</h2>
-                <p>
-                  Search construction, recipes, inventories, population, research, defense, and
-                  current alerts.
-                </p>
-                <div className="information-search-controls">
-                  <label htmlFor="information-category">
-                    Category
-                    <select
-                      id="information-category"
-                      value={informationCategory}
-                      onChange={(event) =>
-                        setInformationCategory(event.target.value as InformationCategory | 'all')
-                      }
-                    >
-                      <option value="all">All information</option>
-                      {informationCategories.map((category) => (
-                        <option key={category} value={category}>
-                          {category[0]?.toLocaleUpperCase()}
-                          {category.slice(1)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label htmlFor="information-query">
-                    Search
-                    <input
-                      id="information-query"
-                      type="search"
-                      value={informationQuery}
-                      onChange={(event) => setInformationQuery(event.target.value)}
-                      placeholder="Try wood, smelter, jobs, raider…"
-                    />
-                  </label>
-                </div>
-                <p aria-live="polite">
-                  {informationResults.length} result
-                  {informationResults.length === 1 ? '' : 's'}
-                </p>
-                {informationResults.length > 0 ? (
-                  <ul className="information-results">
-                    {informationResults.map((entry) => (
-                      <li key={entry.id}>
-                        <span className={`information-category ${entry.category}`}>
-                          {entry.category}
-                        </span>
-                        <strong>{entry.title}</strong>
-                        <span>{entry.detail}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p>No settlement information matches this search.</p>
-                )}
-              </section>
-            </>
-          )}
-        </div>
-        <div
-          aria-labelledby="hud-tab-world"
-          className="hud-panel"
+          player={player}
+          plot={plot}
+          progressionEra={progressionEra}
+          onboardingSteps={onboardingSteps ?? []}
+          onboardingReservation={onboardingReservation}
+          hasCompletedHearth={hasCompletedHearth}
+          exploredChunkCount={exploredChunkCount}
+          visibleChunkCount={visibleChunkCount}
+          canAffordTechnology={canAffordTechnology}
+          activeAlertEntries={activeAlertEntries}
+          alertGroups={alertGroups}
+          informationQuery={informationQuery}
+          setInformationQuery={setInformationQuery}
+          informationCategory={informationCategory}
+          setInformationCategory={setInformationCategory}
+          informationResults={informationResults}
+          send={send}
+        />
+        <WorldPanel
           hidden={hudTab !== 'world'}
-          id="hud-panel-world"
-          role="tabpanel"
-          tabIndex={0}
-        >
-          {player && (
-            <>
-              <h2>Defense</h2>
-              <p className={activeThreats.length > 0 ? 'threat-active' : ''}>
-                {activeThreats.length > 0
-                  ? `${activeThreats.length} raider threat${activeThreats.length === 1 ? '' : 's'} active`
-                  : 'No active raider threats'}
-              </p>
-              <button onClick={() => send({ type: 'explore', ...frontier })}>
-                Explore frontier
-              </button>
-              <button
-                disabled={!player.research.unlocked['territorial-charter']}
-                onClick={() => send({ type: 'claimTerritory', ...frontier })}
-              >
-                Claim frontier sector
-              </button>
-              <section className="strategic-map" aria-labelledby="strategic-map-title">
-                <h2 id="strategic-map-title">Strategic world map</h2>
-                <p>
-                  Aggregated explored chunks only. Entities hidden by fog are never included in
-                  these summaries.
-                </p>
-                <button disabled={worldMapLoading} onClick={() => requestWorldMap()}>
-                  {worldMapLoading && !worldMap ? 'Loading map…' : 'Refresh strategic map'}
-                </button>
-                {worldMap && (
-                  <>
-                    <p>
-                      Showing {worldMap.chunks.length} of {worldMap.totalExploredChunks} explored
-                      chunks.
-                    </p>
-                    <ul className="strategic-map-list">
-                      {worldMap.chunks.map((chunk) => (
-                        <li key={`${chunk.x}:${chunk.y}`}>
-                          <strong>
-                            {chunk.x}:{chunk.y}{' '}
-                            {chunk.currentlyVisible ? '(visible)' : '(explored)'}
-                          </strong>
-                          <span>
-                            Resources: {chunk.terrain.ore} ore tiles, {chunk.terrain.wood} timber
-                            tiles
-                          </span>
-                          <span>
-                            Own buildings: {chunk.ownBuildingCount}
-                            {chunk.currentlyVisible
-                              ? ` · foreign buildings: ${chunk.visibleForeignBuildingCount} · threats: ${chunk.visibleThreatCount}`
-                              : ''}
-                          </span>
-                          {chunk.claimedSectors.length > 0 && (
-                            <span>
-                              Claims:{' '}
-                              {chunk.claimedSectors
-                                .map(({ ownerId, count }) => `${ownerId} (${count})`)
-                                .join(', ')}
-                            </span>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                    {worldMap.nextCursor && (
-                      <button
-                        disabled={worldMapLoading}
-                        onClick={() => requestWorldMap(worldMap.nextCursor)}
-                      >
-                        {worldMapLoading ? 'Loading…' : 'Load more explored chunks'}
-                      </button>
-                    )}
-                  </>
-                )}
-              </section>
-            </>
-          )}
-        </div>
-        <div
-          aria-labelledby="hud-tab-coop"
-          className="hud-panel"
+          player={player}
+          activeThreats={activeThreats}
+          frontier={frontier}
+          worldMap={worldMap}
+          worldMapLoading={worldMapLoading}
+          requestWorldMap={requestWorldMap}
+          send={send}
+        />
+        <CoopPanel
           hidden={hudTab !== 'coop'}
-          id="hud-panel-coop"
-          role="tabpanel"
-          tabIndex={0}
-        >
-          {player && (
-            <>
-              <h2>Cooperation</h2>
-              {frontierBeacon && personalSettlement && (
-                <section className="global-objective" aria-labelledby="frontier-beacon-title">
-                  <h3 id="frontier-beacon-title">{frontierBeaconDefinition.displayName}</h3>
-                  <p>{frontierBeaconDefinition.description}</p>
-                  <p>
-                    Shared progress: {frontierBeacon.totalContributed}/
-                    {frontierBeaconDefinition.targetAmount} tools. Your contribution:{' '}
-                    {frontierBeacon.contributionsByPlayer[playerId] ?? 0}.
-                  </p>
-                  {frontierBeacon.completedTick === null ? (
-                    <button
-                      disabled={
-                        player.inventory.tool < 1 ||
-                        frontierBeacon.totalContributed >= frontierBeaconDefinition.targetAmount
-                      }
-                      onClick={() =>
-                        send(
-                          {
-                            type: 'contributeToObjective',
-                            objectiveId: 'frontier-beacon',
-                            settlementId: personalSettlement.id,
-                            amount: 1,
-                          },
-                          'Contributed one tool to the Frontier Beacon.',
-                        )
-                      }
-                    >
-                      Contribute 1 tool
-                    </button>
-                  ) : (
-                    <>
-                      <p>Completed at tick {frontierBeacon.completedTick}.</p>
-                      <button
-                        disabled={
-                          !frontierBeacon.contributionsByPlayer[playerId] ||
-                          Boolean(frontierBeacon.rewardClaims[playerId])
-                        }
-                        onClick={() =>
-                          send(
-                            { type: 'claimObjectiveReward', objectiveId: 'frontier-beacon' },
-                            'Claimed the Frontier Beacon reward.',
-                          )
-                        }
-                      >
-                        {frontierBeacon.rewardClaims[playerId]
-                          ? 'Reward claimed'
-                          : 'Claim reward: 2 ingots'}
-                      </button>
-                    </>
-                  )}
-                </section>
-              )}
-              <section className="identity-panel" aria-labelledby="identity-title">
-                <h3 id="identity-title">Names</h3>
-                <p>
-                  Playing as {state.social.playerNames[playerId] ?? playerId}. Names are normalized,
-                  unique, length-limited, and checked by server moderation rules.
-                </p>
-                <label htmlFor="player-name">Player display name</label>
-                <input
-                  id="player-name"
-                  value={playerNameDraft}
-                  maxLength={24}
-                  onChange={(event) => setPlayerNameDraft(event.target.value)}
-                  placeholder={state.social.playerNames[playerId] ?? 'Settler'}
-                />
-                <button
-                  disabled={!playerNameDraft.trim()}
-                  onClick={() => {
-                    send(
-                      { type: 'setPlayerName', name: playerNameDraft },
-                      'Updated your player name.',
-                    );
-                    setPlayerNameDraft('');
-                  }}
-                >
-                  Update player name
-                </button>
-                <details className="account-deletion">
-                  <summary>Delete account</summary>
-                  <p>
-                    This permanently removes your private player state, buildings, scouts, land, and
-                    memberships. Moderation and transaction ledgers retain server-side integrity
-                    records with your display name removed. This player identity cannot be reused.
-                  </p>
-                  {ownedSettlements.length > 0 && (
-                    <p>Transfer ownership of every settlement before deleting this account.</p>
-                  )}
-                  <label htmlFor="account-deletion-confirmation">Type DELETE to confirm</label>
-                  <input
-                    id="account-deletion-confirmation"
-                    value={accountDeletionConfirmation}
-                    maxLength={16}
-                    autoComplete="off"
-                    onChange={(event) => setAccountDeletionConfirmation(event.target.value)}
-                  />
-                  <button
-                    className="danger-button"
-                    disabled={
-                      ownedSettlements.length > 0 || accountDeletionConfirmation !== 'DELETE'
-                    }
-                    onClick={() =>
-                      send(
-                        { type: 'deleteAccount', confirmation: accountDeletionConfirmation },
-                        undefined,
-                        () => {
-                          sessionStorage.removeItem('kings-dev-player-id');
-                          window.location.reload();
-                        },
-                      )
-                    }
-                  >
-                    Permanently delete account
-                  </button>
-                </details>
-              </section>
-              <section className="chat-panel" aria-labelledby="chat-title">
-                <h3 id="chat-title">Cooperation chat</h3>
-                <label htmlFor="chat-channel">Channel</label>
-                <select
-                  id="chat-channel"
-                  value={chatSettlementId}
-                  onChange={(event) => setChatSettlementId(event.target.value)}
-                >
-                  <option value="global">Global</option>
-                  {settlements
-                    .filter((settlement) => settlement.members[playerId])
-                    .map((settlement) => (
-                      <option key={settlement.id} value={settlement.id}>
-                        {state.social.settlementNames[settlement.id] ?? settlement.id}
-                      </option>
-                    ))}
-                </select>
-                <label htmlFor="chat-message">Message</label>
-                <textarea
-                  id="chat-message"
-                  value={chatText}
-                  maxLength={280}
-                  onChange={(event) => setChatText(event.target.value)}
-                  placeholder="Coordinate with other settlements"
-                />
-                <button
-                  disabled={!chatText.trim()}
-                  onClick={() => {
-                    send(
-                      chatSettlementId === 'global'
-                        ? { type: 'sendChatMessage', channel: 'global', text: chatText }
-                        : {
-                            type: 'sendChatMessage',
-                            channel: 'settlement',
-                            settlementId: chatSettlementId,
-                            text: chatText,
-                          },
-                      'Message sent.',
-                    );
-                    setChatText('');
-                  }}
-                >
-                  Send message
-                </button>
-                <ul className="chat-messages" aria-live="polite">
-                  {chatMessages.slice(-30).map((message) => (
-                    <li key={message.id}>
-                      <strong>{message.senderName}</strong> [{message.channel}] {message.text}
-                      {message.senderId !== playerId && (
-                        <span className="chat-controls">
-                          <button
-                            onClick={() =>
-                              send({
-                                type: 'setPlayerBlocked',
-                                targetPlayerId: message.senderId,
-                                blocked: true,
-                              })
-                            }
-                          >
-                            Block
-                          </button>
-                          <button
-                            onClick={() =>
-                              send(
-                                {
-                                  type: 'reportChatMessage',
-                                  messageId: message.id,
-                                  reason: 'Inappropriate or abusive message',
-                                },
-                                'Message reported for moderator review.',
-                              )
-                            }
-                          >
-                            Report
-                          </button>
-                        </span>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-                {blockedPlayerIds.length > 0 && (
-                  <p>
-                    Blocked:{' '}
-                    {blockedPlayerIds.map((blockedId) => (
-                      <button
-                        key={blockedId}
-                        onClick={() =>
-                          send({
-                            type: 'setPlayerBlocked',
-                            targetPlayerId: blockedId,
-                            blocked: false,
-                          })
-                        }
-                      >
-                        Unblock {state.social.playerNames[blockedId] ?? blockedId}
-                      </button>
-                    ))}
-                  </p>
-                )}
-              </section>
-              <section className="player-directory" aria-labelledby="directory-title">
-                <h3 id="directory-title">World directory</h3>
-                <p>Search public player and settlement identifiers without revealing map state.</p>
-                <label htmlFor="directory-query">Player or settlement</label>
-                <input
-                  id="directory-query"
-                  value={directoryQuery}
-                  maxLength={32}
-                  onChange={(event) => setDirectoryQuery(event.target.value)}
-                  placeholder="Search the world"
-                />
-                <button onClick={() => requestDirectory()}>Search directory</button>
-                {directory && (
-                  <ul className="directory-results">
-                    {directory.entries.map((entry) =>
-                      entry.type === 'player' ? (
-                        <li key={`player:${entry.playerId}`}>
-                          Player {entry.displayName} ({entry.playerId}){' '}
-                          <button onClick={() => setRecipientId(entry.playerId)}>
-                            Send resources
-                          </button>{' '}
-                          <button onClick={() => setInviteeId(entry.playerId)}>Invite</button>
-                        </li>
-                      ) : (
-                        <li key={`settlement:${entry.settlementId}`}>
-                          {entry.displayName} ({entry.settlementId}) — owner {entry.ownerId},{' '}
-                          {entry.memberCount} member
-                          {entry.memberCount === 1 ? '' : 's'}
-                        </li>
-                      ),
-                    )}
-                  </ul>
-                )}
-                {directory?.nextCursor && (
-                  <button onClick={() => requestDirectory(directory.nextCursor)}>
-                    More results
-                  </button>
-                )}
-              </section>
-              <label htmlFor="recipient-id">Recipient player ID</label>
-              <input
-                id="recipient-id"
-                value={recipientId}
-                onChange={(event) => setRecipientId(event.target.value)}
-                placeholder="dev-…"
-              />
-              <label htmlFor="recipient-item">Resource to send</label>
-              <select
-                id="recipient-item"
-                value={recipientItem}
-                onChange={(event) =>
-                  setRecipientItem(event.target.value as 'ore' | 'wood' | 'ingot' | 'tool')
-                }
-              >
-                <option value="ore">Ore</option>
-                <option value="wood">Wood</option>
-                <option value="ingot">Ingot</option>
-                <option value="tool">Tool</option>
-              </select>
-              <button
-                disabled={!recipientId.trim() || player.inventory[recipientItem] < 1}
-                onClick={() =>
-                  send({
-                    type: 'transferToPlayer',
-                    targetPlayerId: recipientId.trim(),
-                    item: recipientItem,
-                    amount: 1,
-                  })
-                }
-              >
-                Send 1 {recipientItem}
-              </button>
-              <section className="settlement-panel" aria-labelledby="settlement-title">
-                <h2 id="settlement-title">Settlement roles</h2>
-                <p>
-                  Owners invite members. Builders maintain production; logistics members move items.
-                </p>
-                <label htmlFor="invitee-id">Invite player ID</label>
-                <input
-                  id="invitee-id"
-                  value={inviteeId}
-                  onChange={(event) => setInviteeId(event.target.value)}
-                  placeholder="dev-player"
-                />
-                <button
-                  disabled={!personalSettlement || !inviteeId.trim()}
-                  onClick={() =>
-                    personalSettlement &&
-                    send({
-                      type: 'inviteToSettlement',
-                      settlementId: personalSettlement.id,
-                      targetPlayerId: inviteeId.trim(),
-                    })
-                  }
-                >
-                  Invite to my settlement
-                </button>
-                {settlements.map((settlement) => {
-                  const role = settlement.members[playerId];
-                  const invited = settlement.invitations[playerId];
-                  const projects = sharedProjects.filter(
-                    (project) => project.settlementId === settlement.id,
-                  );
-                  return (
-                    <section className="settlement" key={settlement.id}>
-                      <strong>
-                        {state.social.settlementNames[settlement.id] ?? settlement.id}
-                      </strong>
-                      {invited && !role && (
-                        <button
-                          onClick={() =>
-                            send({ type: 'acceptSettlementInvite', settlementId: settlement.id })
-                          }
-                        >
-                          Accept invitation
-                        </button>
-                      )}
-                      {role && (
-                        <>
-                          <span>Your role: {role}</span>
-                          {role === 'owner' && (
-                            <>
-                              <label htmlFor={`settlement-name-${settlement.id}`}>
-                                Settlement name
-                              </label>
-                              <input
-                                id={`settlement-name-${settlement.id}`}
-                                value={settlementNameDraft}
-                                maxLength={32}
-                                onChange={(event) => setSettlementNameDraft(event.target.value)}
-                                placeholder={
-                                  state.social.settlementNames[settlement.id] ?? settlement.id
-                                }
-                              />
-                              <button
-                                disabled={!settlementNameDraft.trim()}
-                                onClick={() => {
-                                  send(
-                                    {
-                                      type: 'setSettlementName',
-                                      settlementId: settlement.id,
-                                      name: settlementNameDraft,
-                                    },
-                                    'Updated the settlement name.',
-                                  );
-                                  setSettlementNameDraft('');
-                                }}
-                              >
-                                Update settlement name
-                              </button>
-                            </>
-                          )}
-                          {role !== 'owner' && (
-                            <button
-                              onClick={() =>
-                                send({ type: 'leaveSettlement', settlementId: settlement.id })
-                              }
-                            >
-                              Leave settlement
-                            </button>
-                          )}
-                          <ul className="member-list">
-                            {Object.entries(settlement.members).map(([memberId, memberRole]) => (
-                              <li key={memberId}>
-                                {state.social.playerNames[memberId] ?? memberId}: {memberRole}
-                                {role === 'owner' && memberId !== playerId && (
-                                  <span className="role-controls">
-                                    <button
-                                      onClick={() =>
-                                        send({
-                                          type: 'setSettlementRole',
-                                          settlementId: settlement.id,
-                                          targetPlayerId: memberId,
-                                          role: 'builder',
-                                        })
-                                      }
-                                    >
-                                      Builder
-                                    </button>
-                                    <button
-                                      onClick={() =>
-                                        send({
-                                          type: 'setSettlementRole',
-                                          settlementId: settlement.id,
-                                          targetPlayerId: memberId,
-                                          role: 'logistics',
-                                        })
-                                      }
-                                    >
-                                      Logistics
-                                    </button>
-                                    <button
-                                      onClick={() =>
-                                        send({
-                                          type: 'setSettlementRole',
-                                          settlementId: settlement.id,
-                                          targetPlayerId: memberId,
-                                          role: 'member',
-                                        })
-                                      }
-                                    >
-                                      Member
-                                    </button>
-                                    <button
-                                      onClick={() =>
-                                        send({
-                                          type: 'transferSettlementOwnership',
-                                          settlementId: settlement.id,
-                                          targetPlayerId: memberId,
-                                        })
-                                      }
-                                    >
-                                      Transfer ownership
-                                    </button>
-                                    <button
-                                      onClick={() =>
-                                        send({
-                                          type: 'removeSettlementMember',
-                                          settlementId: settlement.id,
-                                          targetPlayerId: memberId,
-                                        })
-                                      }
-                                    >
-                                      Remove member
-                                    </button>
-                                  </span>
-                                )}
-                              </li>
-                            ))}
-                          </ul>
-                          {(role === 'owner' || role === 'builder') && (
-                            <button
-                              disabled={!selectedTile}
-                              onClick={() =>
-                                selectedTile &&
-                                send(
-                                  {
-                                    type: 'createSharedConstructionProject',
-                                    settlementId: settlement.id,
-                                    buildingKind: 'storage',
-                                    ...selectedTile,
-                                  },
-                                  'Created a shared storage construction project.',
-                                )
-                              }
-                            >
-                              Start shared storage at selected tile
-                            </button>
-                          )}
-                          {projects.length > 0 && (
-                            <ul className="project-list">
-                              {projects.map((project) => {
-                                const item = (['wood', 'ore', 'ingot', 'tool'] as const).find(
-                                  (candidate) =>
-                                    project.contributed[candidate] < project.required[candidate],
-                                );
-                                const remaining = item
-                                  ? project.required[item] - project.contributed[item]
-                                  : 0;
-                                return (
-                                  <li key={project.id}>
-                                    {project.buildingKind} at {project.x}, {project.y}:{' '}
-                                    {project.completedTick === null
-                                      ? `${project.contributed.wood}/${project.required.wood} wood funded`
-                                      : `completed at tick ${project.completedTick}`}
-                                    {project.completedTick === null && item && (
-                                      <button
-                                        disabled={player.inventory[item] < 1 || remaining < 1}
-                                        onClick={() =>
-                                          send(
-                                            {
-                                              type: 'contributeToSharedConstructionProject',
-                                              projectId: project.id,
-                                              item,
-                                              amount: 1,
-                                            },
-                                            `Contributed one ${item} to the shared project.`,
-                                          )
-                                        }
-                                      >
-                                        Contribute 1 {item}
-                                      </button>
-                                    )}
-                                    {project.contributionHistory.length > 0 && (
-                                      <small>
-                                        {' '}
-                                        Recent:{' '}
-                                        {project.contributionHistory
-                                          .slice(-3)
-                                          .map(
-                                            (contribution) =>
-                                              `${contribution.playerId} +${contribution.amount} ${contribution.item}`,
-                                          )
-                                          .join(', ')}
-                                      </small>
-                                    )}
-                                  </li>
-                                );
-                              })}
-                            </ul>
-                          )}
-                        </>
-                      )}
-                    </section>
-                  );
-                })}
-              </section>
-              {transfers.length > 0 && (
-                <section aria-labelledby="transfer-history-title">
-                  <h2 id="transfer-history-title">Recent transfers</h2>
-                  <ul className="transfer-history">
-                    {transfers.slice(-5).map((transfer) => (
-                      <li key={transfer.id}>
-                        {transfer.fromPlayerId === playerId ? 'Sent' : 'Received'} {transfer.amount}{' '}
-                        {transfer.item} {transfer.fromPlayerId === playerId ? 'to' : 'from'}{' '}
-                        {transfer.fromPlayerId === playerId
-                          ? transfer.toPlayerId
-                          : transfer.fromPlayerId}
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              )}
-            </>
-          )}
-        </div>
-        <div
-          aria-labelledby="hud-tab-settings"
-          className="hud-panel"
+          state={state}
+          player={player}
+          playerId={playerId}
+          selectedTile={selectedTile}
+          settlements={settlements}
+          ownedSettlements={ownedSettlements}
+          personalSettlement={personalSettlement}
+          sharedProjects={sharedProjects}
+          frontierBeacon={frontierBeacon}
+          frontierBeaconDefinition={frontierBeaconDefinition}
+          transfers={transfers}
+          chatMessages={chatMessages}
+          chatText={chatText}
+          setChatText={setChatText}
+          chatSettlementId={chatSettlementId}
+          setChatSettlementId={setChatSettlementId}
+          blockedPlayerIds={blockedPlayerIds}
+          directory={directory}
+          directoryQuery={directoryQuery}
+          setDirectoryQuery={setDirectoryQuery}
+          requestDirectory={requestDirectory}
+          inviteeId={inviteeId}
+          setInviteeId={setInviteeId}
+          recipientId={recipientId}
+          setRecipientId={setRecipientId}
+          recipientItem={recipientItem}
+          setRecipientItem={setRecipientItem}
+          playerNameDraft={playerNameDraft}
+          setPlayerNameDraft={setPlayerNameDraft}
+          settlementNameDraft={settlementNameDraft}
+          setSettlementNameDraft={setSettlementNameDraft}
+          accountDeletionConfirmation={accountDeletionConfirmation}
+          setAccountDeletionConfirmation={setAccountDeletionConfirmation}
+          send={send}
+        />
+        <SettingsPanel
           hidden={hudTab !== 'settings'}
-          id="hud-panel-settings"
-          role="tabpanel"
-          tabIndex={0}
-        >
-          <section className="settings-panel" aria-labelledby="settings-title">
-            <h2 id="settings-title">Accessibility and controls</h2>
-            <label htmlFor="text-scale">Text size</label>
-            <select
-              id="text-scale"
-              value={preferences.textScale}
-              onChange={(event) =>
-                setPreferences((current) => ({
-                  ...current,
-                  textScale: Number(event.target.value) as ClientPreferences['textScale'],
-                }))
-              }
-            >
-              <option value={100}>Default</option>
-              <option value={120}>Large</option>
-              <option value={140}>Extra large</option>
-            </select>
-            <label className="checkbox-label" htmlFor="reduced-motion">
-              <input
-                id="reduced-motion"
-                type="checkbox"
-                checked={preferences.reducedMotion}
-                onChange={(event) =>
-                  setPreferences((current) => ({ ...current, reducedMotion: event.target.checked }))
-                }
-              />
-              Reduce motion
-            </label>
-            <p className="settings-help">Focus a camera binding, then press its replacement key.</p>
-            {(
-              [
-                ['panUp', 'Pan up'],
-                ['panLeft', 'Pan left'],
-                ['panDown', 'Pan down'],
-                ['panRight', 'Pan right'],
-              ] as const
-            ).map(([action, label]) => (
-              <label key={action} htmlFor={`binding-${action}`}>
-                {label}
-                <input
-                  id={`binding-${action}`}
-                  className="binding-input"
-                  readOnly
-                  value={displayKey(preferences.camera[action])}
-                  onKeyDown={rebindCamera(action)}
-                  aria-describedby="camera-binding-help"
-                />
-              </label>
-            ))}
-            <p className="settings-help" id="camera-binding-help">
-              Arrow keys always select tiles; camera bindings must be unique.
-            </p>
-            <button
-              type="button"
-              onClick={() => {
-                setPreferences(defaultPreferences);
-                notify('Accessibility and camera controls restored to defaults.');
-              }}
-            >
-              Restore control defaults
-            </button>
-          </section>
-          <details className="renderer-debug">
-            <summary>Renderer diagnostics</summary>
-            <p>Diagnostics are local-only and do not change the shared world.</p>
-            <label className="checkbox-label" htmlFor="renderer-debug-enabled">
-              <input
-                id="renderer-debug-enabled"
-                type="checkbox"
-                checked={rendererDebug.enabled}
-                onChange={(event) =>
-                  setRendererDebug((current) => ({ ...current, enabled: event.target.checked }))
-                }
-              />
-              Show map overlays
-            </label>
-            <label className="checkbox-label" htmlFor="renderer-debug-coordinates">
-              <input
-                id="renderer-debug-coordinates"
-                type="checkbox"
-                disabled={!rendererDebug.enabled}
-                checked={rendererDebug.showCoordinates}
-                onChange={(event) =>
-                  setRendererDebug((current) => ({
-                    ...current,
-                    showCoordinates: event.target.checked,
-                  }))
-                }
-              />
-              Tile coordinates
-            </label>
-            <label className="checkbox-label" htmlFor="renderer-debug-chunks">
-              <input
-                id="renderer-debug-chunks"
-                type="checkbox"
-                disabled={!rendererDebug.enabled}
-                checked={rendererDebug.showChunks}
-                onChange={(event) =>
-                  setRendererDebug((current) => ({ ...current, showChunks: event.target.checked }))
-                }
-              />
-              Chunk labels
-            </label>
-            <label className="checkbox-label" htmlFor="renderer-debug-entities">
-              <input
-                id="renderer-debug-entities"
-                type="checkbox"
-                disabled={!rendererDebug.enabled}
-                checked={rendererDebug.showEntityIds}
-                onChange={(event) =>
-                  setRendererDebug((current) => ({
-                    ...current,
-                    showEntityIds: event.target.checked,
-                  }))
-                }
-              />
-              Entity IDs
-            </label>
-            <label className="checkbox-label" htmlFor="renderer-debug-paths">
-              <input
-                id="renderer-debug-paths"
-                type="checkbox"
-                disabled={!rendererDebug.enabled}
-                checked={rendererDebug.showPaths}
-                onChange={(event) =>
-                  setRendererDebug((current) => ({ ...current, showPaths: event.target.checked }))
-                }
-              />
-              Threat paths
-            </label>
-          </details>
-          <section className="operations-overlay" aria-labelledby="operations-overlay-title">
-            <h2 id="operations-overlay-title">Operations overlay</h2>
-            <label htmlFor="operations-overlay-select">
-              Map layer
-              <select
-                id="operations-overlay-select"
-                value={operationsOverlay}
-                onChange={(event) => setOperationsOverlay(event.target.value as OperationsOverlay)}
-              >
-                <option value="none">None</option>
-                <option value="resources">Resources</option>
-                <option value="logistics">Logistics flow</option>
-                <option value="production">Production state</option>
-                <option value="bottlenecks">Bottlenecks</option>
-              </select>
-            </label>
-            <p>Layers are local views of already-authorized world state.</p>
-          </section>
-          <details className="performance-panel">
-            <summary>Performance</summary>
-            <p>
-              {canvasMetrics?.framesPerSecond ?? '—'} FPS · {canvasMetrics?.renderedTiles ?? '—'}{' '}
-              tiles · {canvasMetrics?.visibleBuildings ?? '—'} buildings ·{' '}
-              {canvasMetrics?.visibleThreats ?? '—'} threats
-            </p>
-            <p>
-              {canvasMetrics?.activeChunks ?? '—'} active chunks · {messageRate.received} received/s
-              · {messageRate.sent} sent/s
-            </p>
-            <p>
-              {canvasMetrics?.renderObjectCount ?? '—'} render objects ·{' '}
-              {renderAssets
-                ? Math.round(
-                    Object.values(spriteAtlasManifest).reduce(
-                      (bytes, atlas) => bytes + atlas.width * atlas.height * 4,
-                      0,
-                    ) / 1024,
-                  )
-                : '—'}{' '}
-              KiB estimated atlas memory · {updateApplicationMs.toFixed(2)} ms update apply
-            </p>
-          </details>
-        </div>
+          preferences={preferences}
+          setPreferences={setPreferences}
+          rebindCamera={rebindCamera}
+          rendererDebug={rendererDebug}
+          setRendererDebug={setRendererDebug}
+          operationsOverlay={operationsOverlay}
+          setOperationsOverlay={setOperationsOverlay}
+          canvasMetrics={canvasMetrics}
+          renderAssets={renderAssets}
+          messageRate={messageRate}
+          updateApplicationMs={updateApplicationMs}
+          notify={notify}
+        />
       </aside>
       <div className="toast-region" role="status" aria-live="polite">
         {notice.text && (

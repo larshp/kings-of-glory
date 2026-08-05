@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   inspectWorld,
   PLAYER_INVENTORY_CAPACITY,
+  playerId as toPlayerId,
   snapshot,
   stateHash,
   type Building,
@@ -187,9 +188,9 @@ export const applyAdministrativeMutation = (
     beforeState = { settlement: clone(settlement), projectBuildings: clone(projectBuildings()) };
     settlement.members[settlement.ownerId] = 'member';
     settlement.members[mutation.playerId] = 'owner';
-    settlement.ownerId = mutation.playerId as never;
+    settlement.ownerId = toPlayerId(mutation.playerId);
     for (const building of Object.values(projectBuildings()))
-      building.ownerId = mutation.playerId as never;
+      building.ownerId = toPlayerId(mutation.playerId);
     afterState = { settlement: clone(settlement), projectBuildings: clone(projectBuildings()) };
   } else if (mutation.type === 'removeChatMessage') {
     const index = state.social.messages.findIndex(({ id }) => id === mutation.messageId);

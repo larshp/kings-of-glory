@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isOpenTile } from '@kings/simulation';
+import { buildingId as toBuildingId, isOpenTile, playerId as toPlayerId } from '@kings/simulation';
 import { GlobalWorldHost, MemoryWorldPersistence, type Connection } from '../src/index.js';
 
 /**
@@ -82,10 +82,10 @@ describe('serialized world conflicts', () => {
       clients.slice(1).map((client, index) =>
         host.command(client, {
           id: `hotspot-transfer-${index + 1}`,
-          playerId: `hotspot-${index + 1}` as never,
+          playerId: toPlayerId(`hotspot-${index + 1}`),
           sequence: 1,
           type: 'transferToPlayer',
-          targetPlayerId: 'hotspot-0' as never,
+          targetPlayerId: toPlayerId('hotspot-0'),
           item: 'wood',
           amount: 1,
         }),
@@ -125,20 +125,20 @@ describe('serialized world conflicts', () => {
 
     const first = host.command(alice, {
       id: 'overlap-transfer-a',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'transferToPlayer',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
       item: 'ingot',
       amount: 5,
     });
     await persistence.firstStarted;
     const second = host.command(carol, {
       id: 'overlap-transfer-c',
-      playerId: 'player-c' as never,
+      playerId: toPlayerId('player-c'),
       sequence: 1,
       type: 'transferToPlayer',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
       item: 'ingot',
       amount: 5,
     });
@@ -169,10 +169,10 @@ describe('serialized world conflicts', () => {
     await host.connect(bob, 'player-b');
     const command = {
       id: 'overlap-duplicate-transfer',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'transferToPlayer' as const,
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
       item: 'wood' as const,
       amount: 2,
     };
@@ -199,33 +199,33 @@ describe('serialized world conflicts', () => {
       await host.connect(builder, 'player-b');
       await host.command(owner, {
         id: 'permission-smelter',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'placeSmelter',
         ...plotSite(host, 'player-a'),
       });
       await host.command(owner, {
         id: 'permission-invite',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'inviteToSettlement',
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-b' as never,
+        targetPlayerId: toPlayerId('player-b'),
       });
       await host.command(builder, {
         id: 'permission-accept',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 1,
         type: 'acceptSettlementInvite',
         settlementId: 'settlement-player-a',
       });
       await host.command(owner, {
         id: 'permission-delegate',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 3,
         type: 'setSettlementRole',
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-b' as never,
+        targetPlayerId: toPlayerId('player-b'),
         role: 'builder',
       });
       const smelter = Object.values(host.world.buildings).find(({ kind }) => kind === 'smelter')!;
@@ -236,15 +236,15 @@ describe('serialized world conflicts', () => {
     await Promise.all([
       revokedFirst.host.command(revokedFirst.owner, {
         id: 'permission-revoke-first',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 4,
         type: 'removeSettlementMember',
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-b' as never,
+        targetPlayerId: toPlayerId('player-b'),
       }),
       revokedFirst.host.command(revokedFirst.builder, {
         id: 'permission-action-second',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 2,
         type: 'setJobPriority',
         buildingId: revokedFirst.smelter.id,
@@ -264,7 +264,7 @@ describe('serialized world conflicts', () => {
     await Promise.all([
       actionFirst.host.command(actionFirst.builder, {
         id: 'permission-action-first',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 2,
         type: 'setJobPriority',
         buildingId: actionFirst.smelter.id,
@@ -272,11 +272,11 @@ describe('serialized world conflicts', () => {
       }),
       actionFirst.host.command(actionFirst.owner, {
         id: 'permission-revoke-second',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 4,
         type: 'removeSettlementMember',
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-b' as never,
+        targetPlayerId: toPlayerId('player-b'),
       }),
     ]);
     expect(commandOutcome(actionFirst.builder, 'permission-action-first')).toMatchObject({
@@ -299,27 +299,27 @@ describe('serialized world conflicts', () => {
     await host.connect(invitee, 'player-b');
     await host.command(owner, {
       id: 'membership-invite',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'inviteToSettlement',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     await Promise.all([
       host.command(invitee, {
         id: 'membership-accept',
-        playerId: 'player-b' as never,
+        playerId: toPlayerId('player-b'),
         sequence: 1,
         type: 'acceptSettlementInvite',
         settlementId: 'settlement-player-a',
       }),
       host.command(owner, {
         id: 'membership-remove',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'removeSettlementMember',
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-b' as never,
+        targetPlayerId: toPlayerId('player-b'),
       }),
     ]);
     expect(commandOutcome(invitee, 'membership-accept')).toMatchObject({ accepted: true });
@@ -336,15 +336,15 @@ describe('serialized world conflicts', () => {
     await host.connect(successor, 'player-b');
     await host.command(owner, {
       id: 'ownership-invite',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'inviteToSettlement',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     await host.command(successor, {
       id: 'ownership-accept',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 1,
       type: 'acceptSettlementInvite',
       settlementId: 'settlement-player-a',
@@ -352,19 +352,19 @@ describe('serialized world conflicts', () => {
     await Promise.all([
       host.command(owner, {
         id: 'ownership-transfer',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'transferSettlementOwnership',
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-b' as never,
+        targetPlayerId: toPlayerId('player-b'),
       }),
       host.command(owner, {
         id: 'ownership-remove-after',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 3,
         type: 'removeSettlementMember',
         settlementId: 'settlement-player-a',
-        targetPlayerId: 'player-b' as never,
+        targetPlayerId: toPlayerId('player-b'),
       }),
     ]);
     expect(commandOutcome(owner, 'ownership-transfer')).toMatchObject({ accepted: true });

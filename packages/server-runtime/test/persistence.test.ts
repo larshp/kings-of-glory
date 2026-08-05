@@ -12,11 +12,13 @@ import {
 } from '../src/index.js';
 import {
   advanceTick,
+  buildingId as toBuildingId,
   chunkKeyFor,
   createWorld,
   isOpenTile,
   joinPlayer,
   nearestOreTile,
+  playerId as toPlayerId,
   terrainAt,
 } from '@kings/simulation';
 import { parseEnvironment } from '../src/env.js';
@@ -70,7 +72,7 @@ describe('durable world recovery', () => {
   });
 
   it('upgrades the oldest supported database schema with only later forward migrations', async () => {
-    const statements: Array<{ sql: string; parameters?: readonly unknown[] }> = [];
+    const statements: Array<{ sql: string; parameters: readonly unknown[] | undefined }> = [];
     const client = {
       async query(sql: string, parameters?: readonly unknown[]) {
         statements.push({ sql, parameters });
@@ -142,7 +144,7 @@ describe('durable world recovery', () => {
     const ore = oreTileFor(host);
     await host.command(client, {
       id: 'gather-dirty-chunk',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'gather',
       ...ore,
@@ -160,7 +162,7 @@ describe('durable world recovery', () => {
       targetTick: 1,
       command: {
         id: 'old-command',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 1,
         type: 'gather',
         x: 0,
@@ -175,7 +177,7 @@ describe('durable world recovery', () => {
       targetTick: 5,
       command: {
         id: 'recent-command',
-        playerId: 'player-a' as never,
+        playerId: toPlayerId('player-a'),
         sequence: 2,
         type: 'gather',
         x: 0,
@@ -195,7 +197,7 @@ describe('durable world recovery', () => {
     await host.connect(client, 'player-a');
     await host.command(client, {
       id: 'journaled-before-interruption',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'gather',
       ...oreTileFor(host),
@@ -218,7 +220,7 @@ describe('durable world recovery', () => {
     await initial.checkpoint();
     await initial.command(client, {
       id: 'gather-1',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'gather',
       ...oreTileFor(initial),
@@ -242,7 +244,7 @@ describe('durable world recovery', () => {
     await host.connect(client, 'player-a');
     await host.command(client, {
       id: 'gather-1',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'gather',
       ...oreTileFor(host),
@@ -324,14 +326,14 @@ describe('durable world recovery', () => {
     await host.connect(carol, 'player-c');
     await host.command(alice, {
       id: 'name-chat-a',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'setPlayerName',
       name: 'River Warden',
     });
     await host.command(alice, {
       id: 'global-chat-a',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'sendChatMessage',
       channel: 'global',
@@ -346,7 +348,7 @@ describe('durable world recovery', () => {
     );
     await host.command(bob, {
       id: 'report-global-chat',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 1,
       type: 'reportChatMessage',
       messageId: 'global-chat-a',
@@ -354,10 +356,10 @@ describe('durable world recovery', () => {
     });
     await host.command(bob, {
       id: 'block-global-chat',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 2,
       type: 'setPlayerBlocked',
-      targetPlayerId: 'player-a' as never,
+      targetPlayerId: toPlayerId('player-a'),
       blocked: true,
     });
     host.resync(bob);
@@ -380,16 +382,16 @@ describe('durable world recovery', () => {
     expect(host.world.social.reports).toHaveLength(1);
     await host.command(bob, {
       id: 'unblock-global-chat',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 3,
       type: 'setPlayerBlocked',
-      targetPlayerId: 'player-a' as never,
+      targetPlayerId: toPlayerId('player-a'),
       blocked: false,
     });
     for (let index = 0; index < 5; index += 1) await host.tick();
     await host.command(alice, {
       id: 'private-before-membership',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 3,
       type: 'sendChatMessage',
       channel: 'settlement',
@@ -400,15 +402,15 @@ describe('durable world recovery', () => {
     expect(bob.messages.at(-1)).not.toContain('private-before-membership');
     await host.command(alice, {
       id: 'invite-chat-b',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 4,
       type: 'inviteToSettlement',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     await host.command(bob, {
       id: 'accept-chat-b',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 4,
       type: 'acceptSettlementInvite',
       settlementId: 'settlement-player-a',
@@ -416,7 +418,7 @@ describe('durable world recovery', () => {
     for (let index = 0; index < 5; index += 1) await host.tick();
     await host.command(alice, {
       id: 'private-after-membership',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 5,
       type: 'sendChatMessage',
       channel: 'settlement',
@@ -437,30 +439,30 @@ describe('durable world recovery', () => {
     await host.connect(bob, 'player-b');
     await host.command(alice, {
       id: 'invite-owner-successor',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'inviteToSettlement',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     await host.command(bob, {
       id: 'accept-owner-successor',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 1,
       type: 'acceptSettlementInvite',
       settlementId: 'settlement-player-a',
     });
     await host.command(alice, {
       id: 'transfer-before-delete',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'transferSettlementOwnership',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     await host.command(alice, {
       id: 'delete-account',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 3,
       type: 'deleteAccount',
       confirmation: 'DELETE',
@@ -480,7 +482,7 @@ describe('durable world recovery', () => {
     expect(bootstrap?.state?.players).toEqual({});
     await host.command(returning, {
       id: 'deleted-command',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 4,
       type: 'gather',
       x: 0,
@@ -515,7 +517,7 @@ describe('durable world recovery', () => {
       )!;
     await host.command(alice, {
       id: 'private-project',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'createSharedConstructionProject',
       settlementId: 'settlement-player-a',
@@ -524,7 +526,7 @@ describe('durable world recovery', () => {
     });
     await host.command(alice, {
       id: 'private-project-funding',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'contributeToSharedConstructionProject',
       projectId: 'private-project',
@@ -539,11 +541,11 @@ describe('durable world recovery', () => {
 
     await host.command(alice, {
       id: 'invite-project-member',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 3,
       type: 'inviteToSettlement',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     host.resync(bob);
     const invited = JSON.parse(bob.messages.at(-1)!) as {
@@ -552,7 +554,7 @@ describe('durable world recovery', () => {
     expect(invited.state.sharedConstructionProjects).toEqual({});
     await host.command(bob, {
       id: 'accept-project-member',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 1,
       type: 'acceptSettlementInvite',
       settlementId: 'settlement-player-a',
@@ -610,7 +612,7 @@ describe('durable world recovery', () => {
     world.players['player-b']!.territoryCells['4:0'] = true;
     const foreign = {
       ...world.buildings['center-player-b']!,
-      id: 'foreign-hidden' as never,
+      id: toBuildingId('foreign-hidden'),
       x: 32,
       y: 0,
     };
@@ -663,8 +665,8 @@ describe('durable world recovery', () => {
     host.world.players['player-a']!.exploredChunks['2:0'] = true;
     host.world.buildings.hidden = {
       ...host.world.buildings['center-player-a']!,
-      id: 'hidden' as never,
-      ownerId: 'player-b' as never,
+      id: toBuildingId('hidden'),
+      ownerId: toPlayerId('player-b'),
       x: 32,
       y: 0,
     };
@@ -694,26 +696,26 @@ describe('durable world recovery', () => {
     await host.connect(logistics, 'player-b');
     await host.command(owner, {
       id: 'invite',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'inviteToSettlement',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     await host.command(logistics, {
       id: 'accept',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 1,
       type: 'acceptSettlementInvite',
       settlementId: 'settlement-player-a',
     });
     await host.command(owner, {
       id: 'role',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'setSettlementRole',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
       role: 'logistics',
     });
     host.world.buildings['center-player-a']!.inventory.ore = 2;
@@ -734,11 +736,11 @@ describe('durable world recovery', () => {
     expect(message.state.buildings['center-player-a']?.inventory.ore).toBe(2);
     await host.command(owner, {
       id: 'remove-logistics',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 3,
       type: 'removeSettlementMember',
       settlementId: 'settlement-player-a',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
     });
     host.resync(logistics);
     const revoked = JSON.parse(logistics.messages.at(-1)!) as {
@@ -761,7 +763,7 @@ describe('durable world recovery', () => {
     host.world.players['player-b']!.inventory.tool = 10;
     await host.command(alice, {
       id: 'objective-a',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'contributeToObjective',
       objectiveId: 'frontier-beacon',
@@ -770,7 +772,7 @@ describe('durable world recovery', () => {
     });
     await host.command(bob, {
       id: 'objective-b',
-      playerId: 'player-b' as never,
+      playerId: toPlayerId('player-b'),
       sequence: 1,
       type: 'contributeToObjective',
       objectiveId: 'frontier-beacon',
@@ -809,7 +811,7 @@ describe('durable world recovery', () => {
     const [smelterTile, towerTile] = buildTilesFor(host, 2);
     await host.command(alice, {
       id: 'build-smelter',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 1,
       type: 'placeSmelter',
       ...smelterTile!,
@@ -817,7 +819,7 @@ describe('durable world recovery', () => {
     host.world.players['player-a']!.inventory.ingot = 1;
     await host.command(alice, {
       id: 'research-metallurgy',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 2,
       type: 'research',
       technologyId: 'metallurgy',
@@ -828,21 +830,21 @@ describe('durable world recovery', () => {
     for (let index = 0; index < 10; index += 1) await host.tick();
     await host.command(alice, {
       id: 'build-tower',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 3,
       type: 'placeWatchtower',
       ...towerTile!,
     });
     await host.command(alice, {
       id: 'gather',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 4,
       type: 'gather',
       ...oreTileFor(host),
     });
     await host.command(alice, {
       id: 'load',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 5,
       type: 'transfer',
       buildingId: smelter.id,
@@ -853,7 +855,7 @@ describe('durable world recovery', () => {
     for (let index = 0; index < 4; index += 1) await host.tick();
     await host.command(alice, {
       id: 'unload',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 6,
       type: 'transfer',
       buildingId: smelter.id,
@@ -863,10 +865,10 @@ describe('durable world recovery', () => {
     });
     await host.command(alice, {
       id: 'gift',
-      playerId: 'player-a' as never,
+      playerId: toPlayerId('player-a'),
       sequence: 7,
       type: 'transferToPlayer',
-      targetPlayerId: 'player-b' as never,
+      targetPlayerId: toPlayerId('player-b'),
       item: 'ingot',
       amount: 1,
     });

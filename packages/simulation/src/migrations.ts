@@ -30,6 +30,7 @@ import {
   tileKey,
   type Building,
   type Inventory,
+  type LandmarkDiscovery,
   type LogisticsLink,
   type PlayerState,
   type Plot,
@@ -299,6 +300,22 @@ interface Version29World extends Omit<
     }
   >;
 }
+type Version30Player = Omit<PlayerState, 'gatherOrder' | 'initiative' | 'discoveries'> & {
+  discoveries: Record<string, Omit<LandmarkDiscovery, 'choice'>>;
+};
+type Version30LogisticsLink = Omit<
+  LogisticsLink,
+  'targetMinimum' | 'targetMaximum' | 'deliveredTotal' | 'recentDeliveries'
+>;
+interface Version30World extends Omit<
+  WorldState,
+  'schemaVersion' | 'contentVersion' | 'players' | 'logisticsLinks'
+> {
+  schemaVersion: 30;
+  contentVersion: 5;
+  players: Record<string, Version30Player>;
+  logisticsLinks: Record<string, Version30LogisticsLink>;
+}
 interface Version28Player extends Omit<PlayerState, 'discoveries' | 'research'> {
   research: Omit<ResearchState, 'unlocked'> & {
     unlocked: Record<'metallurgy' | 'territorial-charter', boolean>;
@@ -519,54 +536,94 @@ const withMasonryStacks = (inventory: PreMasonryInventory): Inventory => ({
  * existing building starts at tier one, and links keep their endpoints but drop the cooldown:
  * their route is left unplanned so the first tick surveys it under the shared route budget.
  */
-const migrateVersion29 = (state: Version29World): WorldState => ({
+const migrateVersion30 = (state: Version30World): WorldState => ({
   ...state,
-  schemaVersion: 30,
+  schemaVersion: 31,
   contentVersion: CONTENT_VERSION,
-  carriers: {},
   players: Object.fromEntries(
     Object.entries(state.players).map(([id, player]) => [
       id,
       {
         ...player,
-        inventory: withMasonryStacks(player.inventory),
-        research: {
-          ...player.research,
-          unlocked: { ...player.research.unlocked, masonry: false },
-        },
-      },
-    ]),
-  ),
-  buildings: Object.fromEntries(
-    Object.entries(state.buildings).map(([id, building]) => [
-      id,
-      {
-        ...building,
-        inventory: withMasonryStacks(building.inventory),
-        constructionMaterials: withMasonryStacks(building.constructionMaterials),
-        tier: 1 as const,
+        initiative: null,
+        discoveries: Object.fromEntries(
+          Object.entries(player.discoveries).map(([key, discovery]) => [
+            key,
+            { ...discovery, reward: {}, choice: 'develop' as const },
+          ]),
+        ),
       },
     ]),
   ),
   logisticsLinks: Object.fromEntries(
-    Object.entries(state.logisticsLinks).map(([id, link]) => {
-      const { throughputPerTick, travelTicksRemaining, ...retained } = link;
-      void throughputPerTick;
-      void travelTicksRemaining;
-      return [id, { ...retained, capacityPerTrip: logisticsCarrierCapacity }];
-    }),
-  ),
-  sharedConstructionProjects: Object.fromEntries(
-    Object.entries(state.sharedConstructionProjects).map(([id, project]) => [
+    Object.entries(state.logisticsLinks).map(([id, link]) => [
       id,
       {
-        ...project,
-        required: withMasonryStacks(project.required),
-        contributed: withMasonryStacks(project.contributed),
+        ...link,
+        targetMinimum: Math.min(
+          INVENTORY_CAPACITY,
+          state.buildings[link.targetBuildingId]?.inventoryCapacity ?? logisticsCarrierCapacity * 2,
+        ),
+        targetMaximum: Math.min(
+          INVENTORY_CAPACITY,
+          state.buildings[link.targetBuildingId]?.inventoryCapacity ?? logisticsCarrierCapacity * 2,
+        ),
+        deliveredTotal: 0,
+        recentDeliveries: [],
       },
     ]),
   ),
 });
+
+const migrateVersion29 = (state: Version29World): WorldState =>
+  migrateVersion30({
+    ...state,
+    schemaVersion: 30,
+    contentVersion: 5,
+    carriers: {},
+    players: Object.fromEntries(
+      Object.entries(state.players).map(([id, player]) => [
+        id,
+        {
+          ...player,
+          inventory: withMasonryStacks(player.inventory),
+          research: {
+            ...player.research,
+            unlocked: { ...player.research.unlocked, masonry: false },
+          },
+        },
+      ]),
+    ),
+    buildings: Object.fromEntries(
+      Object.entries(state.buildings).map(([id, building]) => [
+        id,
+        {
+          ...building,
+          inventory: withMasonryStacks(building.inventory),
+          constructionMaterials: withMasonryStacks(building.constructionMaterials),
+          tier: 1 as const,
+        },
+      ]),
+    ),
+    logisticsLinks: Object.fromEntries(
+      Object.entries(state.logisticsLinks).map(([id, link]) => {
+        const { throughputPerTick, travelTicksRemaining, ...retained } = link;
+        void throughputPerTick;
+        void travelTicksRemaining;
+        return [id, { ...retained, capacityPerTrip: logisticsCarrierCapacity }];
+      }),
+    ),
+    sharedConstructionProjects: Object.fromEntries(
+      Object.entries(state.sharedConstructionProjects).map(([id, project]) => [
+        id,
+        {
+          ...project,
+          required: withMasonryStacks(project.required),
+          contributed: withMasonryStacks(project.contributed),
+        },
+      ]),
+    ),
+  } as unknown as Version30World);
 
 const migrateVersion28 = (state: Version28World): WorldState =>
   migrateVersion29({
@@ -904,7 +961,8 @@ const migrateVersion2 = (legacy: Version2World): WorldState =>
  * Version 16 is the one step that does not chain onward by itself, so it names both.
  */
 const SNAPSHOT_MIGRATIONS: Record<number, (candidate: unknown) => WorldState> = {
-  30: (candidate) => candidate as WorldState,
+  31: (candidate) => candidate as WorldState,
+  30: (candidate) => migrateVersion30(candidate as Version30World),
   29: (candidate) => migrateVersion29(candidate as Version29World),
   28: (candidate) => migrateVersion28(candidate as Version28World),
   27: (candidate) => migrateVersion27(candidate as Version27World),
@@ -950,7 +1008,8 @@ const SNAPSHOT_CONTENT_VERSIONS: Readonly<Record<number, number>> = {
   27: 3,
   28: 3,
   29: 4,
-  30: CONTENT_VERSION,
+  30: 5,
+  31: CONTENT_VERSION,
 };
 
 /** Forward-only snapshot migration kept inside the platform-independent simulation. */

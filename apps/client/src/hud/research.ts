@@ -1,6 +1,7 @@
 import {
   buildings as buildingDefinitions,
   buildingUpgrades,
+  recipes,
   technologies,
   type TechnologyDefinition,
   type TechnologyId,
@@ -49,6 +50,9 @@ const unlocksFor = (id: TechnologyId): readonly string[] => [
   ...(Object.values(buildingUpgrades).some((upgrade) => upgrade.requiredTechnology === id)
     ? ['building tiers']
     : []),
+  ...Object.values(recipes)
+    .filter((recipe) => recipe.requiredTechnology === id)
+    .map((recipe) => `${recipe.id} recipe`),
   ...(ruleUnlocks[id] ?? []),
 ];
 

@@ -25,7 +25,12 @@ describe('research entries', () => {
       'building tiers',
     ]);
     expect(entry(entries, 'territorial-charter').prerequisiteNames).toEqual(['Metallurgy']);
-    expect(entry(entries, 'engineering').unlocks).toEqual(['roads', 'faster carriers']);
+    expect(entry(entries, 'engineering').unlocks).toEqual([
+      'forge-tool-without-wood recipe',
+      'roads',
+      'faster carriers',
+    ]);
+    expect(entry(entries, 'stewardship').unlocks).toContain('steward-tool-batch recipe');
   });
 
   it('blocks on unmet prerequisites before material cost', () => {

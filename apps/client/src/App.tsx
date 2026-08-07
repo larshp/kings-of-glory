@@ -995,6 +995,7 @@ export const App = () => {
             player={player}
             plot={plot}
             progressionEra={progressionEra}
+            worldTick={state?.tick ?? 0}
             onboardingSteps={onboardingSteps ?? []}
             onboardingReservation={onboardingReservation}
             hasCompletedHearth={hasCompletedHearth}

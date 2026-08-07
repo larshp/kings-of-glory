@@ -83,6 +83,14 @@ export type Command =
       readonly type: 'gather';
       readonly x: number;
       readonly y: number;
+      /** One item is gathered immediately; the remainder becomes a worker-backed order. */
+      readonly amount?: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'cancelGatherOrder';
     }
   | {
       readonly id: string;
@@ -281,6 +289,15 @@ export type Command =
       readonly id: string;
       readonly playerId: PlayerId;
       readonly sequence: number;
+      readonly type: 'setLogisticsStockTarget';
+      readonly linkId: string;
+      readonly minimum: number;
+      readonly maximum: number;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
       readonly type: 'setJobPriority';
       readonly buildingId: BuildingId;
       readonly priority: 0 | 1 | 2 | 3;
@@ -363,6 +380,22 @@ export type Command =
       readonly sequence: number;
       readonly type: 'upgradeBuilding';
       readonly buildingId: BuildingId;
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'resolveLandmark';
+      readonly x: number;
+      readonly y: number;
+      readonly choice: 'salvage' | 'develop';
+    }
+  | {
+      readonly id: string;
+      readonly playerId: PlayerId;
+      readonly sequence: number;
+      readonly type: 'startSettlementInitiative';
+      readonly initiativeId: 'freight-charter' | 'builders-festival';
     };
 
 export type RejectionCode =
@@ -436,7 +469,10 @@ export type RejectionCode =
   | 'invalid-message'
   | 'unknown-message'
   | 'already-reported'
-  | 'cannot-block-self';
+  | 'cannot-block-self'
+  | 'unknown-landmark'
+  | 'landmark-already-resolved'
+  | 'initiative-active';
 
 export type CommandResult =
   | { readonly accepted: true; readonly commandId: string }

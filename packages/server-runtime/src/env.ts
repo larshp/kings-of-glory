@@ -6,6 +6,8 @@ export interface ServerEnvironment {
   production: boolean;
   trustProxy: boolean;
   peaceful: boolean;
+  /** Wall-clock duration of one authoritative tick. Standard play uses one second. */
+  tickIntervalMs: number;
   /** Development convenience only; production migrations use a separate credential and process. */
   migrateOnStartup?: boolean;
   allowedOrigins: readonly string[];
@@ -21,6 +23,7 @@ export const parseEnvironment = (env: Record<string, string | undefined>): Serve
   const production = env.NODE_ENV === 'production';
   const trustProxy = env.TRUST_PROXY === 'true';
   const peaceful = env.PEACEFUL !== 'false';
+  const tickIntervalMs = Number(env.TICK_INTERVAL_MS ?? '1000');
   const migrateOnStartup = env.MIGRATE_ON_STARTUP ? env.MIGRATE_ON_STARTUP === 'true' : !production;
   const allowedOrigins = (env.ALLOWED_ORIGINS ?? '')
     .split(',')
@@ -29,6 +32,8 @@ export const parseEnvironment = (env: Record<string, string | undefined>): Serve
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error('PORT must be an integer between 1 and 65535.');
   if (!Number.isSafeInteger(worldSeed)) throw new Error('WORLD_SEED must be a safe integer.');
+  if (!Number.isSafeInteger(tickIntervalMs) || tickIntervalMs < 50 || tickIntervalMs > 10_000)
+    throw new Error('TICK_INTERVAL_MS must be an integer between 50 and 10000.');
   if (!['debug', 'info', 'warn', 'error'].includes(logLevel))
     throw new Error('LOG_LEVEL must be debug, info, warn, or error.');
   if (persistence !== 'memory' && persistence !== 'postgres')
@@ -57,6 +62,7 @@ export const parseEnvironment = (env: Record<string, string | undefined>): Serve
     production,
     trustProxy,
     peaceful,
+    tickIntervalMs,
     migrateOnStartup,
     allowedOrigins,
     ...(env.DATABASE_URL ? { databaseUrl: env.DATABASE_URL } : {}),

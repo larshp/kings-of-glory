@@ -61,7 +61,7 @@ export interface ClientWorldState extends Omit<
 export type ClientWorldDelta = Partial<ClientWorldState>;
 
 /** Bump whenever a client can no longer safely interpret server state messages. */
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 export const MAX_MESSAGE_BYTES = 64 * 1024;
 export const MAX_INTEREST_CHUNKS = 64;
 
@@ -146,13 +146,31 @@ const isCommand = (value: unknown): value is Command => {
   )
     return false;
   if (
-    value.type === 'gather' ||
     value.type === 'explore' ||
     value.type === 'claimTerritory' ||
     value.type === 'placeRoad' ||
     value.type in PLACEMENT_KINDS
   )
     return Number.isSafeInteger(value.x) && Number.isSafeInteger(value.y);
+  if (value.type === 'gather')
+    return (
+      Number.isSafeInteger(value.x) &&
+      Number.isSafeInteger(value.y) &&
+      (value.amount === undefined ||
+        (Number.isSafeInteger(value.amount) &&
+          typeof value.amount === 'number' &&
+          value.amount >= 1 &&
+          value.amount <= 20))
+    );
+  if (value.type === 'cancelGatherOrder') return true;
+  if (value.type === 'resolveLandmark')
+    return (
+      Number.isSafeInteger(value.x) &&
+      Number.isSafeInteger(value.y) &&
+      (value.choice === 'salvage' || value.choice === 'develop')
+    );
+  if (value.type === 'startSettlementInitiative')
+    return value.initiativeId === 'freight-charter' || value.initiativeId === 'builders-festival';
   if (value.type === 'moveScout')
     return (
       isIdentifier(value.scoutId) && Number.isSafeInteger(value.x) && Number.isSafeInteger(value.y)
@@ -237,6 +255,17 @@ const isCommand = (value: unknown): value is Command => {
       Number.isInteger(value.priority) &&
       value.priority >= 0 &&
       value.priority <= 3
+    );
+  if (value.type === 'setLogisticsStockTarget')
+    return (
+      isIdentifier(value.linkId) &&
+      Number.isSafeInteger(value.minimum) &&
+      Number.isSafeInteger(value.maximum) &&
+      typeof value.minimum === 'number' &&
+      typeof value.maximum === 'number' &&
+      value.minimum >= 0 &&
+      value.minimum <= value.maximum &&
+      value.maximum <= 100
     );
   if (value.type === 'setJobPriority')
     return (

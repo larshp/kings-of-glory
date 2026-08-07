@@ -1,6 +1,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { ClientWorldState } from '@kings/protocol';
 import type { Plot } from '@kings/simulation';
+import { settlementInitiatives } from '@kings/content';
 import {
   informationCategories,
   type InformationCategory,
@@ -35,6 +36,7 @@ export interface SettlementPanelProps extends TabPanelProps {
   readonly player: PlayerView | undefined;
   readonly plot: Plot | undefined;
   readonly progressionEra: string;
+  readonly worldTick: number;
   readonly onboardingSteps: readonly { readonly complete: boolean; readonly text: string }[];
   readonly onboardingReservation: ClientWorldState['onboardingReservations'][string] | undefined;
   readonly hasCompletedHearth: boolean;
@@ -62,6 +64,7 @@ export const SettlementPanel = ({
   player,
   plot,
   progressionEra,
+  worldTick,
   onboardingSteps,
   onboardingReservation,
   hasCompletedHearth,
@@ -154,6 +157,45 @@ export const SettlementPanel = ({
             Work: {player.population.employed}/{player.population.total} settlers assigned
           </p>
           <p>Wellbeing: {hasCompletedHearth ? 'hearth active' : 'hearth needed'}</p>
+        </section>
+        <section aria-labelledby="initiative-title">
+          <h2 id="initiative-title">Settlement initiatives</h2>
+          {player.initiative && player.initiative.expiresTick > worldTick && (
+            <p>
+              <strong>{settlementInitiatives[player.initiative.id].displayName}</strong> active for{' '}
+              {player.initiative.expiresTick - worldTick} more ticks.
+            </p>
+          )}
+          <ul>
+            {Object.values(settlementInitiatives).map((initiative) => {
+              const affordable = Object.entries(initiative.cost).every(
+                ([item, amount]) =>
+                  player.inventory[item as keyof typeof player.inventory] >= amount,
+              );
+              const active = Boolean(
+                player.initiative && player.initiative.expiresTick > worldTick,
+              );
+              const cost = Object.entries(initiative.cost)
+                .map(([item, amount]) => `${amount} ${item}`)
+                .join(', ');
+              return (
+                <li key={initiative.id}>
+                  <strong>{initiative.displayName}</strong>
+                  <span>{initiative.description}</span>
+                  <button
+                    className="block-button"
+                    disabled={active || !affordable}
+                    onClick={() =>
+                      send({ type: 'startSettlementInitiative', initiativeId: initiative.id })
+                    }
+                  >
+                    Start ({cost})
+                  </button>
+                  {!affordable && !active && <span className="build-reason">Needs {cost}.</span>}
+                </li>
+              );
+            })}
+          </ul>
         </section>
         <section className="onboarding" aria-labelledby="getting-started-title">
           <h2 id="getting-started-title">Getting started</h2>

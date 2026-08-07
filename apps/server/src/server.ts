@@ -386,7 +386,7 @@ export const createGameServer = async (
       .finally(() => {
         pendingTick = undefined;
       });
-  }, 100);
+  }, environment.tickIntervalMs);
   tickTimer.unref();
 
   return {
@@ -401,7 +401,11 @@ export const createGameServer = async (
             reject(new Error('Server did not bind a TCP port.'));
             return;
           }
-          log.info('server.started', { port: address.port, worldSeed: environment.worldSeed });
+          log.info('server.started', {
+            port: address.port,
+            worldSeed: environment.worldSeed,
+            tickIntervalMs: environment.tickIntervalMs,
+          });
           resolve(address.port);
         });
       });

@@ -13,6 +13,8 @@ const environment: ServerEnvironment = {
   persistence: 'memory',
   production: false,
   trustProxy: false,
+  peaceful: true,
+  tickIntervalMs: 100,
   allowedOrigins: [],
 };
 const productionEnvironment: ServerEnvironment = {

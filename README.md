@@ -57,7 +57,7 @@ Redis, a separate caching layer, microservices, matchmaking, and Docker are not 
 
 ## Design principles
 
-- Run the simulation at a fixed tick rate, initially around 5-10 ticks per second.
+- Run standard gameplay at one fixed tick per second so construction, research, population, and threats operate at human-readable cadences. Tests may explicitly accelerate the wall clock without changing tick outcomes.
 - Keep simulation code independent of browser, Node.js, networking, and database APIs.
 - Use seeded random-number generation and serializable simulation state.
 - Send player commands to the simulation rather than allowing clients to modify multiplayer state directly.
@@ -111,7 +111,7 @@ Or start both with `npm run dev`; the npm wrapper uses the Windows command shim 
 
 The server listens on `http://127.0.0.1:3001/health` and WebSocket clients connect on port 3001. Vite serves the client at `http://127.0.0.1:5173`. By default the client connects to the same hostname as the page, so local `127.0.0.1` and LAN development addresses work; set `VITE_SERVER_URL` to override it. Development can fall back to a stable per-tab identity. Production obtains an anonymous account through `POST /session`; the server issues a signed, 30-day, HTTP-only, `SameSite=Strict`, `Secure` cookie and derives WebSocket identity from that cookie instead of trusting the client-supplied player ID.
 
-The current JSON WebSocket protocol is version 6. A client sends `hello`, then receives a `welcome` handshake acknowledgement and a filtered `worldBootstrap`. Newly relevant viewport chunks receive a replacement `chunkSnapshot`; ordinary changes use ordered `stateDelta` messages. Commands receive either `commandAcknowledged` or `commandRejected`, while `ping`/`pong`, `resync`, `maintenance`, and `error` cover connection health and recovery.
+The current JSON WebSocket protocol is version 7. A client sends `hello`, then receives a `welcome` handshake acknowledgement and a filtered `worldBootstrap`. Newly relevant viewport chunks receive a replacement `chunkSnapshot`; ordinary changes use ordered `stateDelta` messages. Commands receive either `commandAcknowledged` or `commandRejected`, while `ping`/`pong`, `resync`, `maintenance`, and `error` cover connection health and recovery.
 
 Players can contribute tools from separate settlements to the global Frontier Beacon objective. The
 server records every contribution, completes the objective at its exact target, and permits one
@@ -148,7 +148,9 @@ credential, and start the world host with a separate runtime credential. Product
 Every snapshot records the content version it was written for, and `deserializeWorld` refuses one that
 does not match its schema's row in `SNAPSHOT_CONTENT_VERSIONS` rather than reinterpreting it under
 different rules. Additive content is migrated: content version 5 added the masonry chain, building
-tiers, and walking carriers without moving a single tile, so a version 29 world is lifted forward.
+tiers, and walking carriers, while content version 6 adds queued gathering, landmark choices,
+settlement initiatives, branch recipes, and logistics stock targets. Schema 31 lifts older worlds
+forward without moving a single tile.
 A content change that moves deterministic world generation cannot be, and mountains have done that
 twice — version 2 added mountains, and version 3 moved them onto Perlin ridge noise with taller peaks.
 The correct response to another such change is to drop the rows for every earlier schema, so those
@@ -186,7 +188,7 @@ See [the current first-slice baseline](docs/performance-baseline.md) for a repro
 
 ## Current vertical slice
 
-This increment provides a strict TypeScript workspace, a platform-independent deterministic simulation, a versioned JSON WebSocket handshake, a single authoritative world host, durable checkpoint/journal foundations, and a React/Canvas 2D isometric map. Players gather finite ore deposits (gray map tiles) and timber groves (brown map tiles), quarry stone from the mountain ranges, construct smelters, workshops, brickworks, quarries, storage, housing, hearths, and walls, turn ore into ingots, ingots plus wood into tools, and stone plus wood into brick, and build recipe-validated links whose carriers walk their deliveries between buildings. Brick pays for walls and for a permanent second tier on the buildings a settlement depends on. The HUD explains a producer's actual recipe duration at its current tier and its missing inputs; housing, jobs, and a completed hearth determine settlement wellbeing. Players repair damage from acid rain or raiders. Tests cover deterministic replay, command rejection, resource conservation including items in flight, content validation, protocol shape validation, snapshot migration, and checkpoint recovery.
+This increment provides a strict TypeScript workspace, a platform-independent deterministic simulation, a versioned JSON WebSocket handshake, a single authoritative world host, durable checkpoint/journal foundations, and a React/Canvas 2D isometric map. Players gather finite ore deposits and timber groves through immediate actions or bounded settler work orders, quarry stone from the mountain ranges, construct a settlement, turn ore into ingots, ingots plus wood into tools, and stone plus wood into brick, and build recipe-validated links whose carriers walk their deliveries between buildings. Brick pays for walls, permanent building tiers, and timed settlement initiatives. Landmark choices and the Engineering/Stewardship split create persistent economic specializations. The HUD explains production, stock targets, route deliveries, missing inputs, population needs, research, and active initiatives. Tests cover deterministic replay, command rejection, resource conservation including queued and in-flight items, content validation, protocol shape validation, snapshot migration, and checkpoint recovery.
 
 ### Automated extraction
 
@@ -200,6 +202,23 @@ click, and a quarry into a brickworks does the same for stone → brick. Storage
 target so raw output can be buffered; storage-to-storage links are rejected. Placing an extractor where
 no deposit with remaining yield is in range is rejected with `no-deposit-in-range`, and the build menu
 disables the button and explains why before the command is sent.
+
+Manual gathering teaches the finite-deposit rule without demanding repeated clicks. A gather command
+may request up to twenty units: the first arrives immediately, one settler reserves the order, and the
+rest arrive every three ticks until the deposit empties, inventory fills, or the player cancels.
+
+### Exploration choices and specialization
+
+Discovering a ruin, fertile grove, or mountain pass records it without silently choosing a reward.
+Players may salvage it for immediate ingots, timber, or tools, or develop it for a persistent research,
+forestry, or carrier-movement benefit. Engineering and Stewardship remain mutually exclusive:
+Engineering improves carrier movement and capacity and unlocks an ingot-only tool batch, while
+Stewardship unlocks renewable forestry and a wood-efficient two-tool batch. Their different input
+advantages give specialized settlements a concrete reason to trade.
+
+Tools and bricks also fund repeatable five-minute initiatives. Freight Charters temporarily improve
+carrier movement and loads; Builders' Festivals double construction work per tick. These are optional
+productive sinks, not mandatory upkeep.
 
 ### Masonry, walls, and building tiers
 
@@ -228,6 +247,10 @@ movement budget from four to six — which is what makes roads worth their timbe
 to the carrier alone: they leave the source when it loads and reappear only when it unloads, and
 demolishing an endpoint or removing the link hands them back rather than destroying them. The logistics
 overlay draws the route the carrier actually walks, and the map shows each carrier with its load.
+Every link also has a minimum and maximum target stock. It dispatches only below the minimum and loads
+only enough to reach the maximum, preventing one route from swallowing a producer's entire input
+supply. The HUD shows current stock, link status, recent 60-tick deliveries, lifetime deliveries, and
+editable refill thresholds.
 
 ### Mountains and terrain height
 

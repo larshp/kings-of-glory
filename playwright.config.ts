@@ -18,7 +18,7 @@ export default defineConfig({
     {
       command: 'node apps/server/dist/index.js',
       url: 'http://127.0.0.1:3001/ready',
-      env: { PEACEFUL: 'false', PERSISTENCE: 'memory' },
+      env: { PEACEFUL: 'false', PERSISTENCE: 'memory', TICK_INTERVAL_MS: '100' },
       reuseExistingServer: false,
       timeout: 30_000,
     },

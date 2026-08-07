@@ -24,6 +24,7 @@ import {
   resources as resourceDefinitions,
   roadRules,
   recipes,
+  settlementInitiatives,
   socialRules,
   terrainRules,
   technologies,
@@ -32,6 +33,7 @@ import {
   type TechnologyId,
   type CooperativeObjectiveId,
   type LandmarkId,
+  type SettlementInitiativeId,
 } from '@kings/content';
 import { chunkFor, findHierarchicalPath, findPath, manhattanDistance } from '@kings/pathfinding';
 import { stableHash } from './hash.js';
@@ -83,14 +85,29 @@ export interface PlayerState {
   territoryCells: Record<string, true>;
   research: ResearchState;
   discoveries: Record<string, LandmarkDiscovery>;
+  gatherOrder?: GatherOrder;
+  initiative: SettlementInitiativeState | null;
   lastSequence: number;
+}
+export interface GatherOrder {
+  readonly x: number;
+  readonly y: number;
+  readonly item: ItemId;
+  remaining: number;
+  nextGatherTick: number;
+}
+export interface SettlementInitiativeState {
+  readonly id: SettlementInitiativeId;
+  readonly startedTick: number;
+  readonly expiresTick: number;
 }
 export interface LandmarkDiscovery {
   readonly kind: LandmarkId;
   readonly x: number;
   readonly y: number;
   readonly discoveredTick: number;
-  readonly reward: Readonly<Partial<Inventory>>;
+  reward: Readonly<Partial<Inventory>>;
+  choice: 'salvage' | 'develop' | null;
 }
 export interface Building {
   id: BuildingId;
@@ -178,6 +195,10 @@ export interface LogisticsLink {
   targetBuildingId: BuildingId;
   item: ItemId;
   priority: 0 | 1 | 2 | 3;
+  targetMinimum: number;
+  targetMaximum: number;
+  deliveredTotal: number;
+  recentDeliveries: Array<{ readonly tick: number; readonly amount: number }>;
   /** Items one carrier loads for a single round trip; the link's real throughput. */
   capacityPerTrip: number;
   /** Every link owns at most one carrier, materialised only while it is on the road. */
@@ -196,6 +217,7 @@ export interface LogisticsLink {
     | 'paused'
     | 'source-empty'
     | 'target-full'
+    | 'target-satisfied'
     | 'target-reconfigured'
     | 'constructing'
     | 'in-transit'
@@ -305,7 +327,7 @@ export interface OnboardingReservation {
   securedTick: number | null;
 }
 export interface WorldState {
-  schemaVersion: 30;
+  schemaVersion: 31;
   contentVersion: typeof CONTENT_VERSION;
   seed: number;
   /** When true, no PvE threats spawn. Peaceful worlds stay threat-free. */
@@ -408,6 +430,7 @@ const MAX_ACTIVE_SHARED_PROJECTS_PER_SETTLEMENT = 3;
 export const MAX_ACTIVE_CONSTRUCTIONS_PER_PLAYER = 64;
 export const MAX_PLOT_CANDIDATE_ATTEMPTS = 100_000;
 export const GATHER_RANGE = 8;
+export const GATHER_ORDER_INTERVAL_TICKS = 3;
 const TERRITORY_CELL_SIZE = 8;
 /** Bounds all threat route work together, rather than once per threat. */
 export const THREAT_PATH_VISITS_PER_TICK = 128;
@@ -497,6 +520,7 @@ type ProductionRecipe = {
   readonly input: Readonly<Partial<Record<ItemId, number>>>;
   readonly output: Readonly<Partial<Record<ItemId, number>>>;
   readonly ticks: number;
+  readonly requiredTechnology: string | null;
 };
 const producerFor = (kind: Building['kind']) =>
   producerDefinitions[kind as keyof typeof producerDefinitions];
@@ -609,9 +633,11 @@ const routeTile = (route: readonly number[], step: number) => ({
 });
 /** Movement points a settlement's carriers spend per tick; Engineering buys more of them. */
 const carrierMovementBudget = (state: WorldState, ownerId: PlayerId) =>
-  state.players[ownerId]?.research.unlocked.engineering
+  (state.players[ownerId]?.research.unlocked.engineering
     ? roadRules.engineeringTilesPerTick
-    : roadRules.baseTilesPerTick;
+    : roadRules.baseTilesPerTick) +
+  Math.min(2, developedLandmarks(state.players[ownerId]!, 'mountain-pass')) +
+  (activeInitiative(state, ownerId, 'freight-charter') ? 2 : 0);
 const carrierStepCost = (state: WorldState, x: number, y: number) =>
   state.roads[tileKey(x, y)] ? roadRules.roadStepCost : roadRules.groundStepCost;
 const consumeRecipe = (building: Building, recipe: ProductionRecipe) => {
@@ -824,7 +850,7 @@ export const initialCooperativeObjectives = (): WorldState['cooperativeObjective
   ) as unknown as WorldState['cooperativeObjectives'];
 
 export const createWorld = (seed = 1, peaceful = true): WorldState => ({
-  schemaVersion: 30,
+  schemaVersion: 31,
   contentVersion: CONTENT_VERSION,
   seed,
   peaceful,
@@ -873,6 +899,7 @@ export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
       },
     },
     discoveries: {},
+    initiative: null,
     lastSequence: 0,
   };
   state.playerActivity[id] = {
@@ -996,28 +1023,35 @@ const foresterCycleTicks = (state: WorldState, building: Building) => {
   ].some(([x, y]) => terrainAt(state.seed, x!, y!) === 'water');
   const fertileGrove =
     state.players[building.ownerId]?.discoveries[chunkKey(building.x, building.y)]?.kind ===
-    'fertile-grove';
+      'fertile-grove' &&
+    state.players[building.ownerId]?.discoveries[chunkKey(building.x, building.y)]?.choice ===
+      'develop';
   return besideWater || fertileGrove ? renewer.waterBonusTicksPerUnit : renewer.ticksPerUnit;
 };
 
 const landmarkRewardFor = (kind: LandmarkId): Partial<Inventory> =>
-  kind === 'ancient-ruin' ? { ingot: 1 } : kind === 'mountain-pass' ? { tool: 1 } : { wood: 2 };
+  kind === 'ancient-ruin' ? { ingot: 2 } : kind === 'mountain-pass' ? { tool: 2 } : { wood: 5 };
+
+const developedLandmarks = (player: PlayerState, kind: LandmarkId) =>
+  Object.values(player.discoveries).filter(
+    (discovery) => discovery.kind === kind && discovery.choice === 'develop',
+  ).length;
+
+const activeInitiative = (state: WorldState, playerId: PlayerId, id: SettlementInitiativeId) => {
+  const initiative = state.players[playerId]?.initiative;
+  return initiative?.id === id && initiative.expiresTick > state.tick;
+};
 
 const discoverChunk = (state: WorldState, player: PlayerState, key: string): WorldEvent[] => {
   if (player.discoveries[key]) return [];
   const [chunkXText, chunkYText] = key.split(':');
   const landmark = landmarkAtChunk(state.seed, Number(chunkXText), Number(chunkYText));
   if (!landmark) return [];
-  const requestedReward = landmarkRewardFor(landmark.kind);
-  const rewardAmount = Object.values(requestedReward).reduce((total, amount) => total + amount, 0);
-  const reward =
-    inventoryTotal(player.inventory) + rewardAmount <= INVENTORY_CAPACITY ? requestedReward : {};
-  for (const [item, amount] of Object.entries(reward))
-    player.inventory[item as ItemId] += amount ?? 0;
   player.discoveries[key] = {
     ...landmark,
     discoveredTick: state.tick,
-    reward,
+    reward: {},
+    choice: null,
   };
   return [{ type: 'landmarkDiscovered', playerId: player.id, landmarkKind: landmark.kind }];
 };
@@ -1297,6 +1331,8 @@ export const applyCommand = (
     return { result: { accepted: true as const, commandId: command.id }, events };
   };
   if (command.type === 'gather') {
+    const amount = command.amount ?? 1;
+    if (!Number.isSafeInteger(amount) || amount < 1 || amount > 20) return reject('invalid-amount');
     if (distance(player.plot, command.x, command.y) > GATHER_RANGE) return reject('out-of-range');
     if (reservedResourceOwner(state, command.x, command.y) !== player.id)
       return reject('reserved-resource');
@@ -1307,13 +1343,42 @@ export const applyCommand = (
     if (inventoryTotal(player.inventory) >= INVENTORY_CAPACITY) return reject('inventory-full');
     state.minedTiles[key] = (state.minedTiles[key] ?? 0) + 1;
     player.inventory[deposit.item as ItemId] += 1;
+    if (amount > 1)
+      player.gatherOrder = {
+        x: command.x,
+        y: command.y,
+        item: deposit.item as ItemId,
+        remaining: amount - 1,
+        nextGatherTick: state.tick + GATHER_ORDER_INTERVAL_TICKS,
+      };
+    else delete player.gatherOrder;
     return accept([{ type: 'gathered', playerId: player.id }]);
+  }
+  if (command.type === 'cancelGatherOrder') {
+    delete player.gatherOrder;
+    return accept([]);
   }
   if (command.type === 'explore') {
     if (distance(player.plot, command.x, command.y) > 64) return reject('out-of-range');
     const key = chunkKey(command.x, command.y);
     player.exploredChunks[key] = true;
     return accept(discoverChunk(state, player, key));
+  }
+  if (command.type === 'resolveLandmark') {
+    const discovery = player.discoveries[chunkKey(command.x, command.y)];
+    if (!discovery) return reject('unknown-landmark');
+    if (discovery.choice) return reject('landmark-already-resolved');
+    if (command.choice === 'salvage') {
+      const reward = landmarkRewardFor(discovery.kind);
+      const rewardAmount = Object.values(reward).reduce((total, amount) => total + amount, 0);
+      if (inventoryTotal(player.inventory) + rewardAmount > INVENTORY_CAPACITY)
+        return reject('inventory-full');
+      for (const [item, amount] of Object.entries(reward))
+        player.inventory[item as ItemId] += amount ?? 0;
+      discovery.reward = reward;
+    }
+    discovery.choice = command.choice;
+    return accept([]);
   }
   if (command.type === 'moveScout') {
     const scout = state.scouts?.[command.scoutId];
@@ -1383,7 +1448,25 @@ export const applyCommand = (
     for (const [item, amount] of Object.entries(technology.cost))
       player.inventory[item as ItemId] -= amount ?? 0;
     player.research.activeTechnology = technology.id;
-    player.research.ticksRemaining = technology.ticks;
+    const researchDiscount = Math.min(0.4, developedLandmarks(player, 'ancient-ruin') * 0.2);
+    player.research.ticksRemaining = Math.max(
+      1,
+      Math.ceil(technology.ticks * (1 - researchDiscount)),
+    );
+    return accept([]);
+  }
+  if (command.type === 'startSettlementInitiative') {
+    const definition = settlementInitiatives[command.initiativeId];
+    if (player.initiative && player.initiative.expiresTick > state.tick)
+      return reject('initiative-active');
+    const cost = inventoryFrom(definition.cost);
+    if (!canAfford(player.inventory, cost)) return reject('insufficient-resources');
+    deductCost(player.inventory, cost);
+    player.initiative = {
+      id: definition.id,
+      startedTick: state.tick,
+      expiresTick: state.tick + definition.durationTicks,
+    };
     return accept([]);
   }
   if (command.type === 'contributeToObjective') {
@@ -1774,6 +1857,10 @@ export const applyCommand = (
       targetBuildingId: target.id,
       item: command.item,
       priority: 1,
+      targetMinimum: Math.min(INVENTORY_CAPACITY, target.inventoryCapacity),
+      targetMaximum: Math.min(INVENTORY_CAPACITY, target.inventoryCapacity),
+      deliveredTotal: 0,
+      recentDeliveries: [],
       capacityPerTrip: logisticsCarrierCapacity,
       carrierId: `carrier-${id}`,
       route,
@@ -1822,6 +1909,31 @@ export const applyCommand = (
     )
       return reject('settlement-permission-denied');
     link.priority = command.priority;
+    return accept([]);
+  }
+  if (command.type === 'setLogisticsStockTarget') {
+    const link = state.logisticsLinks[command.linkId];
+    if (!link) return reject('unknown-logistics-link');
+    const source = state.buildings[link.sourceBuildingId];
+    const target = state.buildings[link.targetBuildingId];
+    if (
+      player.id !== link.ownerId &&
+      (!source ||
+        !target ||
+        !canManageLogistics(state, player.id, source) ||
+        !canManageLogistics(state, player.id, target))
+    )
+      return reject('settlement-permission-denied');
+    if (
+      !Number.isSafeInteger(command.minimum) ||
+      !Number.isSafeInteger(command.maximum) ||
+      command.minimum < 0 ||
+      command.minimum > command.maximum ||
+      command.maximum > INVENTORY_CAPACITY
+    )
+      return reject('invalid-amount');
+    link.targetMinimum = command.minimum;
+    link.targetMaximum = command.maximum;
     return accept([]);
   }
   if (command.type === 'copyBuildingConfiguration') {
@@ -1977,6 +2089,14 @@ export const applyCommand = (
     if (!isProducer(building.kind)) return reject('wrong-building');
     if (building.progress > 0) return reject('busy');
     if (!recipeIdsFor(building.kind).includes(command.recipeId)) return reject('invalid-recipe');
+    const selectedRecipe = recipesById[command.recipeId];
+    if (
+      selectedRecipe?.requiredTechnology &&
+      !state.players[building.ownerId]?.research.unlocked[
+        selectedRecipe.requiredTechnology as TechnologyId
+      ]
+    )
+      return reject('technology-locked');
     building.recipeId = command.recipeId;
     return accept([]);
   }
@@ -2057,6 +2177,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
   endPhase();
   const staffedSmelters = new Set<BuildingId>();
   const staffedConstruction = new Set<BuildingId>();
+  const staffedGatherers = new Set<PlayerId>();
   // Phase 2: research-and-population.
   endPhase = beginPhase('research-and-population');
   const buildingsByOwner = new Map<PlayerId, Building[]>();
@@ -2074,6 +2195,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
   for (const player of Object.values(state.players).sort((left, right) =>
     left.id.localeCompare(right.id),
   )) {
+    if (player.initiative && player.initiative.expiresTick <= state.tick) player.initiative = null;
     if (player.research.activeTechnology) {
       player.research.ticksRemaining -= 1;
       if (player.research.ticksRemaining === 0) {
@@ -2107,13 +2229,16 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
       ),
       state.tick,
     );
-    const staffed = producers.slice(0, player.population.total);
-    const availableConstructionWorkers = player.population.total - staffed.length;
+    const gatheringWorkers = player.gatherOrder && player.population.total > 0 ? 1 : 0;
+    if (gatheringWorkers) staffedGatherers.add(player.id);
+    const staffed = producers.slice(0, Math.max(0, player.population.total - gatheringWorkers));
+    const availableConstructionWorkers =
+      player.population.total - gatheringWorkers - staffed.length;
     const constructionWorkers = fairConstructionOrder(
       ownedBuildings.filter((building) => building.constructionTicks > 0),
       state.tick,
     ).slice(0, availableConstructionWorkers);
-    player.population.employed = staffed.length + constructionWorkers.length;
+    player.population.employed = gatheringWorkers + staffed.length + constructionWorkers.length;
     player.population.unemployed = player.population.total - player.population.employed;
     const shelterSatisfaction = player.population.capacity >= player.population.total ? 60 : 0;
     const workSatisfaction =
@@ -2131,6 +2256,27 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
     );
     for (const producer of staffed) staffedSmelters.add(producer.id);
     for (const project of constructionWorkers) staffedConstruction.add(project.id);
+  }
+  for (const player of Object.values(state.players)) {
+    const order = player.gatherOrder;
+    if (!order || !staffedGatherers.has(player.id) || state.tick < order.nextGatherTick) continue;
+    const deposit = depositAt(state.seed, order.x, order.y);
+    const key = tileKey(order.x, order.y);
+    if (
+      !deposit ||
+      deposit.item !== order.item ||
+      (state.minedTiles[key] ?? 0) >= deposit.yield ||
+      inventoryTotal(player.inventory) >= INVENTORY_CAPACITY
+    ) {
+      delete player.gatherOrder;
+      continue;
+    }
+    state.minedTiles[key] = (state.minedTiles[key] ?? 0) + 1;
+    player.inventory[order.item] += 1;
+    order.remaining -= 1;
+    order.nextGatherTick = state.tick + GATHER_ORDER_INTERVAL_TICKS;
+    events.push({ type: 'gathered', playerId: player.id });
+    if (order.remaining === 0) delete player.gatherOrder;
   }
   for (const scout of Object.values(state.scouts ?? {}).sort((left, right) =>
     left.id.localeCompare(right.id),
@@ -2193,11 +2339,14 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
     if (building.constructionTicks > 0) {
       building.productionState = 'constructing';
       if (!staffedConstruction.has(building.id)) continue;
-      const nextMaterial = inventoryItems.find((item) => building.constructionMaterials[item] > 0);
-      if (nextMaterial) {
-        building.constructionMaterials[nextMaterial] -= 1;
+      const workTicks = activeInitiative(state, building.ownerId, 'builders-festival') ? 2 : 1;
+      for (let work = 0; work < workTicks && building.constructionTicks > 0; work += 1) {
+        const nextMaterial = inventoryItems.find(
+          (item) => building.constructionMaterials[item] > 0,
+        );
+        if (nextMaterial) building.constructionMaterials[nextMaterial] -= 1;
+        building.constructionTicks -= 1;
       }
-      building.constructionTicks -= 1;
       if (building.constructionTicks === 0) {
         const reservation = state.onboardingReservations[building.ownerId];
         if (
@@ -2286,6 +2435,13 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
       building.productionState = 'idle';
       continue;
     }
+    if (
+      recipe.requiredTechnology &&
+      !state.players[building.ownerId]?.research.unlocked[recipe.requiredTechnology as TechnologyId]
+    ) {
+      building.productionState = 'blocked-input';
+      continue;
+    }
     if (building.health !== building.maxHealth) {
       building.productionState = 'damaged';
       continue;
@@ -2348,6 +2504,10 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
   // before the same tick's dispatch measures it.
   endPhase = beginPhase('logistics');
   const targetReservations = new Map<string, number>();
+  for (const link of Object.values(state.logisticsLinks))
+    link.recentDeliveries = link.recentDeliveries.filter(
+      (delivery) => state.tick - delivery.tick < 60,
+    );
   /** Room the target has left for one item, after active batches and earlier dispatches. */
   const spaceFor = (target: Building, item: ItemId) => {
     const outputReservation = outputReservationFor(target);
@@ -2419,6 +2579,8 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
     reserveSpace(target, carrier.item, delivered);
     target.inventory[carrier.item] += delivered;
     carrier.cargo -= delivered;
+    link.deliveredTotal += delivered;
+    link.recentDeliveries.push({ tick: state.tick, amount: delivered });
     link.status = 'transferred';
     events.push({
       type: 'carrierDelivered',
@@ -2472,10 +2634,23 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
       link.status = 'source-empty';
       continue;
     }
+    if (target.inventory[link.item] >= link.targetMinimum) {
+      link.status = 'target-satisfied';
+      continue;
+    }
+    const capacityBonus =
+      (state.players[link.ownerId]?.research.unlocked.engineering ? 2 : 0) +
+      (activeInitiative(state, link.ownerId, 'freight-charter') ? 2 : 0);
     const load = Math.min(
-      link.capacityPerTrip,
+      link.capacityPerTrip + capacityBonus,
       source.inventory[link.item],
       Math.max(0, spaceFor(target, link.item)),
+      Math.max(
+        0,
+        link.targetMaximum -
+          target.inventory[link.item] -
+          (targetReservations.get(`${target.id}:${link.item}`) ?? 0),
+      ),
     );
     if (load < 1) {
       link.status = 'target-full';
@@ -2742,6 +2917,26 @@ export const inspectWorld = (state: WorldState): string[] => {
       errors.push(`player ${id} has invalid visible chunks`);
     if (player.research.unlocked.engineering && player.research.unlocked.stewardship)
       errors.push(`player ${id} has conflicting research branches`);
+    if (
+      player.gatherOrder &&
+      (!Number.isSafeInteger(player.gatherOrder.x) ||
+        !Number.isSafeInteger(player.gatherOrder.y) ||
+        !isNonNegativeInteger(player.gatherOrder.remaining) ||
+        player.gatherOrder.remaining < 1 ||
+        !isNonNegativeInteger(player.gatherOrder.nextGatherTick) ||
+        !inventoryItems.includes(player.gatherOrder.item) ||
+        distance(player.plot, player.gatherOrder.x, player.gatherOrder.y) > GATHER_RANGE)
+    )
+      errors.push(`player ${id} has an invalid gather order`);
+    if (
+      player.initiative &&
+      (!(player.initiative.id in settlementInitiatives) ||
+        !isNonNegativeInteger(player.initiative.startedTick) ||
+        !isNonNegativeInteger(player.initiative.expiresTick) ||
+        player.initiative.startedTick > state.tick ||
+        player.initiative.expiresTick <= player.initiative.startedTick)
+    )
+      errors.push(`player ${id} has an invalid settlement initiative`);
     for (const [chunk, discovery] of Object.entries(player.discoveries)) {
       const [chunkXText, chunkYText] = chunk.split(':');
       const expected = landmarkAtChunk(state.seed, Number(chunkXText), Number(chunkYText));
@@ -2760,6 +2955,9 @@ export const inspectWorld = (state: WorldState): string[] => {
         expected.x !== discovery.x ||
         expected.y !== discovery.y ||
         !player.exploredChunks[chunk] ||
+        ![null, 'salvage', 'develop'].includes(discovery.choice) ||
+        (discovery.choice === 'salvage' && rewardEntries.length === 0) ||
+        (discovery.choice !== 'salvage' && rewardEntries.length > 0) ||
         !rewardIsValid ||
         !isNonNegativeInteger(discovery.discoveredTick) ||
         discovery.discoveredTick > state.tick
@@ -3017,6 +3215,21 @@ export const inspectWorld = (state: WorldState): string[] => {
     if (!Number.isInteger(link.priority) || link.priority < 0 || link.priority > 3)
       errors.push(`logistics link ${id} has an invalid priority`);
     if (
+      !isNonNegativeInteger(link.targetMinimum) ||
+      !isNonNegativeInteger(link.targetMaximum) ||
+      link.targetMinimum > link.targetMaximum ||
+      link.targetMaximum > INVENTORY_CAPACITY ||
+      !isNonNegativeInteger(link.deliveredTotal) ||
+      link.recentDeliveries.some(
+        (delivery) =>
+          !isNonNegativeInteger(delivery.tick) ||
+          delivery.tick > state.tick ||
+          !Number.isSafeInteger(delivery.amount) ||
+          delivery.amount < 1,
+      )
+    )
+      errors.push(`logistics link ${id} has invalid stock targets or delivery history`);
+    if (
       !Number.isSafeInteger(link.capacityPerTrip) ||
       link.capacityPerTrip < 1 ||
       link.capacityPerTrip > logisticsCarrierCapacity
@@ -3029,6 +3242,7 @@ export const inspectWorld = (state: WorldState): string[] => {
         'paused',
         'source-empty',
         'target-full',
+        'target-satisfied',
         'target-reconfigured',
         'constructing',
         'in-transit',
@@ -3061,7 +3275,7 @@ export const inspectWorld = (state: WorldState): string[] => {
       !Number.isSafeInteger(carrier.x) ||
       !Number.isSafeInteger(carrier.y) ||
       !isNonNegativeInteger(carrier.cargo) ||
-      carrier.cargo > (link?.capacityPerTrip ?? 0) ||
+      carrier.cargo > (link ? link.capacityPerTrip + 4 : 0) ||
       !isNonNegativeInteger(carrier.routeIndex) ||
       carrier.routeIndex > steps ||
       (carrier.phase !== 'outbound' && carrier.phase !== 'returning') ||

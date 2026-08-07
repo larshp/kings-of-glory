@@ -1197,6 +1197,15 @@ select {
   padding: 0.25rem 0.4rem;
   font-size: 0.75rem;
 }
+.logistics-link label {
+  display: grid;
+  gap: 0.15rem;
+  color: #c8d8e7;
+  font-size: 0.75rem;
+}
+.logistics-link input[type='number'] {
+  width: 4.5rem;
+}
 
 @media (max-width: 900px) {
   .game-topbar {

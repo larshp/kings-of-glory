@@ -989,6 +989,12 @@ describe('durable world recovery', () => {
 });
 
 describe('runtime environment', () => {
+  it('uses a human-scale tick by default and bounds explicit acceleration', () => {
+    expect(parseEnvironment({}).tickIntervalMs).toBe(1_000);
+    expect(parseEnvironment({ TICK_INTERVAL_MS: '100' }).tickIntervalMs).toBe(100);
+    expect(() => parseEnvironment({ TICK_INTERVAL_MS: '10' })).toThrow('TICK_INTERVAL_MS');
+  });
+
   it('requires explicit WebSocket origins in production', () => {
     expect(() => parseEnvironment({ NODE_ENV: 'production' })).toThrow('ALLOWED_ORIGINS');
     expect(

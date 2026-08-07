@@ -12,6 +12,22 @@ describe('client message validation', () => {
       parseClientMessage(
         JSON.stringify({
           type: 'command',
+          command: { ...message.command, id: 'gather-5', amount: 5 },
+        }),
+      ),
+    ).toMatchObject({ type: 'command' });
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: { ...message.command, id: 'gather-21', amount: 21 },
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
           command: {
             id: 'workshop-1',
             playerId: 'player-a',
@@ -218,6 +234,51 @@ describe('client message validation', () => {
         }),
       ),
     ).toBeUndefined();
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: 'command',
+          command: {
+            id: 'stock-target-1',
+            playerId: 'player-a',
+            sequence: 5,
+            type: 'setLogisticsStockTarget',
+            linkId: 'link-storage-smelter-ore',
+            minimum: 4,
+            maximum: 12,
+          },
+        }),
+      ),
+    ).toMatchObject({ type: 'command' });
+  });
+  it('accepts landmark decisions and bounded settlement initiatives', () => {
+    for (const command of [
+      {
+        id: 'landmark-1',
+        playerId: 'player-a',
+        sequence: 1,
+        type: 'resolveLandmark',
+        x: 16,
+        y: 32,
+        choice: 'develop',
+      },
+      {
+        id: 'initiative-1',
+        playerId: 'player-a',
+        sequence: 2,
+        type: 'startSettlementInitiative',
+        initiativeId: 'freight-charter',
+      },
+      {
+        id: 'cancel-gather-1',
+        playerId: 'player-a',
+        sequence: 3,
+        type: 'cancelGatherOrder',
+      },
+    ])
+      expect(parseClientMessage(JSON.stringify({ type: 'command', command }))).toMatchObject({
+        type: 'command',
+      });
   });
   it('accepts only a safe producer recipe configuration command', () => {
     expect(

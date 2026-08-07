@@ -1,5 +1,5 @@
 /** Content schemas deliberately use plain data so the same definitions work in builds and on the server. */
-export const CONTENT_VERSION = 5 as const;
+export const CONTENT_VERSION = 6 as const;
 
 export interface ItemDefinition {
   readonly id: string;
@@ -11,6 +11,7 @@ export interface RecipeDefinition {
   readonly input: Readonly<Record<string, number>>;
   readonly output: Readonly<Record<string, number>>;
   readonly ticks: number;
+  readonly requiredTechnology: string | null;
 }
 export interface BuildingDefinition {
   readonly id: string;
@@ -109,6 +110,13 @@ export interface CooperativeObjectiveDefinition {
   readonly targetAmount: number;
   readonly reward: Readonly<Record<string, number>>;
 }
+export interface SettlementInitiativeDefinition {
+  readonly id: string;
+  readonly displayName: string;
+  readonly description: string;
+  readonly cost: Readonly<Record<string, number>>;
+  readonly durationTicks: number;
+}
 
 export const items = {
   ore: { id: 'ore', displayName: 'Ore', stackLimit: 100 },
@@ -179,21 +187,42 @@ export const landmarks = {
 export type LandmarkId = keyof typeof landmarks;
 
 export const recipes = {
-  smeltOre: { id: 'smelt-ore', input: { ore: 1 }, output: { ingot: 1 }, ticks: 3 },
+  smeltOre: {
+    id: 'smelt-ore',
+    input: { ore: 1 },
+    output: { ingot: 1 },
+    ticks: 3,
+    requiredTechnology: null,
+  },
   forgeTool: {
     id: 'forge-tool',
     input: { ingot: 1, wood: 1 },
     output: { tool: 1 },
     ticks: 5,
+    requiredTechnology: null,
   },
   forgeToolWithoutWood: {
     id: 'forge-tool-without-wood',
     input: { ingot: 2 },
-    output: { tool: 1 },
-    ticks: 4,
+    output: { tool: 2 },
+    ticks: 6,
+    requiredTechnology: 'engineering',
+  },
+  stewardToolBatch: {
+    id: 'steward-tool-batch',
+    input: { ingot: 1, wood: 2 },
+    output: { tool: 2 },
+    ticks: 7,
+    requiredTechnology: 'stewardship',
   },
   /** Masonry's core conversion: quarried stone fired with timber into building brick. */
-  fireBrick: { id: 'fire-brick', input: { stone: 2, wood: 1 }, output: { brick: 1 }, ticks: 6 },
+  fireBrick: {
+    id: 'fire-brick',
+    input: { stone: 2, wood: 1 },
+    output: { brick: 1 },
+    ticks: 6,
+    requiredTechnology: null,
+  },
 } as const satisfies Readonly<Record<string, RecipeDefinition>>;
 
 export const buildings = {
@@ -423,7 +452,7 @@ export const producers = {
   smelter: { buildingId: 'smelter', recipeIds: ['smelt-ore'], defaultRecipeId: 'smelt-ore' },
   workshop: {
     buildingId: 'workshop',
-    recipeIds: ['forge-tool', 'forge-tool-without-wood'],
+    recipeIds: ['forge-tool', 'forge-tool-without-wood', 'steward-tool-batch'],
     defaultRecipeId: 'forge-tool',
   },
   brickworks: {
@@ -574,6 +603,26 @@ export const cooperativeObjectives = {
   },
 } as const satisfies Readonly<Record<string, CooperativeObjectiveDefinition>>;
 
+/** Repeatable, opt-in sinks for mature settlements rather than punitive upkeep. */
+export const settlementInitiatives = {
+  'freight-charter': {
+    id: 'freight-charter',
+    displayName: 'Freight charter',
+    description: 'Carriers move farther and load two extra items for five minutes.',
+    cost: { tool: 2, brick: 2 },
+    durationTicks: 300,
+  },
+  'builders-festival': {
+    id: 'builders-festival',
+    displayName: "Builders' festival",
+    description: 'Construction crews complete two worker ticks at a time for five minutes.',
+    cost: { tool: 1, brick: 3 },
+    durationTicks: 300,
+  },
+} as const satisfies Readonly<Record<string, SettlementInitiativeDefinition>>;
+
+export type SettlementInitiativeId = keyof typeof settlementInitiatives;
+
 export type CooperativeObjectiveId = keyof typeof cooperativeObjectives;
 
 /** Server-enforced social limits; terms are placeholders for a reviewed deployment list. */
@@ -681,6 +730,8 @@ export const validateContent = (): string[] => {
     for (const item of [...Object.keys(recipe.input), ...Object.keys(recipe.output)])
       if (!(item in items)) errors.push(`${recipe.id} references unknown item ${item}`);
     if (recipe.ticks < 1) errors.push(`${recipe.id} must take at least one tick`);
+    if (recipe.requiredTechnology && !(recipe.requiredTechnology in technologies))
+      errors.push(`${recipe.id} references unknown technology ${recipe.requiredTechnology}`);
   }
   for (const resource of Object.values(resources)) {
     if (!(resource.item in items))
@@ -902,6 +953,15 @@ export const validateContent = (): string[] => {
       if (!(item in items)) errors.push(`${objective.id} references unknown reward item ${item}`);
       if (!Number.isSafeInteger(amount) || amount < 1)
         errors.push(`${objective.id} has an invalid reward for ${item}`);
+    }
+  }
+  for (const initiative of Object.values(settlementInitiatives)) {
+    if (!Number.isSafeInteger(initiative.durationTicks) || initiative.durationTicks < 1)
+      errors.push(`${initiative.id} has an invalid duration`);
+    for (const [item, amount] of Object.entries(initiative.cost)) {
+      if (!(item in items)) errors.push(`${initiative.id} references unknown cost item ${item}`);
+      if (!Number.isSafeInteger(amount) || amount < 1)
+        errors.push(`${initiative.id} has an invalid cost for ${item}`);
     }
   }
   return errors;

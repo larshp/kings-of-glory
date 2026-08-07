@@ -244,6 +244,11 @@ export const BuildPanel = ({
               const source = state?.buildings[link.sourceBuildingId];
               const target = state?.buildings[link.targetBuildingId];
               const carrier = link.carrierId ? state?.carriers[link.carrierId] : undefined;
+              const targetStock = target?.inventory[link.item] ?? 0;
+              const recentDelivered = link.recentDeliveries.reduce(
+                (total, delivery) => total + delivery.amount,
+                0,
+              );
               const canRemove =
                 link.ownerId === playerId ||
                 (source &&
@@ -256,6 +261,55 @@ export const BuildPanel = ({
                   {link.capacityPerTrip}/trip, {link.routeDistance ?? 0} route tiles,{' '}
                   {link.status.replaceAll('-', ' ')}
                   {carrier ? `, carrier at ${carrier.x}, ${carrier.y}` : ''})
+                  <span>
+                    Stock {targetStock}; refill below {link.targetMinimum} up to{' '}
+                    {link.targetMaximum}. Delivered {recentDelivered} in the last 60 ticks ({' '}
+                    {link.deliveredTotal} lifetime).
+                  </span>
+                  <label>
+                    Refill below
+                    <input
+                      aria-label={`Minimum stock for ${link.id}`}
+                      defaultValue={link.targetMinimum}
+                      disabled={!canRemove}
+                      key={`${link.id}-minimum-${link.targetMinimum}`}
+                      min={0}
+                      max={link.targetMaximum}
+                      type="number"
+                      onBlur={(event) => {
+                        const minimum = Number(event.currentTarget.value);
+                        if (Number.isSafeInteger(minimum) && minimum !== link.targetMinimum)
+                          send({
+                            type: 'setLogisticsStockTarget',
+                            linkId: link.id,
+                            minimum,
+                            maximum: link.targetMaximum,
+                          });
+                      }}
+                    />
+                  </label>
+                  <label>
+                    Refill to
+                    <input
+                      aria-label={`Maximum stock for ${link.id}`}
+                      defaultValue={link.targetMaximum}
+                      disabled={!canRemove}
+                      key={`${link.id}-maximum-${link.targetMaximum}`}
+                      min={link.targetMinimum}
+                      max={100}
+                      type="number"
+                      onBlur={(event) => {
+                        const maximum = Number(event.currentTarget.value);
+                        if (Number.isSafeInteger(maximum) && maximum !== link.targetMaximum)
+                          send({
+                            type: 'setLogisticsStockTarget',
+                            linkId: link.id,
+                            minimum: link.targetMinimum,
+                            maximum,
+                          });
+                      }}
+                    />
+                  </label>
                   <select
                     aria-label={`Priority for ${link.id}`}
                     disabled={!canRemove}

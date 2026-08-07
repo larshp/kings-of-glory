@@ -76,6 +76,7 @@ export const ContextInspector = ({
   const recipeOptions = building ? recipeOptionsForBuilding(building) : [];
   const upgrade = building ? upgradeForBuilding(building) : undefined;
   const upgradeOwner = building?.ownerId === playerId ? player : undefined;
+  const buildingOwner = building ? state?.players[building.ownerId] : undefined;
   const upgradeLocked = Boolean(
     upgrade &&
     upgradeOwner &&
@@ -175,6 +176,30 @@ export const ContextInspector = ({
             </button>
             <button
               className="block-button"
+              disabled={selectedResource !== 'ore' && selectedResource !== 'wood'}
+              onClick={() =>
+                send(
+                  { type: 'gather', ...actionTile, amount: 5 },
+                  `Gathering order queued for ${selectedResource}.`,
+                )
+              }
+            >
+              Queue 5{' '}
+              {selectedResource === 'ore'
+                ? 'ore'
+                : selectedResource === 'wood'
+                  ? 'wood'
+                  : 'resources'}
+            </button>
+            {player.gatherOrder && (
+              <span className="build-reason">
+                One settler is gathering {player.gatherOrder.remaining} more{' '}
+                {player.gatherOrder.item} at {player.gatherOrder.x}, {player.gatherOrder.y}.
+                <button onClick={() => send({ type: 'cancelGatherOrder' })}>Cancel order</button>
+              </span>
+            )}
+            <button
+              className="block-button"
               disabled={
                 !placement ||
                 !player.research.unlocked.engineering ||
@@ -263,9 +288,21 @@ export const ContextInspector = ({
                           }
                         >
                           {recipeOptions.map((option) => (
-                            <option key={option.id} value={option.id}>
+                            <option
+                              disabled={Boolean(
+                                option.requiredTechnology &&
+                                !buildingOwner?.research.unlocked[
+                                  option.requiredTechnology as keyof typeof player.research.unlocked
+                                ],
+                              )}
+                              key={option.id}
+                              value={option.id}
+                            >
                               {option.id}: {technologyCostLabel(option.input)} →{' '}
                               {technologyCostLabel(option.output)}
+                              {option.requiredTechnology
+                                ? ` (${option.requiredTechnology} path)`
+                                : ''}
                             </option>
                           ))}
                         </select>

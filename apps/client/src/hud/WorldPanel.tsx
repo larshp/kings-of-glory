@@ -1,5 +1,19 @@
 import type { PlayerView, SendCommand, TabPanelProps, Tile, WorldMapView } from './types.js';
 
+const landmarkDevelopment = (kind: string) =>
+  kind === 'ancient-ruin'
+    ? 'Study: future research is 20% faster.'
+    : kind === 'fertile-grove'
+      ? 'Preserve: foresters in this chunk restore timber twice as quickly.'
+      : 'Survey: carriers gain one movement point per tick.';
+
+const landmarkSalvage = (kind: string) =>
+  kind === 'ancient-ruin'
+    ? 'Salvage 2 ingots.'
+    : kind === 'fertile-grove'
+      ? 'Harvest 5 wood.'
+      : 'Recover 2 tools.';
+
 export interface WorldPanelProps extends TabPanelProps {
   readonly player: PlayerView | undefined;
   readonly activeThreats: readonly { readonly id: string }[];
@@ -111,12 +125,49 @@ export const WorldPanel = ({
             <ul>
               {Object.values(player.discoveries).map((discovery) => (
                 <li key={`${discovery.x}:${discovery.y}`}>
-                  {discovery.kind.replaceAll('-', ' ')} at {discovery.x}, {discovery.y} —{' '}
-                  {Object.keys(discovery.reward).length > 0
-                    ? Object.entries(discovery.reward)
-                        .map(([item, amount]) => `${amount} ${item}`)
-                        .join(', ')
-                    : 'discovered while inventory was full'}
+                  <strong>{discovery.kind.replaceAll('-', ' ')}</strong> at {discovery.x},{' '}
+                  {discovery.y}
+                  {discovery.choice ? (
+                    <span>
+                      {' '}
+                      — {discovery.choice === 'develop' ? 'developed' : 'salvaged'}
+                      {Object.keys(discovery.reward).length > 0
+                        ? ` for ${Object.entries(discovery.reward)
+                            .map(([item, amount]) => `${amount} ${item}`)
+                            .join(', ')}`
+                        : ''}
+                    </span>
+                  ) : (
+                    <span>
+                      <span className="build-reason">
+                        {landmarkSalvage(discovery.kind)} {landmarkDevelopment(discovery.kind)}
+                      </span>
+                      <button
+                        onClick={() =>
+                          send({
+                            type: 'resolveLandmark',
+                            x: discovery.x,
+                            y: discovery.y,
+                            choice: 'salvage',
+                          })
+                        }
+                      >
+                        Salvage
+                      </button>
+                      <button
+                        onClick={() =>
+                          send({
+                            type: 'resolveLandmark',
+                            x: discovery.x,
+                            y: discovery.y,
+                            choice: 'develop',
+                          })
+                        }
+                      >
+                        Develop
+                      </button>
+                    </span>
+                  )}
                 </li>
               ))}
             </ul>

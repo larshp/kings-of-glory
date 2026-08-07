@@ -24,6 +24,7 @@ import { SettingsPanel } from './hud/SettingsPanel.js';
 import { fallbackPlayerId, playerIdPromise } from './connection-status.js';
 import { useGameConnection } from './useGameConnection.js';
 import { BuildPanel } from './hud/BuildPanel.js';
+import { ContextInspector } from './hud/ContextInspector.js';
 import { SettlementPanel } from './hud/SettlementPanel.js';
 import { amountLabel, ITEM_KINDS, recipeForBuilding } from './hud/labels.js';
 import {
@@ -79,13 +80,25 @@ import './style.css';
  * settings. Build stays first because it holds the moment-to-moment actions.
  */
 const HUD_TABS = [
-  { id: 'build', label: 'Build' },
-  { id: 'settlement', label: 'Settlement' },
-  { id: 'world', label: 'World' },
-  { id: 'coop', label: 'Co-op' },
-  { id: 'settings', label: 'Settings' },
+  { id: 'build', label: 'Build', glyph: 'B' },
+  { id: 'settlement', label: 'Settlement', glyph: 'S' },
+  { id: 'world', label: 'World', glyph: 'W' },
+  { id: 'coop', label: 'Co-op', glyph: 'C' },
+  { id: 'settings', label: 'Settings', glyph: '⚙' },
 ] as const;
 type HudTabId = (typeof HUD_TABS)[number]['id'];
+
+const MAP_LAYERS: readonly {
+  id: OperationsOverlay;
+  label: string;
+  glyph: string;
+}[] = [
+  { id: 'none', label: 'Default', glyph: '◇' },
+  { id: 'resources', label: 'Resources', glyph: 'R' },
+  { id: 'logistics', label: 'Logistics', glyph: 'L' },
+  { id: 'production', label: 'Production', glyph: 'P' },
+  { id: 'bottlenecks', label: 'Bottlenecks', glyph: '!' },
+];
 
 export const App = () => {
   const [identity, setIdentity] = useState({ playerId: fallbackPlayerId, ready: false });
@@ -531,6 +544,14 @@ export const App = () => {
     : [];
   const actionTile = selectedTile ?? (plot ? { x: plot.x, y: plot.y } : { x: 0, y: 0 });
   const selectedResource = terrainAt(actionTile.x, actionTile.y);
+  const inspectBuilding = (building: Building) => {
+    setSelectedTile({ x: building.x, y: building.y });
+    setSelectedEntity({ type: 'building', id: building.id });
+  };
+  const closeInspector = () => {
+    setSelectedTile(undefined);
+    setSelectedEntity(undefined);
+  };
   /**
    * The world facts a site is judged by, shared so the menu, the ghost on the map, and the
    * click that places a building can never disagree about whether a tile will be accepted.
@@ -831,63 +852,44 @@ export const App = () => {
         assets={renderAssets}
         debug={rendererDebug}
       />
-      <aside className="hud">
-        <header className="hud-header">
+      <header className="game-topbar">
+        <div className="brand-lockup">
           <h1>Kings of Glory</h1>
-          <p className="status">{status}</p>
-          {player && <ResourceBar inventory={player.inventory} rates={inventoryRates} />}
-          {player && nextOnboardingStep && (
-            <p className="onboarding-next">Next: {nextOnboardingStep.text}</p>
-          )}
-          {!renderAssets && !assetLoadError && (
-            <section className="asset-loading" aria-live="polite" aria-label="Loading map artwork">
-              <strong>Loading map artwork</strong>
-              <span>
-                {assetLoadProgress.loaded}/{assetLoadProgress.total} atlas
-                {assetLoadProgress.total === 1 ? '' : 'es'} loaded
-              </span>
-            </section>
-          )}
-          {assetLoadError && (
-            <section className="asset-loading error" role="alert">
-              <strong>Map artwork unavailable</strong>
-              <span>{assetLoadError}</span>
-              <button onClick={() => setAssetLoadAttempt((attempt) => attempt + 1)}>
-                Retry artwork
-              </button>
-            </section>
-          )}
-          {status === 'Maintenance' && (
-            <p className="alert" role="alert">
-              The server is completing maintenance. Refresh the page in a moment to reconnect.
-            </p>
-          )}
-          {status === 'Upgrade required' && (
-            <p className="alert" role="alert">
-              This client no longer matches the server. Refresh the page to load the update.
-            </p>
-          )}
-          {!state && (
-            <section className="startup-card" aria-labelledby="startup-title">
-              <h2 id="startup-title">Entering the global world</h2>
-              <p>
-                {status === 'Connected'
-                  ? 'Preparing your settlement and nearby map…'
-                  : 'Connecting to the local game server…'}
-              </p>
-              <p>
-                Start both services with <code>npm run dev</code>, then refresh this page.
-              </p>
-            </section>
-          )}
-          {rendererError && (
-            <p className="alert" role="alert">
-              Map renderer unavailable: {rendererError}
-            </p>
-          )}
-        </header>
+          <p className="status">
+            <span className="status-dot" aria-hidden="true" />
+            {status}
+          </p>
+        </div>
+        {player && <ResourceBar inventory={player.inventory} rates={inventoryRates} />}
+        {player && nextOnboardingStep && (
+          <p className="onboarding-next">
+            <span>Next objective</span>
+            {nextOnboardingStep.text}
+          </p>
+        )}
+      </header>
+
+      <section className="map-toolbar" aria-label="Map layers">
+        <span className="map-toolbar-label">Map layers</span>
+        {MAP_LAYERS.map((layer) => (
+          <button
+            aria-label={`${layer.label} map layer`}
+            aria-pressed={operationsOverlay === layer.id}
+            className={operationsOverlay === layer.id ? 'map-tool selected' : 'map-tool'}
+            key={layer.id}
+            onClick={() => setOperationsOverlay(layer.id)}
+            title={layer.label}
+            type="button"
+          >
+            <span aria-hidden="true">{layer.glyph}</span>
+            <span>{layer.label}</span>
+          </button>
+        ))}
+      </section>
+
+      <aside className="hud" aria-label="Game controls">
         <nav className="hud-tabs" role="tablist" aria-label="Interface sections">
-          {HUD_TABS.map(({ id, label }) => (
+          {HUD_TABS.map(({ id, label, glyph }) => (
             <button
               aria-controls={`hud-panel-${id}`}
               aria-selected={hudTab === id}
@@ -898,130 +900,197 @@ export const App = () => {
               onKeyDown={(event) => moveHudTabFocus(event, id)}
               role="tab"
               tabIndex={hudTab === id ? 0 : -1}
+              title={label}
               type="button"
             >
-              {label}
+              <span className="hud-tab-glyph" aria-hidden="true">
+                {glyph}
+              </span>
+              <span>{label}</span>
             </button>
           ))}
         </nav>
-        <BuildPanel
-          hidden={hudTab !== 'build'}
-          state={state}
-          player={player}
-          playerId={playerId}
-          preferences={preferences}
-          selectedTile={selectedTile}
-          selectedEntity={selectedEntity}
-          selectedBuildingId={selectedBuildingId}
-          selectedResource={selectedResource}
-          selectedTerritoryOwner={selectedTerritoryOwner}
-          actionTile={actionTile}
-          placement={placement}
-          buildMenu={buildMenu}
-          armedKind={armedKind}
-          armedName={armedEntry?.name}
-          armedStatus={armedStatus}
-          onArm={armBuilding}
-          manageableBuildings={manageableBuildings}
-          roleForBuilding={roleForBuilding}
-          logisticsLinks={logisticsLinks}
-          logisticsSources={logisticsSources}
-          logisticsTargets={logisticsTargets}
-          logisticsItems={logisticsItems}
-          logisticsSourceId={logisticsSourceId}
-          setLogisticsSourceId={setLogisticsSourceId}
-          logisticsTargetId={logisticsTargetId}
-          setLogisticsTargetId={setLogisticsTargetId}
-          logisticsItem={logisticsItem}
-          setLogisticsItem={setLogisticsItem}
-          transfer={transfer}
-          send={send}
-        />
-        <SettlementPanel
-          hidden={hudTab !== 'settlement'}
-          player={player}
-          plot={plot}
-          progressionEra={progressionEra}
-          onboardingSteps={onboardingSteps ?? []}
-          onboardingReservation={onboardingReservation}
-          hasCompletedHearth={hasCompletedHearth}
-          exploredChunkCount={exploredChunkCount}
-          visibleChunkCount={visibleChunkCount}
-          researchEntries={research}
-          messageLog={messageLog}
-          activeAlertEntries={activeAlertEntries}
-          alertGroups={alertGroups}
-          informationQuery={informationQuery}
-          setInformationQuery={setInformationQuery}
-          informationCategory={informationCategory}
-          setInformationCategory={setInformationCategory}
-          informationResults={informationResults}
-          send={send}
-        />
-        <WorldPanel
-          hidden={hudTab !== 'world'}
-          player={player}
-          activeThreats={activeThreats}
-          selectedTile={selectedTile}
-          selectedSector={selectedSector}
-          worldMap={worldMap}
-          worldMapLoading={worldMapLoading}
-          requestWorldMap={requestWorldMap}
-          send={send}
-        />
-        <CoopPanel
-          hidden={hudTab !== 'coop'}
-          state={state}
-          player={player}
-          playerId={playerId}
-          selectedTile={selectedTile}
-          settlements={settlements}
-          ownedSettlements={ownedSettlements}
-          personalSettlement={personalSettlement}
-          sharedProjects={sharedProjects}
-          frontierBeacon={frontierBeacon}
-          frontierBeaconDefinition={frontierBeaconDefinition}
-          transfers={transfers}
-          chatMessages={chatMessages}
-          chatText={chatText}
-          setChatText={setChatText}
-          chatSettlementId={chatSettlementId}
-          setChatSettlementId={setChatSettlementId}
-          blockedPlayerIds={blockedPlayerIds}
-          directory={directory}
-          directoryQuery={directoryQuery}
-          setDirectoryQuery={setDirectoryQuery}
-          requestDirectory={requestDirectory}
-          inviteeId={inviteeId}
-          setInviteeId={setInviteeId}
-          recipientId={recipientId}
-          setRecipientId={setRecipientId}
-          recipientItem={recipientItem}
-          setRecipientItem={setRecipientItem}
-          playerNameDraft={playerNameDraft}
-          setPlayerNameDraft={setPlayerNameDraft}
-          settlementNameDraft={settlementNameDraft}
-          setSettlementNameDraft={setSettlementNameDraft}
-          accountDeletionConfirmation={accountDeletionConfirmation}
-          setAccountDeletionConfirmation={setAccountDeletionConfirmation}
-          send={send}
-        />
-        <SettingsPanel
-          hidden={hudTab !== 'settings'}
-          preferences={preferences}
-          setPreferences={setPreferences}
-          rebindCamera={rebindCamera}
-          rendererDebug={rendererDebug}
-          setRendererDebug={setRendererDebug}
-          operationsOverlay={operationsOverlay}
-          setOperationsOverlay={setOperationsOverlay}
-          canvasMetrics={canvasMetrics}
-          renderAssets={renderAssets}
-          messageRate={messageRate}
-          updateApplicationMs={updateApplicationMs}
-          notify={notify}
-        />
+        <div className="hud-surface">
+          <header className="hud-header">
+            {!renderAssets && !assetLoadError && (
+              <section
+                className="asset-loading"
+                aria-live="polite"
+                aria-label="Loading map artwork"
+              >
+                <strong>Loading map artwork</strong>
+                <span>
+                  {assetLoadProgress.loaded}/{assetLoadProgress.total} atlas
+                  {assetLoadProgress.total === 1 ? '' : 'es'} loaded
+                </span>
+              </section>
+            )}
+            {assetLoadError && (
+              <section className="asset-loading error" role="alert">
+                <strong>Map artwork unavailable</strong>
+                <span>{assetLoadError}</span>
+                <button onClick={() => setAssetLoadAttempt((attempt) => attempt + 1)}>
+                  Retry artwork
+                </button>
+              </section>
+            )}
+            {status === 'Maintenance' && (
+              <p className="alert" role="alert">
+                The server is completing maintenance. Refresh the page in a moment to reconnect.
+              </p>
+            )}
+            {status === 'Upgrade required' && (
+              <p className="alert" role="alert">
+                This client no longer matches the server. Refresh the page to load the update.
+              </p>
+            )}
+            {!state && (
+              <section className="startup-card" aria-labelledby="startup-title">
+                <h2 id="startup-title">Entering the global world</h2>
+                <p>
+                  {status === 'Connected'
+                    ? 'Preparing your settlement and nearby map…'
+                    : 'Connecting to the local game server…'}
+                </p>
+                <p>
+                  Start both services with <code>npm run dev</code>, then refresh this page.
+                </p>
+              </section>
+            )}
+            {rendererError && (
+              <p className="alert" role="alert">
+                Map renderer unavailable: {rendererError}
+              </p>
+            )}
+          </header>
+          <BuildPanel
+            hidden={hudTab !== 'build'}
+            state={state}
+            player={player}
+            playerId={playerId}
+            preferences={preferences}
+            selectedBuildingId={selectedBuildingId}
+            buildMenu={buildMenu}
+            armedKind={armedKind}
+            armedName={armedEntry?.name}
+            armedStatus={armedStatus}
+            onArm={armBuilding}
+            onInspectBuilding={inspectBuilding}
+            manageableBuildings={manageableBuildings}
+            roleForBuilding={roleForBuilding}
+            logisticsLinks={logisticsLinks}
+            logisticsSources={logisticsSources}
+            logisticsTargets={logisticsTargets}
+            logisticsItems={logisticsItems}
+            logisticsSourceId={logisticsSourceId}
+            setLogisticsSourceId={setLogisticsSourceId}
+            logisticsTargetId={logisticsTargetId}
+            setLogisticsTargetId={setLogisticsTargetId}
+            logisticsItem={logisticsItem}
+            setLogisticsItem={setLogisticsItem}
+            send={send}
+          />
+          <SettlementPanel
+            hidden={hudTab !== 'settlement'}
+            player={player}
+            plot={plot}
+            progressionEra={progressionEra}
+            onboardingSteps={onboardingSteps ?? []}
+            onboardingReservation={onboardingReservation}
+            hasCompletedHearth={hasCompletedHearth}
+            exploredChunkCount={exploredChunkCount}
+            visibleChunkCount={visibleChunkCount}
+            researchEntries={research}
+            messageLog={messageLog}
+            activeAlertEntries={activeAlertEntries}
+            alertGroups={alertGroups}
+            informationQuery={informationQuery}
+            setInformationQuery={setInformationQuery}
+            informationCategory={informationCategory}
+            setInformationCategory={setInformationCategory}
+            informationResults={informationResults}
+            send={send}
+          />
+          <WorldPanel
+            hidden={hudTab !== 'world'}
+            player={player}
+            activeThreats={activeThreats}
+            selectedTile={selectedTile}
+            selectedSector={selectedSector}
+            worldMap={worldMap}
+            worldMapLoading={worldMapLoading}
+            requestWorldMap={requestWorldMap}
+            send={send}
+          />
+          <CoopPanel
+            hidden={hudTab !== 'coop'}
+            state={state}
+            player={player}
+            playerId={playerId}
+            selectedTile={selectedTile}
+            settlements={settlements}
+            ownedSettlements={ownedSettlements}
+            personalSettlement={personalSettlement}
+            sharedProjects={sharedProjects}
+            frontierBeacon={frontierBeacon}
+            frontierBeaconDefinition={frontierBeaconDefinition}
+            transfers={transfers}
+            chatMessages={chatMessages}
+            chatText={chatText}
+            setChatText={setChatText}
+            chatSettlementId={chatSettlementId}
+            setChatSettlementId={setChatSettlementId}
+            blockedPlayerIds={blockedPlayerIds}
+            directory={directory}
+            directoryQuery={directoryQuery}
+            setDirectoryQuery={setDirectoryQuery}
+            requestDirectory={requestDirectory}
+            inviteeId={inviteeId}
+            setInviteeId={setInviteeId}
+            recipientId={recipientId}
+            setRecipientId={setRecipientId}
+            recipientItem={recipientItem}
+            setRecipientItem={setRecipientItem}
+            playerNameDraft={playerNameDraft}
+            setPlayerNameDraft={setPlayerNameDraft}
+            settlementNameDraft={settlementNameDraft}
+            setSettlementNameDraft={setSettlementNameDraft}
+            accountDeletionConfirmation={accountDeletionConfirmation}
+            setAccountDeletionConfirmation={setAccountDeletionConfirmation}
+            send={send}
+          />
+          <SettingsPanel
+            hidden={hudTab !== 'settings'}
+            preferences={preferences}
+            setPreferences={setPreferences}
+            rebindCamera={rebindCamera}
+            rendererDebug={rendererDebug}
+            setRendererDebug={setRendererDebug}
+            canvasMetrics={canvasMetrics}
+            renderAssets={renderAssets}
+            messageRate={messageRate}
+            updateApplicationMs={updateApplicationMs}
+            notify={notify}
+          />
+        </div>
       </aside>
+      <ContextInspector
+        state={state}
+        player={player}
+        playerId={playerId}
+        selectedTile={selectedTile}
+        selectedEntity={selectedEntity}
+        selectedBuildingId={selectedBuildingId}
+        selectedResource={selectedResource}
+        selectedTerritoryOwner={selectedTerritoryOwner}
+        actionTile={actionTile}
+        placement={placement}
+        manageableBuildings={manageableBuildings}
+        roleForBuilding={roleForBuilding}
+        transfer={transfer}
+        send={send}
+        onClose={closeInspector}
+      />
       <div className="toast-region" role="status" aria-live="polite">
         {notices.map((notice) => (
           <div className={`toast ${notice.severity}`} key={notice.id}>

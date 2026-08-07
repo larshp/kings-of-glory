@@ -67,7 +67,7 @@ const inventory = async (page: Page) => {
   const required = ['ore', 'wood', 'stone', 'ingot', 'brick', 'tool'] as const;
   const amounts = await Promise.all(
     required.map(async (item) => {
-      const chip = page.locator(`aside.hud .resource-bar [data-item="${item}"]`).first();
+      const chip = page.locator(`.game-topbar .resource-bar [data-item="${item}"]`).first();
       const amount = await chip.getAttribute('data-amount');
       if (amount === null) throw new Error(`The resource bar has no chip for ${item}`);
       return [item, Number(amount)] as const;
@@ -77,27 +77,28 @@ const inventory = async (page: Page) => {
 };
 
 /**
- * Buildings collapse to one row each, so a building has to be opened before its controls
- * exist. Opening one closes the others, which is why interactions re-open as they go.
+ * Building rows are the master list. Activating one opens its controls in the inspector.
  */
-const expandBuilding = async (building: Locator) => {
+const inspectBuilding = async (page: Page, building: Locator) => {
   const summary = building.locator('button.building-summary');
-  if ((await summary.getAttribute('aria-expanded')) !== 'true') await summary.click();
-  await expect(summary).toHaveAttribute('aria-expanded', 'true');
+  if ((await summary.getAttribute('aria-pressed')) !== 'true') await summary.click();
+  await expect(summary).toHaveAttribute('aria-pressed', 'true');
+  const inspector = page.locator('.context-inspector');
+  await expect(inspector).toBeVisible();
+  return inspector;
 };
 
 const openBuilding = async (page: Page, kind: string) => {
   const building = page.locator('section.building').filter({ hasText: kind }).first();
   await expect(building).toBeVisible();
-  await expandBuilding(building);
-  return building;
+  return inspectBuilding(page, building);
 };
 
 const gatherResource = async (page: Page, resource: 'ore' | 'wood') => {
   const canvas = page.locator('canvas');
   const bounds = await canvas.boundingBox();
   if (!bounds) throw new Error('World canvas has no visible bounds');
-  const selected = resource === 'ore' ? /\(ore deposit\)/ : /\(timber grove\)/;
+  const selected = resource === 'ore' ? /Resource: Ore deposit/ : /Resource: Timber grove/;
   for (const position of canvasProbePositions(bounds.width, bounds.height)) {
     await canvas.dispatchEvent('pointerup', {
       clientX: bounds.x + position.x,
@@ -142,10 +143,11 @@ const gatherTo = async (page: Page, resource: 'ore' | 'wood', minimum: number) =
 };
 
 const completedBuilding = async (page: Page, kind: string) => {
-  const building = await openBuilding(page, kind);
+  const building = page.locator('section.building').filter({ hasText: kind }).first();
+  await expect(building).toBeVisible();
   // The row states its own status, so completion is visible without opening anything.
   await expect(building.getByText('Under construction')).toHaveCount(0, { timeout: 10_000 });
-  return building;
+  return inspectBuilding(page, building);
 };
 
 test('loads onboarding accessibly at the supported viewport and input surface', async ({
@@ -154,10 +156,19 @@ test('loads onboarding accessibly at the supported viewport and input surface', 
   await page.goto('/');
   await expect(page.locator('.status')).toHaveText('Connected');
   // The header keeps identity, connection, resources, and the next step visible on every tab.
-  await expect(page.locator('.hud-header .resource-bar')).toContainText(/Ore \d+/);
-  await expect(page.locator('.hud-header .onboarding-next')).toContainText('Next:');
+  await expect(page.locator('.game-topbar .resource-bar')).toContainText(/Ore \d+/);
+  await expect(page.locator('.game-topbar .onboarding-next')).toContainText('Next objective');
   await expect(page.locator('#hud-tab-build')).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('heading', { name: 'Construction' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Default map layer' })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  await page.getByRole('button', { name: 'Bottlenecks map layer' }).click();
+  await expect(page.getByRole('button', { name: 'Bottlenecks map layer' })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
   const canvas = page.locator('canvas');
   await expect(canvas).toHaveAttribute('aria-label', /isometric world map/i);
   const bounds = await canvas.boundingBox();
@@ -167,15 +178,15 @@ test('loads onboarding accessibly at the supported viewport and input surface', 
     clientY: bounds.y + bounds.height / 2,
     pointerId: 1,
   });
-  await expect(page.getByText('Selected building: Settlement center')).toBeVisible();
+  await expect(page.locator('.context-inspector')).toContainText('Settlement center');
   await canvas.hover({ position: { x: bounds.width / 2, y: bounds.height / 2 } });
   await expect(canvas).toHaveAttribute(
     'aria-description',
     /Tile .*(Grassland|Timber grove|Ore deposit).*Your territory.*settlement center.*Not buildable/,
   );
-  await expect(page.getByText(/Next: Gather ore and wood/)).toBeVisible();
-  await page.keyboard.press('Tab');
-  await expect(page.locator(':focus')).toBeVisible();
+  await expect(page.locator('.game-topbar .onboarding-next')).toContainText('Gather ore and wood');
+  await page.getByRole('button', { name: 'Close inspector' }).click();
+  await expect(page.locator('.context-inspector')).toHaveCount(0);
   await page.keyboard.press('Control+Equal');
 
   // Tabs are reachable with the keyboard and only the selected panel is exposed.
@@ -235,9 +246,9 @@ test('completes the authoritative gather-build-produce-research-defend loop', as
   const damaged = page.locator('section.building').filter({ hasText: 'Damaged' }).first();
   await expect(damaged).toBeVisible({ timeout: 45_000 });
   const damagedName = await damaged.locator('.building-name').innerText();
-  await expandBuilding(damaged);
-  await expect(damaged.getByText('Damaged by a threat or acid rain')).toBeVisible();
-  await damaged.getByRole('button', { name: 'Repair' }).click();
+  const damagedInspector = await inspectBuilding(page, damaged);
+  await expect(damagedInspector.getByText('Damaged by a threat or acid rain')).toBeVisible();
+  await damagedInspector.getByRole('button', { name: 'Repair' }).click();
   await expect(
     page
       .locator('section.building')

@@ -6,11 +6,7 @@ import {
   type CameraAction,
   type ClientPreferences,
 } from '../preferences.js';
-import type {
-  OperationsOverlay,
-  WorldCanvasDebugState,
-  WorldCanvasMetrics,
-} from '../WorldCanvas.js';
+import type { WorldCanvasDebugState, WorldCanvasMetrics } from '../WorldCanvas.js';
 import type { TabPanelProps } from './types.js';
 
 export interface SettingsPanelProps extends TabPanelProps {
@@ -21,8 +17,6 @@ export interface SettingsPanelProps extends TabPanelProps {
   ) => (event: ReactKeyboardEvent<HTMLInputElement>) => void;
   readonly rendererDebug: WorldCanvasDebugState;
   readonly setRendererDebug: Dispatch<SetStateAction<WorldCanvasDebugState>>;
-  readonly operationsOverlay: OperationsOverlay;
-  readonly setOperationsOverlay: Dispatch<SetStateAction<OperationsOverlay>>;
   readonly canvasMetrics: WorldCanvasMetrics | undefined;
   readonly renderAssets: RenderAssets | undefined;
   readonly messageRate: { readonly received: number; readonly sent: number };
@@ -38,8 +32,6 @@ export const SettingsPanel = ({
   rebindCamera,
   rendererDebug,
   setRendererDebug,
-  operationsOverlay,
-  setOperationsOverlay,
   canvasMetrics,
   renderAssets,
   messageRate,
@@ -185,24 +177,6 @@ export const SettingsPanel = ({
         Threat paths
       </label>
     </details>
-    <section className="operations-overlay" aria-labelledby="operations-overlay-title">
-      <h2 id="operations-overlay-title">Operations overlay</h2>
-      <label htmlFor="operations-overlay-select">
-        Map layer
-        <select
-          id="operations-overlay-select"
-          value={operationsOverlay}
-          onChange={(event) => setOperationsOverlay(event.target.value as OperationsOverlay)}
-        >
-          <option value="none">None</option>
-          <option value="resources">Resources</option>
-          <option value="logistics">Logistics flow</option>
-          <option value="production">Production state</option>
-          <option value="bottlenecks">Bottlenecks</option>
-        </select>
-      </label>
-      <p>Layers are local views of already-authorized world state.</p>
-    </section>
     <details className="performance-panel">
       <summary>Performance</summary>
       <p>

@@ -8,6 +8,7 @@ body {
 }
 main {
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 .client-error-screen {
@@ -45,22 +46,86 @@ main {
     #20384a;
   background-size: 4rem 2rem;
 }
-.hud {
+.game-topbar {
   position: fixed;
-  z-index: 2147483647;
+  z-index: 30;
   top: 1rem;
   left: 1rem;
+  right: 1rem;
+  display: grid;
+  grid-template-columns: auto minmax(28rem, 1fr) minmax(12rem, 22rem);
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 3.25rem;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid #698b75;
+  border-radius: 0.55rem;
+  background: rgb(12 20 32 / 94%);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 24%);
+  backdrop-filter: blur(8px);
+}
+.brand-lockup {
+  display: flex;
+  align-items: baseline;
+  gap: 0.65rem;
+  white-space: nowrap;
+}
+.brand-lockup h1,
+.brand-lockup p {
+  margin: 0;
+}
+.brand-lockup .status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+}
+.status-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0.45rem currentColor;
+}
+.game-topbar .onboarding-next {
+  display: grid;
+  gap: 0.05rem;
+  margin: 0;
+  padding-left: 0.7rem;
+  border-left: 1px solid #526576;
+  font-size: 0.8rem;
+  line-height: 1.25;
+}
+.game-topbar .onboarding-next span {
+  color: #9fb1c1;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.hud {
+  position: fixed;
+  z-index: 25;
+  top: 5.7rem;
+  bottom: 1rem;
+  left: 1rem;
+  display: grid;
+  grid-template-columns: 3.85rem minmax(0, 19rem);
+  gap: 0.5rem;
+  max-width: calc(100vw - 2rem);
+  min-height: 0;
+}
+.hud-surface {
   display: flex;
   flex-direction: column;
-  width: 19rem;
-  max-width: calc(100vw - 2rem);
-  max-height: calc(100vh - 2rem);
+  min-height: 0;
   padding: 0.75rem;
   background: rgb(12 20 32 / 92%);
   border: 1px solid #698b75;
-  border-radius: 0.5rem;
+  border-radius: 0.55rem;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
+  backdrop-filter: blur(8px);
 }
-/* The header and tab strip stay put; only the active panel scrolls. */
 .hud-header {
   flex: 0 0 auto;
 }
@@ -74,34 +139,51 @@ main {
   display: none;
 }
 .hud-tabs {
-  display: flex;
-  flex: 0 0 auto;
-  /* Scroll the strip rather than wrapping it, so the panel below never shifts down. */
-  flex-wrap: nowrap;
-  gap: 0.1rem;
-  overflow-x: auto;
-  padding-top: 0.5rem;
-  border-bottom: 1px solid #526576;
-  scrollbar-width: thin;
+  display: grid;
+  align-content: start;
+  gap: 0.35rem;
+  min-width: 0;
+  padding: 0.35rem;
+  border: 1px solid #526576;
+  border-radius: 0.55rem;
+  background: rgb(12 20 32 / 90%);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+  backdrop-filter: blur(8px);
 }
 .hud-tab {
-  flex: 0 0 auto;
-  width: auto;
+  display: grid;
+  box-sizing: border-box;
+  justify-items: center;
+  gap: 0.18rem;
+  width: 100%;
   margin: 0;
-  padding: 0.35rem 0.4rem;
+  padding: 0.5rem 0.25rem;
   background: transparent;
   border: 1px solid transparent;
-  border-bottom: 0;
-  border-radius: 0.25rem 0.25rem 0 0;
+  border-radius: 0.35rem;
   color: #c8d8e7;
-  font-size: 0.8rem;
+  font-size: 0.66rem;
   white-space: nowrap;
 }
+.hud-tab-glyph {
+  display: grid;
+  place-items: center;
+  width: 1.65rem;
+  height: 1.65rem;
+  border: 1px solid #526576;
+  border-radius: 50%;
+  font-size: 0.8rem;
+  font-weight: 800;
+}
 .hud-tab.selected {
-  background: #a57437;
-  border-color: #698b75;
+  background: rgb(165 116 55 / 34%);
+  border-color: #a57437;
   color: #fff;
   font-weight: 700;
+}
+.hud-tab.selected .hud-tab-glyph {
+  border-color: #f5d56a;
+  background: #a57437;
 }
 .resource-bar {
   display: grid;
@@ -146,6 +228,69 @@ main {
 }
 .resource-rate.falling {
   color: #ffb4a7;
+}
+.game-topbar .resource-bar {
+  grid-template-columns: repeat(6, minmax(4.4rem, 1fr));
+  margin: 0;
+  padding: 0.3rem 0.45rem;
+  border-color: #526576;
+  background: rgb(25 52 70 / 58%);
+}
+.game-topbar .resource-chip {
+  min-width: 0;
+}
+.map-toolbar {
+  position: fixed;
+  z-index: 24;
+  top: 5.7rem;
+  right: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.3rem;
+  border: 1px solid #526576;
+  border-radius: 0.5rem;
+  background: rgb(12 20 32 / 90%);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 20%);
+  backdrop-filter: blur(8px);
+}
+.map-toolbar-label {
+  padding: 0 0.4rem;
+  color: #9fb1c1;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.map-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0.38rem 0.48rem;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #c8d8e7;
+  font-size: 0.72rem;
+}
+.map-tool > span:first-child {
+  display: grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 1px solid #526576;
+  border-radius: 0.25rem;
+  font-size: 0.65rem;
+  font-weight: 800;
+}
+.map-tool.selected {
+  border-color: #a57437;
+  background: rgb(165 116 55 / 34%);
+  color: #fff;
+}
+.map-tool.selected > span:first-child {
+  border-color: #f5d56a;
+  background: #a57437;
 }
 .build-menu {
   margin: 0.25rem 0;
@@ -298,6 +443,24 @@ select {
   border-radius: 0.25rem;
   font: inherit;
 }
+.section-heading-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-top: 1px solid #526576;
+}
+.section-heading-row h2 {
+  margin-bottom: 0.35rem;
+}
+.section-heading-row .building-count {
+  margin: 0;
+  text-align: right;
+}
+.building-list {
+  display: grid;
+  gap: 0.2rem;
+}
 .building {
   border-top: 1px solid #526576;
 }
@@ -316,8 +479,7 @@ select {
 }
 /*
  * One row per building: name, site, status, and a progress bar. The row is the whole
- * control, so the list can be scanned in a glance and only the building being worked on
- * spends vertical space on its details.
+ * control, so the list can be scanned in a glance and opens the contextual inspector.
  */
 .building-summary {
   display: grid;
@@ -391,6 +553,102 @@ select {
   margin: 0;
   padding: 0.25rem 0.45rem;
   font-size: 0.78rem;
+}
+.context-inspector {
+  position: fixed;
+  z-index: 25;
+  top: 9.2rem;
+  right: 1rem;
+  bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  width: min(21rem, calc(100vw - 2rem));
+  min-height: 0;
+  border: 1px solid #698b75;
+  border-radius: 0.55rem;
+  background: rgb(12 20 32 / 94%);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 28%);
+  backdrop-filter: blur(8px);
+}
+.context-inspector-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 0.75rem;
+  border-bottom: 1px solid #526576;
+}
+.context-inspector-header h2 {
+  margin: 0.1rem 0 0;
+  font-size: 1.05rem;
+}
+.eyebrow {
+  color: #9fb1c1;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.icon-button {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #526576;
+  background: transparent;
+  color: #c8d8e7;
+  font-size: 1.2rem;
+}
+.context-inspector-body {
+  min-height: 0;
+  padding: 0.75rem;
+  overflow-y: auto;
+}
+.selection-summary,
+.building-inspector,
+.context-actions {
+  display: grid;
+  gap: 0.4rem;
+}
+.selection-summary {
+  margin-bottom: 0.7rem;
+  padding-bottom: 0.7rem;
+  border-bottom: 1px solid #526576;
+  color: #c8d8e7;
+  font-size: 0.8rem;
+}
+.context-actions h3 {
+  margin: 0 0 0.15rem;
+  font-size: 0.9rem;
+}
+.building-inspector {
+  font-size: 0.85rem;
+}
+.building-inspector label {
+  display: grid;
+  gap: 0.15rem;
+}
+.inspector-status-row,
+.inspector-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.inspector-status-row .building-state {
+  grid-column: auto;
+  font-weight: 700;
+}
+.inspector-progress {
+  color: #c8d8e7;
+  font-size: 0.78rem;
+}
+.inspector-progress .building-progress {
+  grid-column: auto;
+  flex: 0 0 6rem;
+  width: 6rem;
 }
 .status {
   color: #9fe2b1;
@@ -916,6 +1174,18 @@ select {
   margin: 0;
   font-size: 0.85rem;
 }
+.automation-panel > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  cursor: pointer;
+}
+.automation-panel > summary span {
+  color: #c8d8e7;
+  font-size: 0.75rem;
+}
 .logistics-link {
   display: flex;
   flex-wrap: wrap;
@@ -926,4 +1196,114 @@ select {
   margin: 0;
   padding: 0.25rem 0.4rem;
   font-size: 0.75rem;
+}
+
+@media (max-width: 900px) {
+  .game-topbar {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .game-topbar .onboarding-next {
+    display: none;
+  }
+  .game-topbar .resource-bar {
+    grid-template-columns: repeat(6, minmax(2.75rem, 1fr));
+  }
+  .game-topbar .resource-name {
+    display: none;
+  }
+  .map-tool > span:last-child,
+  .map-toolbar-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .map-tool {
+    padding: 0.38rem;
+  }
+  .context-inspector {
+    width: 19rem;
+  }
+}
+
+@media (max-width: 760px) {
+  .game-topbar {
+    top: 0.5rem;
+    right: 0.5rem;
+    left: 0.5rem;
+  }
+  .brand-lockup h1 {
+    font-size: 1rem;
+  }
+  .hud {
+    top: 5.15rem;
+    bottom: 0.5rem;
+    left: 0.5rem;
+    grid-template-columns: 3.5rem minmax(0, 17rem);
+  }
+  .map-toolbar {
+    top: 5.15rem;
+    right: 0.5rem;
+  }
+  .context-inspector {
+    top: 8.65rem;
+    right: 0.5rem;
+    bottom: 0.5rem;
+    left: 4.5rem;
+    width: auto;
+  }
+  main:has(.context-inspector) .hud-surface {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .game-topbar {
+    grid-template-columns: 1fr;
+    gap: 0.3rem;
+  }
+  .brand-lockup {
+    justify-content: space-between;
+  }
+  .game-topbar .resource-bar {
+    grid-template-columns: repeat(6, 1fr);
+  }
+  .game-topbar .resource-rate {
+    display: none;
+  }
+  .hud {
+    top: auto;
+    right: 0.5rem;
+    bottom: 0.5rem;
+    grid-template: minmax(0, auto) auto / 1fr;
+    grid-template-areas:
+      'surface'
+      'rail';
+  }
+  .hud-surface {
+    grid-area: surface;
+    max-height: 52dvh;
+  }
+  .hud-tabs {
+    grid-area: rail;
+    grid-template-columns: repeat(5, 1fr);
+  }
+  .hud-tab {
+    padding: 0.35rem 0.2rem;
+  }
+  .hud-tab-glyph {
+    width: 1.35rem;
+    height: 1.35rem;
+  }
+  .map-toolbar {
+    top: 7.2rem;
+  }
+  .context-inspector {
+    top: 10.65rem;
+    right: 0.5rem;
+    bottom: 4.65rem;
+    left: 0.5rem;
+  }
 }

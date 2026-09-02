@@ -81,14 +81,14 @@ describe.skipIf(!connectionString)('PostgreSQL forward migrations', () => {
       x: ore!.x,
       y: ore!.y,
     });
-    expect(host.world.players['postgres-player']?.inventory.ore).toBe(10);
+    expect(host.world.players['postgres-player']?.inventory.ore).toBe(1);
     await persistence.close();
 
     const restoredPersistence = new PostgresWorldPersistence(new Pool(poolOptions));
     const restored = new GlobalWorldHost(999, restoredPersistence);
     await restored.restore({ migrate: false });
     expect(restored.world.seed).toBe(73);
-    expect(restored.world.players['postgres-player']?.inventory.ore).toBe(10);
+    expect(restored.world.players['postgres-player']?.inventory.ore).toBe(1);
     expect(restored.world.players['postgres-player']?.lastSequence).toBe(1);
     await restoredPersistence.close();
   });

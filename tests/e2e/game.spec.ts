@@ -94,27 +94,44 @@ const openBuilding = async (page: Page, kind: string) => {
   return inspectBuilding(page, building);
 };
 
+/**
+ * The HUD floats over the map, so a tile beneath a panel is one no pointer can reach: the
+ * synthetic click above still selects it, but it can never be hovered.
+ */
+const pointerReachesCanvas = (
+  page: Page,
+  bounds: { x: number; y: number },
+  position: { x: number; y: number },
+) =>
+  page.evaluate((point) => document.elementFromPoint(point.x, point.y)?.tagName === 'CANVAS', {
+    x: bounds.x + position.x,
+    y: bounds.y + position.y,
+  });
+
+/**
+ * Gathers from the first reachable deposit the probes find, and returns the point that hit it.
+ * The tile description belongs to the hovered tile, so it exists only while the pointer rests
+ * on the map: clicking a HUD button takes the pointer away and the description with it, which
+ * is why every read of it hovers the tile first.
+ */
 const gatherResource = async (page: Page, resource: 'ore' | 'wood') => {
   const canvas = page.locator('canvas');
-  const bounds = await canvas.boundingBox();
-  if (!bounds) throw new Error('World canvas has no visible bounds');
+  const bounds = await canvasBounds(page);
   const selected = resource === 'ore' ? /Resource: Ore deposit/ : /Resource: Timber grove/;
   for (const position of canvasProbePositions(bounds.width, bounds.height)) {
-    await canvas.dispatchEvent('pointerup', {
-      clientX: bounds.x + position.x,
-      clientY: bounds.y + position.y,
-      pointerId: 1,
-    });
+    await clickCanvas(page, bounds, position);
     if (!selected.test(await page.locator('body').innerText())) continue;
+    if (!(await pointerReachesCanvas(page, bounds, position))) continue;
     const before = (await inventory(page))[resource];
     await page.getByRole('button', { name: `Gather ${resource}` }).click();
     await page.waitForTimeout(300);
     if ((await inventory(page))[resource] > before) {
+      await canvas.hover({ position });
       await expect(canvas).toHaveAttribute(
         'aria-description',
         new RegExp(`${resource} remaining: \\d+/10.*Reachable for gathering`),
       );
-      return;
+      return position;
     }
   }
   throw new Error(`Could not gather an available ${resource} deposit`);
@@ -122,23 +139,27 @@ const gatherResource = async (page: Page, resource: 'ore' | 'wood') => {
 
 const gatherTo = async (page: Page, resource: 'ore' | 'wood', minimum: number) => {
   if ((await inventory(page))[resource] >= minimum) return;
-  await gatherResource(page, resource);
+  let position = await gatherResource(page, resource);
   const canvas = page.locator('canvas');
+  const remaining = new RegExp(`${resource} remaining: (\\d+)/10`);
   while ((await inventory(page))[resource] < minimum) {
     const before = (await inventory(page))[resource];
+    await canvas.hover({ position });
+    await expect(canvas).toHaveAttribute('aria-description', remaining);
     const remainingBefore = Number(
-      (await canvas.getAttribute('aria-description'))?.match(
-        new RegExp(`${resource} remaining: (\\d+)/10`),
-      )?.[1],
+      (await canvas.getAttribute('aria-description'))?.match(remaining)?.[1],
     );
     await page.getByRole('button', { name: `Gather ${resource}` }).click();
     await page.waitForTimeout(300);
-    if ((await inventory(page))[resource] === before) await gatherResource(page, resource);
-    else
+    if ((await inventory(page))[resource] === before)
+      position = await gatherResource(page, resource);
+    else {
+      await canvas.hover({ position });
       await expect(canvas).toHaveAttribute(
         'aria-description',
         new RegExp(`${resource} remaining: ${remainingBefore - 1}/10`),
       );
+    }
   }
 };
 

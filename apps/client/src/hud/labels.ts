@@ -18,9 +18,21 @@ import {
 /** Label helpers shared by the HUD panels, kept together so wording stays consistent. */
 
 /** Every carryable item, in the order the HUD lists them. */
-export const ITEM_KINDS: readonly ItemKind[] = ['ore', 'wood', 'stone', 'ingot', 'brick', 'tool'];
+export const ITEM_KINDS: readonly ItemKind[] = [
+  'ore',
+  'wood',
+  'stone',
+  'ingot',
+  'brick',
+  'tool',
+  'steel',
+];
 
 export const itemLabel = (item: ItemKind) => itemDefinitions[item].displayName;
+
+/** An amount of one item, pluralised the same naive way the HUD already words costs. */
+export const itemCountLabel = (item: ItemKind, amount: number) =>
+  `${amount} ${itemLabel(item).toLowerCase()}${amount === 1 ? '' : 's'}`;
 
 /** What a player is looking for on the map when an extractor needs a deposit in range. */
 export const depositLabel = (terrain: ResourceTerrain) =>

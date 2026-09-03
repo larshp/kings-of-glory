@@ -5,7 +5,7 @@
  * ground-contact origin, and must keep the atlas on the 64-design-pixel grid.
  */
 export const spriteAtlasManifest = {
-  world: { url: '/assets/world-atlas.svg', width: 640, height: 640, sourceScale: 2 },
+  world: { url: '/assets/world-atlas.svg', width: 640, height: 768, sourceScale: 2 },
 } as const;
 
 export type SpriteId =
@@ -22,6 +22,9 @@ export type SpriteId =
   | 'quarry'
   | 'brickworks'
   | 'wall'
+  | 'foundry'
+  | 'bastion'
+  | 'guild-hall'
   | 'construction'
   | 'raider'
   | 'carrier'
@@ -90,6 +93,9 @@ export const spriteFrames: Readonly<Record<SpriteId, SpriteFrame>> = {
   'stone-node': frame(2, 4),
   'stone-node-low': frame(3, 4),
   'stone-node-spent': frame(4, 4),
+  foundry: frame(0, 5),
+  bastion: frame(1, 5),
+  'guild-hall': frame(2, 5),
 };
 
 export type RenderAssets = Readonly<Record<keyof typeof spriteAtlasManifest, HTMLImageElement>>;

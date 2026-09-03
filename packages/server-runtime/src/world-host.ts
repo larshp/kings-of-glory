@@ -790,6 +790,8 @@ export class GlobalWorldHost {
       carriers,
       roads,
       cooperativeObjectives,
+      // Which shared project the world is building, and how high its bar stands, is public.
+      completedWorldProjects: source.completedWorldProjects,
       playerActivity: source.playerActivity[playerId]
         ? { [playerId]: source.playerActivity[playerId] }
         : {},

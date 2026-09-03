@@ -1,10 +1,23 @@
 import type { Dispatch, SetStateAction } from 'react';
-import type { cooperativeObjectives as cooperativeObjectiveDefinitions } from '@kings/content';
+import type { CooperativeObjectiveDefinition, CooperativeObjectiveId } from '@kings/content';
 import type { ClientWorldState, DirectoryEntry } from '@kings/protocol';
-import { itemLabel, ITEM_KINDS } from './labels.js';
+import { amountLabel, itemCountLabel, itemLabel, ITEM_KINDS } from './labels.js';
 import type { ItemKind, PlayerView, SendCommand, TabPanelProps, Tile } from './types.js';
 
 type Settlement = ClientWorldState['settlements'][string];
+
+/** The world's one open shared project, with the round it is on and what it now asks for. */
+export interface WorldProjectView {
+  readonly id: CooperativeObjectiveId;
+  readonly definition: CooperativeObjectiveDefinition;
+  readonly state: ClientWorldState['cooperativeObjectives'][CooperativeObjectiveId];
+  readonly target: number;
+  readonly round: number;
+  /** Last tick this project's reward can still be claimed; unset while it is unfinished. */
+  readonly claimDeadline: number | undefined;
+  /** What the world starts once this one is retired, so the rotation is visible in advance. */
+  readonly nextDisplayName: string;
+}
 
 export interface DirectoryView {
   entries: DirectoryEntry[];
@@ -20,8 +33,7 @@ export interface CoopPanelProps extends TabPanelProps {
   readonly ownedSettlements: readonly Settlement[];
   readonly personalSettlement: Settlement | undefined;
   readonly sharedProjects: readonly ClientWorldState['sharedConstructionProjects'][string][];
-  readonly frontierBeacon: ClientWorldState['cooperativeObjectives']['frontier-beacon'] | undefined;
-  readonly frontierBeaconDefinition: (typeof cooperativeObjectiveDefinitions)['frontier-beacon'];
+  readonly worldProject: WorldProjectView | undefined;
   readonly transfers: ClientWorldState['transfers'];
   readonly chatMessages: ClientWorldState['social']['messages'];
   readonly chatText: string;
@@ -59,8 +71,7 @@ export const CoopPanel = ({
   ownedSettlements,
   personalSettlement,
   sharedProjects,
-  frontierBeacon,
-  frontierBeaconDefinition,
+  worldProject,
   transfers,
   chatMessages,
   chatText,
@@ -97,53 +108,63 @@ export const CoopPanel = ({
     {player && (
       <>
         <h2>Cooperation</h2>
-        {frontierBeacon && personalSettlement && (
-          <section className="global-objective" aria-labelledby="frontier-beacon-title">
-            <h3 id="frontier-beacon-title">{frontierBeaconDefinition.displayName}</h3>
-            <p>{frontierBeaconDefinition.description}</p>
+        {worldProject && personalSettlement && (
+          <section className="global-objective" aria-labelledby="world-project-title">
+            <h3 id="world-project-title">
+              {worldProject.definition.displayName}
+              {worldProject.round > 1 ? ` · round ${worldProject.round}` : ''}
+            </h3>
+            <p>{worldProject.definition.description}</p>
             <p>
-              Shared progress: {frontierBeacon.totalContributed}/
-              {frontierBeaconDefinition.targetAmount} tools. Your contribution:{' '}
-              {frontierBeacon.contributionsByPlayer[playerId] ?? 0}.
+              Shared progress: {worldProject.state.totalContributed}/
+              {itemCountLabel(
+                worldProject.definition.contributionItem as ItemKind,
+                worldProject.target,
+              )}
+              . Your contribution: {worldProject.state.contributionsByPlayer[playerId] ?? 0}.
             </p>
-            {frontierBeacon.completedTick === null ? (
+            {worldProject.state.completedTick === null ? (
               <button
                 disabled={
-                  player.inventory.tool < 1 ||
-                  frontierBeacon.totalContributed >= frontierBeaconDefinition.targetAmount
+                  player.inventory[worldProject.definition.contributionItem as ItemKind] < 1 ||
+                  worldProject.state.totalContributed >= worldProject.target
                 }
                 onClick={() =>
                   send(
                     {
                       type: 'contributeToObjective',
-                      objectiveId: 'frontier-beacon',
+                      objectiveId: worldProject.id,
                       settlementId: personalSettlement.id,
                       amount: 1,
                     },
-                    'Contributed one tool to the Frontier Beacon.',
+                    `Contributed one ${worldProject.definition.contributionItem} to the ${worldProject.definition.displayName}.`,
                   )
                 }
               >
-                Contribute 1 tool
+                Contribute 1 {worldProject.definition.contributionItem}
               </button>
             ) : (
               <>
-                <p>Completed at tick {frontierBeacon.completedTick}.</p>
+                <p>
+                  Completed at tick {worldProject.state.completedTick}. Contributors may claim until
+                  tick {worldProject.claimDeadline}, and the world then starts the{' '}
+                  {worldProject.nextDisplayName}.
+                </p>
                 <button
                   disabled={
-                    !frontierBeacon.contributionsByPlayer[playerId] ||
-                    Boolean(frontierBeacon.rewardClaims[playerId])
+                    !worldProject.state.contributionsByPlayer[playerId] ||
+                    Boolean(worldProject.state.rewardClaims[playerId])
                   }
                   onClick={() =>
                     send(
-                      { type: 'claimObjectiveReward', objectiveId: 'frontier-beacon' },
-                      'Claimed the Frontier Beacon reward.',
+                      { type: 'claimObjectiveReward', objectiveId: worldProject.id },
+                      `Claimed the ${worldProject.definition.displayName} reward.`,
                     )
                   }
                 >
-                  {frontierBeacon.rewardClaims[playerId]
+                  {worldProject.state.rewardClaims[playerId]
                     ? 'Reward claimed'
-                    : 'Claim reward: 2 ingots'}
+                    : `Claim reward: ${amountLabel(worldProject.definition.reward)}`}
                 </button>
               </>
             )}

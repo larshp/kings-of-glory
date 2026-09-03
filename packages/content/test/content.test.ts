@@ -18,7 +18,19 @@ import {
   validateContent,
   validateRecipeGraph,
   validateTechnologyGraph,
+  worldProjectRules,
 } from '../src/index.js';
+
+type Technology = keyof typeof technologies;
+
+/** Whether a technology is the named one or sits somewhere behind it in the graph. */
+const requires = (candidate: string | null, ancestor: Technology): boolean =>
+  candidate === ancestor ||
+  (candidate !== null &&
+    candidate in technologies &&
+    technologies[candidate as Technology].prerequisites.some((prerequisite) =>
+      requires(prerequisite, ancestor),
+    ));
 
 describe('content definitions', () => {
   it('has valid item and recipe references', () => expect(validateContent()).toEqual([]));
@@ -92,13 +104,60 @@ describe('content definitions', () => {
     expect(buildings.wall.cost).toEqual({ brick: 1 });
     // A wall is the point of the masonry chain: it outlasts every timber building.
     expect(buildings.wall.maxHealth).toBeGreaterThan(buildings.watchtower.maxHealth * 2);
+    // A tier is masonry's to grant: either masonry itself or something it had to unlock.
     for (const upgrade of Object.values(buildingUpgrades)) {
-      expect(upgrade.requiredTechnology).toBe('masonry');
+      expect(requires(upgrade.requiredTechnology, 'masonry')).toBe(true);
       expect(upgrade.cost).toHaveProperty('brick');
     }
     // Storage gains room rather than speed, so its tier is the one exception.
     expect(buildingUpgrades.storage.inventoryCapacityMultiplier).toBeGreaterThan(1);
     expect(buildingUpgrades.smelter.workRateMultiplier).toBeLessThan(1);
+  });
+
+  it('opens the civic age behind both first-age chains and splits a recipe, not a building', () => {
+    expect(technologies['civic-charter'].prerequisites).toEqual(['territorial-charter', 'masonry']);
+    expect(technologies['civic-charter']).not.toHaveProperty('exclusiveGroup');
+    /**
+     * The age's permanent choice must not gate the foundry: steel is what a shared project
+     * asks for, so a branch that closed the only way to cast it would close the project too.
+     */
+    for (const id of ['precision-casting', 'bulk-casting'] as const)
+      expect(technologies[id].exclusiveGroup).toBe('casting-path');
+    expect(buildings.foundry.requiredTechnology).toBe('metalcasting');
+    expect(producers.foundry.defaultRecipeId).toBe('cast-steel');
+    expect(recipes.castSteel).toMatchObject({
+      input: { ingot: 2, brick: 1 },
+      output: { steel: 1 },
+    });
+    // Every branch casts steel; they differ in which chain pays for it and how fast.
+    for (const recipe of [recipes.castSteelPrecise, recipes.castSteelBulk]) {
+      expect(Object.keys(recipe.output)).toEqual(['steel']);
+      expect(producers.foundry.recipeIds).toContain(recipe.id);
+    }
+    expect(recipes.castSteelPrecise.input.ingot).toBeLessThan(recipes.castSteel.input.ingot);
+    expect(recipes.castSteelBulk.input.ingot / recipes.castSteelBulk.output.steel).toBeLessThan(
+      recipes.castSteel.input.ingot,
+    );
+    expect(buildings.bastion.defenseDamage).toBeGreaterThan(buildings.watchtower.defenseDamage);
+    expect(buildings.bastion.cost).toHaveProperty('steel');
+    // A guild hall is a second service, so it must be worth something beside a hearth.
+    expect(buildings['guild-hall'].serviceSatisfaction).toBeGreaterThan(0);
+    expect(logisticsLinks.internalInventory.acceptedTargetKinds).toContain('foundry');
+  });
+
+  it('keeps the shared projects rotating so a permanent world never runs out of them', () => {
+    expect([...worldProjectRules.order].sort()).toEqual(Object.keys(cooperativeObjectives).sort());
+    // A lap asks for a different chain's output each time, so it exercises the whole economy.
+    const contributions = worldProjectRules.order.map(
+      (id) => cooperativeObjectives[id].contributionItem,
+    );
+    expect(new Set(contributions).size).toBe(contributions.length);
+    for (const id of worldProjectRules.order) {
+      const objective = cooperativeObjectives[id];
+      // A reward that handed back what the project consumed would fund its own next round.
+      expect(Object.keys(objective.reward)).not.toContain(objective.contributionItem);
+      expect(objective.targetAmount).toBeLessThan(worldProjectRules.maxTargetAmount);
+    }
   });
 
   it('rejects cyclic technology prerequisites', () =>

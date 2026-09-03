@@ -5,7 +5,7 @@ const progress = (overrides: Partial<ResearchProgress> = {}): ResearchProgress =
   unlocked: {},
   activeTechnology: null,
   ticksRemaining: 0,
-  inventory: { ore: 0, wood: 0, stone: 0, ingot: 5, brick: 0, tool: 5 },
+  inventory: { ore: 0, wood: 0, stone: 0, ingot: 5, brick: 0, tool: 5, steel: 0 },
   ...overrides,
 });
 
@@ -16,7 +16,13 @@ describe('research entries', () => {
   it('orders prerequisites above what they unlock and names both', () => {
     const entries = researchEntries(progress());
     expect(entries[0]?.id).toBe('metallurgy');
-    expect(entries.map((candidate) => candidate.depth)).toEqual([0, 1, 1, 1, 1]);
+    // The list is the tree read top-down, so no technology appears above one it needs.
+    const depths = entries.map((candidate) => candidate.depth);
+    expect(depths).toEqual([...depths].sort((left, right) => left - right));
+    expect(entry(entries, 'civic-charter').depth).toBeGreaterThan(entry(entries, 'masonry').depth);
+    expect(entry(entries, 'precision-casting').depth).toBeGreaterThan(
+      entry(entries, 'metalcasting').depth,
+    );
     expect(entry(entries, 'metallurgy').unlocks).toEqual(['workshop', 'watchtower']);
     expect(entry(entries, 'masonry').unlocks).toEqual([
       'quarry',
@@ -40,7 +46,7 @@ describe('research entries', () => {
     const afterMetallurgy = researchEntries(
       progress({
         unlocked: { metallurgy: true },
-        inventory: { ore: 0, wood: 0, stone: 0, ingot: 1, brick: 0, tool: 0 },
+        inventory: { ore: 0, wood: 0, stone: 0, ingot: 1, brick: 0, tool: 0, steel: 0 },
       }),
     );
     expect(entry(afterMetallurgy, 'masonry')).toMatchObject({

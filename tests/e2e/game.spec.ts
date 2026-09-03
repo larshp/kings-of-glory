@@ -278,6 +278,20 @@ test('completes the authoritative gather-build-produce-research-defend loop', as
   ).toHaveCount(0);
 });
 
+test('names the shared project the world is building and what it asks for', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'chromium-desktop', 'HUD wording needs one engine.');
+  await page.goto('/');
+  await expect(page.locator('.status')).toHaveText('Connected');
+  await openHudTab(page, 'coop');
+  // Which project is open follows from world state, so this is the whole rotation path.
+  const project = page.locator('section.global-objective');
+  await expect(project).toContainText('Frontier Beacon');
+  await expect(project).toContainText(/Shared progress: \d+\/\d+ tools/);
+  await expect(project.getByRole('button', { name: 'Contribute 1 tool' })).toBeVisible();
+});
+
 test('automates gathering with a lumber camp beside a timber grove', async ({ page }, testInfo) => {
   test.skip(
     testInfo.project.name !== 'chromium-desktop',

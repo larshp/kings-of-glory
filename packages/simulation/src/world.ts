@@ -13,6 +13,7 @@ import {
 import {
   buildings as buildingDefinitions,
   buildingUpgrades,
+  type BuildingDefinition,
   CONTENT_VERSION,
   cooperativeObjectives as cooperativeObjectiveDefinitions,
   environmentalEvents,
@@ -29,6 +30,7 @@ import {
   terrainRules,
   technologies,
   threats as threatDefinitions,
+  worldProjectRules,
   worldRetention,
   type TechnologyId,
   type CooperativeObjectiveId,
@@ -55,6 +57,7 @@ export interface Inventory {
   ingot: number;
   brick: number;
   tool: number;
+  steel: number;
 }
 export type ItemId = keyof Inventory;
 export interface Plot {
@@ -124,7 +127,10 @@ export interface Building {
     | 'forester'
     | 'quarry'
     | 'brickworks'
-    | 'wall';
+    | 'wall'
+    | 'foundry'
+    | 'bastion'
+    | 'guild-hall';
   ownerId: PlayerId;
   x: number;
   y: number;
@@ -247,15 +253,25 @@ export interface ObjectiveContribution {
   readonly item: ItemId;
   readonly amount: number;
   readonly tick: number;
+  /** The round this contribution belongs to; the live totals only count the current one. */
+  readonly round: number;
 }
 export interface ObjectiveRewardClaim {
   readonly commandId: string;
   readonly playerId: PlayerId;
   readonly reward: Readonly<Partial<Inventory>>;
   readonly tick: number;
+  readonly round: number;
 }
+/**
+ * One shared project. `totalContributed` and both contribution maps describe the round
+ * that is open now — they reset when the next round starts — while the two history lists
+ * are the bounded audit trail across every round the world has run.
+ */
 export interface CooperativeObjectiveState {
   readonly id: CooperativeObjectiveId;
+  /** How many times this project has been the world's open one, starting at one. */
+  round: number;
   totalContributed: number;
   completedTick: number | null;
   contributionsBySettlement: Record<string, number>;
@@ -327,7 +343,7 @@ export interface OnboardingReservation {
   securedTick: number | null;
 }
 export interface WorldState {
-  schemaVersion: 31;
+  schemaVersion: 32;
   contentVersion: typeof CONTENT_VERSION;
   seed: number;
   /** When true, no PvE threats spawn. Peaceful worlds stay threat-free. */
@@ -349,6 +365,12 @@ export interface WorldState {
   /** Traversable infrastructure keyed by tile; the value is its owning player. */
   roads: Record<string, PlayerId>;
   cooperativeObjectives: Record<CooperativeObjectiveId, CooperativeObjectiveState>;
+  /**
+   * Shared projects finished since the world began. One integer decides both which project
+   * is open and how high its target stands, so the rotation cannot drift from the content
+   * table or disagree with a replay.
+   */
+  completedWorldProjects: number;
   playerActivity: Record<string, PlayerActivity>;
   onboardingReservations: Record<string, OnboardingReservation>;
   sharedConstructionProjects: Record<string, SharedConstructionProject>;
@@ -375,6 +397,7 @@ export interface WorldEvent {
     | 'settlementMemberChanged'
     | 'objectiveContributed'
     | 'objectiveCompleted'
+    | 'objectiveOpened'
     | 'objectiveRewardClaimed'
     | 'sharedProjectCreated'
     | 'sharedProjectContributed'
@@ -435,6 +458,22 @@ const TERRITORY_CELL_SIZE = 8;
 /** Bounds all threat route work together, rather than once per threat. */
 export const THREAT_PATH_VISITS_PER_TICK = 128;
 const THREAT_PATH_VISITS_PER_SEARCH = 128;
+/**
+ * The building table widened to its interface. The authored table is `as const`, so an
+ * optional field like `serviceSatisfaction` is absent from the kinds that do not set one
+ * and cannot be read generically; every rule that asks what a kind is worth reads it here.
+ */
+const definitionFor: Readonly<Record<Building['kind'], BuildingDefinition>> = buildingDefinitions;
+
+/**
+ * Every technology, none of them taken. Derived from the content table so adding a
+ * technology cannot leave a player's research map one entry short of the graph.
+ */
+export const lockedResearch = (): ResearchState['unlocked'] =>
+  Object.fromEntries(
+    Object.keys(technologies).map((id) => [id, false]),
+  ) as ResearchState['unlocked'];
+
 export const emptyInventory = (): Inventory => ({
   ore: 0,
   wood: 0,
@@ -442,6 +481,7 @@ export const emptyInventory = (): Inventory => ({
   ingot: 0,
   brick: 0,
   tool: 0,
+  steel: 0,
 });
 export const initialSocialState = (): SocialState => ({
   playerNames: {},
@@ -452,7 +492,15 @@ export const initialSocialState = (): SocialState => ({
   reports: [],
 });
 export const tileKey = (x: number, y: number) => `${x}:${y}`;
-const inventoryItems: readonly ItemId[] = ['ore', 'wood', 'stone', 'ingot', 'brick', 'tool'];
+const inventoryItems: readonly ItemId[] = [
+  'ore',
+  'wood',
+  'stone',
+  'ingot',
+  'brick',
+  'tool',
+  'steel',
+];
 const inventoryTotal = (inventory: Inventory) =>
   inventoryItems.reduce((total, item) => total + inventory[item], 0);
 const hasInvalidInventory = (inventory: Inventory) =>
@@ -838,6 +886,7 @@ export const initialCooperativeObjectives = (): WorldState['cooperativeObjective
       definition.id,
       {
         id: definition.id,
+        round: 1,
         totalContributed: 0,
         completedTick: null,
         contributionsBySettlement: {},
@@ -849,8 +898,37 @@ export const initialCooperativeObjectives = (): WorldState['cooperativeObjective
     ]),
   ) as unknown as WorldState['cooperativeObjectives'];
 
+/**
+ * The one shared project open for contributions. The rotation wraps, so a world that has
+ * finished every project starts the series again with higher targets rather than running
+ * out of shared work.
+ */
+export const activeWorldProjectId = (state: {
+  completedWorldProjects: number;
+}): CooperativeObjectiveId =>
+  worldProjectRules.order[state.completedWorldProjects % worldProjectRules.order.length]!;
+
+/** Laps the world has finished, which is what raises every project's target. */
+const completedWorldProjectLaps = (state: { completedWorldProjects: number }) =>
+  Math.floor(state.completedWorldProjects / worldProjectRules.order.length);
+
+/** What the open round of a project asks for, capped so it stays reachable. */
+export const worldProjectTarget = (
+  state: { completedWorldProjects: number },
+  objectiveId: CooperativeObjectiveId = activeWorldProjectId(state),
+) =>
+  Math.min(
+    cooperativeObjectiveDefinitions[objectiveId].targetAmount +
+      worldProjectRules.targetGrowthPerLap * completedWorldProjectLaps(state),
+    worldProjectRules.maxTargetAmount,
+  );
+
+/** Last tick a completed project still accepts reward claims. */
+export const worldProjectClaimDeadline = (completedTick: number) =>
+  completedTick + worldProjectRules.claimWindowTicks;
+
 export const createWorld = (seed = 1, peaceful = true): WorldState => ({
-  schemaVersion: 31,
+  schemaVersion: 32,
   contentVersion: CONTENT_VERSION,
   seed,
   peaceful,
@@ -867,6 +945,7 @@ export const createWorld = (seed = 1, peaceful = true): WorldState => ({
   carriers: {},
   roads: {},
   cooperativeObjectives: initialCooperativeObjectives(),
+  completedWorldProjects: 0,
   playerActivity: {},
   onboardingReservations: {},
   sharedConstructionProjects: {},
@@ -887,17 +966,7 @@ export const joinPlayer = (state: WorldState, id: string): WorldEvent[] => {
     exploredChunks: plotExploration(plot),
     visibleChunks: plotExploration(plot),
     territoryCells: plotTerritory(plot),
-    research: {
-      activeTechnology: null,
-      ticksRemaining: 0,
-      unlocked: {
-        metallurgy: false,
-        'territorial-charter': false,
-        engineering: false,
-        stewardship: false,
-        masonry: false,
-      },
-    },
+    research: { activeTechnology: null, ticksRemaining: 0, unlocked: lockedResearch() },
     discoveries: {},
     initiative: null,
     lastSequence: 0,
@@ -1262,6 +1331,31 @@ const hasSafeReclaimableStarterSettlement = (state: WorldState, player: PlayerSt
   );
 };
 
+/**
+ * Retires a finished shared project once its claim window has passed and opens the next
+ * one. Only the live totals reset: the history lists keep what every round recorded, so a
+ * repeating project still has one audit trail rather than a fresh one per round.
+ *
+ * Rewards expire with the window on purpose. A claim that stayed open forever would make
+ * every past round a standing obligation the world had to keep track of.
+ */
+const advanceWorldProject = (state: WorldState): WorldEvent[] => {
+  const objective = state.cooperativeObjectives[activeWorldProjectId(state)];
+  if (
+    objective.completedTick === null ||
+    state.tick <= worldProjectClaimDeadline(objective.completedTick)
+  )
+    return [];
+  objective.round += 1;
+  objective.totalContributed = 0;
+  objective.completedTick = null;
+  objective.contributionsBySettlement = {};
+  objective.contributionsByPlayer = {};
+  objective.rewardClaims = {};
+  state.completedWorldProjects += 1;
+  return [{ type: 'objectiveOpened', objectiveId: activeWorldProjectId(state) }];
+};
+
 const updateOnboardingReservations = (state: WorldState): WorldEvent[] => {
   const events: WorldEvent[] = [];
   for (const playerId of Object.keys(state.onboardingReservations).sort((left, right) =>
@@ -1473,14 +1567,16 @@ export const applyCommand = (
     const definition = cooperativeObjectiveDefinitions[command.objectiveId];
     const objective = state.cooperativeObjectives[command.objectiveId];
     if (!definition || !objective) return reject('unknown-objective');
+    // Only one project is open at a time, so the world builds one thing together.
+    if (command.objectiveId !== activeWorldProjectId(state)) return reject('objective-inactive');
     if (objective.completedTick !== null) return reject('objective-complete');
     const settlement = state.settlements[command.settlementId];
     if (!settlement) return reject('unknown-settlement');
     if (!settlement.members[player.id]) return reject('not-settlement-member');
     if (!Number.isSafeInteger(command.amount) || command.amount < 1)
       return reject('invalid-amount');
-    if (objective.totalContributed + command.amount > definition.targetAmount)
-      return reject('invalid-amount');
+    const target = worldProjectTarget(state, objective.id);
+    if (objective.totalContributed + command.amount > target) return reject('invalid-amount');
     const item = definition.contributionItem as ItemId;
     if (player.inventory[item] < command.amount) return reject('insufficient-resources');
     player.inventory[item] -= command.amount;
@@ -1496,11 +1592,14 @@ export const applyCommand = (
       item,
       amount: command.amount,
       tick: state.tick,
+      round: objective.round,
     });
+    while (objective.contributionHistory.length > worldRetention.objectiveHistory)
+      objective.contributionHistory.shift();
     const events: WorldEvent[] = [
       { type: 'objectiveContributed', playerId: player.id, objectiveId: objective.id },
     ];
-    if (objective.totalContributed === definition.targetAmount) {
+    if (objective.totalContributed === target) {
       objective.completedTick = state.tick;
       events.push({ type: 'objectiveCompleted', objectiveId: objective.id });
     }
@@ -1528,7 +1627,10 @@ export const applyCommand = (
       playerId: player.id,
       reward: { ...definition.reward },
       tick: state.tick,
+      round: objective.round,
     });
+    while (objective.rewardHistory.length > worldRetention.objectiveHistory)
+      objective.rewardHistory.shift();
     return accept([
       { type: 'objectiveRewardClaimed', playerId: player.id, objectiveId: objective.id },
     ]);
@@ -2173,7 +2275,7 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
   // Phase 1: advance-clock.
   let endPhase = beginPhase('advance-clock');
   state.tick += 1;
-  events.push(...updateOnboardingReservations(state));
+  events.push(...advanceWorldProject(state), ...updateOnboardingReservations(state));
   endPhase();
   const staffedSmelters = new Set<BuildingId>();
   const staffedConstruction = new Set<BuildingId>();
@@ -2245,11 +2347,19 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
       player.population.total === 0
         ? 40
         : Math.floor((player.population.employed * 40) / player.population.total);
-    const serviceSatisfaction = completedBuildings.some(
-      (building) => building.kind === 'hearth' && building.health === building.maxHealth,
-    )
-      ? buildingDefinitions.hearth.serviceSatisfaction
-      : 0;
+    /**
+     * Services count once per kind, not once per building: a second hearth is shelter for
+     * nobody, while a guild hall beside one is a different service and adds its own worth.
+     */
+    const servicedKinds = new Set(
+      completedBuildings
+        .filter((building) => building.health === building.maxHealth)
+        .map((building) => building.kind),
+    );
+    const serviceSatisfaction = [...servicedKinds].reduce(
+      (total, kind) => total + (definitionFor[kind].serviceSatisfaction ?? 0),
+      0,
+    );
     player.population.satisfaction = Math.min(
       100,
       shelterSatisfaction + workSatisfaction + serviceSatisfaction,
@@ -2725,13 +2835,18 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
   const occupiedBuildingTiles = new Set(
     Object.values(state.buildings).map((building) => tileKey(building.x, building.y)),
   );
-  const watchtowersByOwner = new Map<string, Building[]>();
+  /** Anything whose content definition deals damage defends, at its own strength. */
+  const defencesByOwner = new Map<string, Building[]>();
   for (const building of Object.values(state.buildings)) {
-    if (building.kind !== 'watchtower' || building.constructionTicks > 0 || building.health <= 0)
+    if (
+      !definitionFor[building.kind].defenseDamage ||
+      building.constructionTicks > 0 ||
+      building.health <= 0
+    )
       continue;
-    const towers = watchtowersByOwner.get(building.ownerId) ?? [];
-    towers.push(building);
-    watchtowersByOwner.set(building.ownerId, towers);
+    const defences = defencesByOwner.get(building.ownerId) ?? [];
+    defences.push(building);
+    defencesByOwner.set(building.ownerId, defences);
   }
   let pathVisitsRemaining = THREAT_PATH_VISITS_PER_TICK;
   for (const threat of fairThreatOrder(Object.values(state.threats), state.tick)) {
@@ -2784,19 +2899,22 @@ export const advanceTick = (state: WorldState, profiler?: TickProfiler): WorldEv
       threat.x = next.x;
       threat.y = next.y;
     }
-    const defense =
-      (watchtowersByOwner.get(target.ownerId) ?? []).filter((tower) => {
-        const overlooksMountain = [
-          [tower.x + 1, tower.y],
-          [tower.x - 1, tower.y],
-          [tower.x, tower.y + 1],
-          [tower.x, tower.y - 1],
-        ].some(([x, y]) => terrainAt(state.seed, x!, y!) === 'mountain');
-        const range =
-          raider.watchtowerRange +
-          (overlooksMountain ? terrainRules.watchtower.mountainRangeBonus : 0);
-        return manhattanDistance(tower, threat) <= range;
-      }).length * buildingDefinitions.watchtower.defenseDamage;
+    const defense = (defencesByOwner.get(target.ownerId) ?? []).reduce((damage, defence) => {
+      const overlooksMountain = [
+        [defence.x + 1, defence.y],
+        [defence.x - 1, defence.y],
+        [defence.x, defence.y + 1],
+        [defence.x, defence.y - 1],
+      ].some(([x, y]) => terrainAt(state.seed, x!, y!) === 'mountain');
+      const range =
+        raider.watchtowerRange + (overlooksMountain ? terrainRules.defense.mountainRangeBonus : 0);
+      return (
+        damage +
+        (manhattanDistance(defence, threat) <= range
+          ? (definitionFor[defence.kind].defenseDamage ?? 0)
+          : 0)
+      );
+    }, 0);
     threat.health -= defense;
     if (threat.health <= 0) {
       delete state.threats[threat.id];
@@ -3285,13 +3403,23 @@ export const inspectWorld = (state: WorldState): string[] => {
     )
       errors.push(`carrier ${id} has invalid journey state`);
   }
+  if (!isNonNegativeInteger(state.completedWorldProjects))
+    errors.push('world has an invalid completed shared-project count');
   for (const definition of Object.values(cooperativeObjectiveDefinitions)) {
     const objective = state.cooperativeObjectives[definition.id];
     if (!objective) {
       errors.push(`cooperative objective ${definition.id} is missing`);
       continue;
     }
-    const contributionTotal = objective.contributionHistory.reduce(
+    /**
+     * The live totals describe the open round, while history spans every round the world
+     * has run, so the two are only comparable over the entries the current round wrote —
+     * and only while retention has not yet dropped any of them.
+     */
+    const currentRound = objective.contributionHistory.filter(
+      (contribution) => contribution.round === objective.round,
+    );
+    const contributionTotal = currentRound.reduce(
       (total, contribution) => total + contribution.amount,
       0,
     );
@@ -3303,20 +3431,29 @@ export const inspectWorld = (state: WorldState): string[] => {
       (total, amount) => total + amount,
       0,
     );
+    const target = worldProjectTarget(state, definition.id);
+    // Retention drops the oldest entries, so a full list can no longer prove a round's sum.
+    const wholeContributionHistory =
+      objective.contributionHistory.length < worldRetention.objectiveHistory;
+    const wholeRewardHistory = objective.rewardHistory.length < worldRetention.objectiveHistory;
     if (
       objective.id !== definition.id ||
+      objective.round < 1 ||
+      !Number.isSafeInteger(objective.round) ||
       !isNonNegativeInteger(objective.totalContributed) ||
-      objective.totalContributed > definition.targetAmount ||
-      contributionTotal !== objective.totalContributed ||
+      objective.totalContributed > target ||
+      (wholeContributionHistory && contributionTotal !== objective.totalContributed) ||
       settlementTotal !== objective.totalContributed ||
       playerTotal !== objective.totalContributed
     )
       errors.push(`cooperative objective ${definition.id} has inconsistent contributions`);
     if (
-      (objective.totalContributed === definition.targetAmount) !==
-        (objective.completedTick !== null) ||
+      (objective.totalContributed === target) !== (objective.completedTick !== null) ||
       (objective.completedTick !== null &&
-        (!isNonNegativeInteger(objective.completedTick) || objective.completedTick > state.tick))
+        (!isNonNegativeInteger(objective.completedTick) ||
+          objective.completedTick > state.tick ||
+          // A completed project is retired by the clock, so it cannot outlive its window.
+          state.tick > worldProjectClaimDeadline(objective.completedTick)))
     )
       errors.push(`cooperative objective ${definition.id} has an invalid completion tick`);
     const contributionCommands = new Set<string>();
@@ -3331,7 +3468,9 @@ export const inspectWorld = (state: WorldState): string[] => {
         !Number.isSafeInteger(contribution.amount) ||
         contribution.amount < 1 ||
         !isNonNegativeInteger(contribution.tick) ||
-        contribution.tick > state.tick
+        contribution.tick > state.tick ||
+        contribution.round < 1 ||
+        contribution.round > objective.round
       )
         errors.push(`cooperative objective ${definition.id} has invalid contribution history`);
     }
@@ -3342,15 +3481,22 @@ export const inspectWorld = (state: WorldState): string[] => {
       rewardCommands.add(reward.commandId);
       if (
         !hasKnownPlayer(reward.playerId) ||
-        objective.rewardClaims[reward.playerId] !== reward.commandId ||
-        !objective.contributionsByPlayer[reward.playerId] ||
         JSON.stringify(reward.reward) !== JSON.stringify(definition.reward) ||
         !isNonNegativeInteger(reward.tick) ||
-        reward.tick > state.tick
+        reward.tick > state.tick ||
+        reward.round < 1 ||
+        reward.round > objective.round ||
+        // Only the open round's claims are still on the objective; older ones are history.
+        (reward.round === objective.round &&
+          (objective.rewardClaims[reward.playerId] !== reward.commandId ||
+            !objective.contributionsByPlayer[reward.playerId]))
       )
         errors.push(`cooperative objective ${definition.id} has invalid reward history`);
     }
-    if (Object.keys(objective.rewardClaims).length !== objective.rewardHistory.length)
+    const claimsThisRound = objective.rewardHistory.filter(
+      (reward) => reward.round === objective.round,
+    ).length;
+    if (wholeRewardHistory && Object.keys(objective.rewardClaims).length !== claimsThisRound)
       errors.push(`cooperative objective ${definition.id} has inconsistent reward claims`);
   }
   const foldedPlayerNames = new Set<string>();

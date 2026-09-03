@@ -1,3 +1,4 @@
+import { cooperativeObjectives, settlementInitiatives, technologies } from '@kings/content';
 import { PLACEMENT_KINDS } from '@kings/simulation';
 import type { Command, CommandResult, ItemKind, WorldState } from '@kings/simulation';
 
@@ -61,7 +62,7 @@ export interface ClientWorldState extends Omit<
 export type ClientWorldDelta = Partial<ClientWorldState>;
 
 /** Bump whenever a client can no longer safely interpret server state messages. */
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 export const MAX_MESSAGE_BYTES = 64 * 1024;
 export const MAX_INTEREST_CHUNKS = 64;
 
@@ -170,28 +171,26 @@ const isCommand = (value: unknown): value is Command => {
       (value.choice === 'salvage' || value.choice === 'develop')
     );
   if (value.type === 'startSettlementInitiative')
-    return value.initiativeId === 'freight-charter' || value.initiativeId === 'builders-festival';
+    return typeof value.initiativeId === 'string' && value.initiativeId in settlementInitiatives;
   if (value.type === 'moveScout')
     return (
       isIdentifier(value.scoutId) && Number.isSafeInteger(value.x) && Number.isSafeInteger(value.y)
     );
+  // Checked against the content tables so new technologies and projects are not rejected
+  // at the boundary by a list that has to be edited alongside them.
   if (value.type === 'research')
-    return (
-      value.technologyId === 'metallurgy' ||
-      value.technologyId === 'territorial-charter' ||
-      value.technologyId === 'engineering' ||
-      value.technologyId === 'stewardship' ||
-      value.technologyId === 'masonry'
-    );
+    return typeof value.technologyId === 'string' && value.technologyId in technologies;
   if (value.type === 'contributeToObjective')
     return (
-      value.objectiveId === 'frontier-beacon' &&
+      typeof value.objectiveId === 'string' &&
+      value.objectiveId in cooperativeObjectives &&
       isIdentifier(value.settlementId) &&
       typeof value.amount === 'number' &&
       Number.isSafeInteger(value.amount) &&
       value.amount > 0
     );
-  if (value.type === 'claimObjectiveReward') return value.objectiveId === 'frontier-beacon';
+  if (value.type === 'claimObjectiveReward')
+    return typeof value.objectiveId === 'string' && value.objectiveId in cooperativeObjectives;
   if (value.type === 'setPlayerName') return isBoundedText(value.name, 64);
   if (value.type === 'setSettlementName')
     return isIdentifier(value.settlementId) && isBoundedText(value.name, 64);

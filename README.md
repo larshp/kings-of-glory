@@ -111,12 +111,19 @@ Or start both with `npm run dev`; the npm wrapper uses the Windows command shim 
 
 The server listens on `http://127.0.0.1:3001/health` and WebSocket clients connect on port 3001. Vite serves the client at `http://127.0.0.1:5173`. By default the client connects to the same hostname as the page, so local `127.0.0.1` and LAN development addresses work; set `VITE_SERVER_URL` to override it. Development can fall back to a stable per-tab identity. Production obtains an anonymous account through `POST /session`; the server issues a signed, 30-day, HTTP-only, `SameSite=Strict`, `Secure` cookie and derives WebSocket identity from that cookie instead of trusting the client-supplied player ID.
 
-The current JSON WebSocket protocol is version 7. A client sends `hello`, then receives a `welcome` handshake acknowledgement and a filtered `worldBootstrap`. Newly relevant viewport chunks receive a replacement `chunkSnapshot`; ordinary changes use ordered `stateDelta` messages. Commands receive either `commandAcknowledged` or `commandRejected`, while `ping`/`pong`, `resync`, `maintenance`, and `error` cover connection health and recovery.
+The current JSON WebSocket protocol is version 8. A client sends `hello`, then receives a `welcome` handshake acknowledgement and a filtered `worldBootstrap`. Newly relevant viewport chunks receive a replacement `chunkSnapshot`; ordinary changes use ordered `stateDelta` messages. Commands receive either `commandAcknowledged` or `commandRejected`, while `ping`/`pong`, `resync`, `maintenance`, and `error` cover connection health and recovery.
 
-Players can contribute tools from separate settlements to the global Frontier Beacon objective. The
-server records every contribution, completes the objective at its exact target, and permits one
-idempotent fixed reward claim per contributor. Global progress is public, while contributor maps and
-history are filtered to the requesting player.
+Separate settlements contribute to one shared world project at a time, and the world never runs out
+of them: the Frontier Beacon asks for tools, the Great Causeway for brick, and the Grand Foundry for
+steel, each rewarding the currency of the age below it. The server records every contribution,
+completes a project at its exact target, and permits one idempotent fixed reward claim per
+contributor. A completed project stays open for a bounded claim window and is then retired by the
+clock — its live totals reset, its bounded audit trail survives, and the next project opens. The
+order wraps, and each completed lap raises every target by a fixed amount up to a ceiling, so a
+permanent world keeps shared work at a reachable height. Unclaimed rewards expire with the window.
+Which project is open follows from one counter of completed projects, so it cannot disagree with a
+replay. Global progress is public, while contributor maps and history are filtered to the requesting
+player.
 
 Settlement owners and builders can also start a shared storage project on selected valid land. Members fund its authoritative material ledger one item at a time; exact contribution history remains settlement-private, and full funding creates one settlement-owned construction site. The cooperation panel includes a bounded public directory for discovering player and settlement identifiers without publishing positions, inventories, territory, roles, or hidden-world state.
 
@@ -148,9 +155,12 @@ credential, and start the world host with a separate runtime credential. Product
 Every snapshot records the content version it was written for, and `deserializeWorld` refuses one that
 does not match its schema's row in `SNAPSHOT_CONTENT_VERSIONS` rather than reinterpreting it under
 different rules. Additive content is migrated: content version 5 added the masonry chain, building
-tiers, and walking carriers, while content version 6 adds queued gathering, landmark choices,
-settlement initiatives, branch recipes, and logistics stock targets. Schema 31 lifts older worlds
-forward without moving a single tile.
+tiers, and walking carriers, content version 6 added queued gathering, landmark choices, settlement
+initiatives, branch recipes, and logistics stock targets, and content version 7 adds the civic age —
+steel, the foundry, the bastion, the guild hall, and its casting branches — along with rotating world
+projects. Schema 32 lifts older worlds forward without moving a single tile: it adds the steel stack
+to every inventory, gives each project its round, and retires a project an older world had already
+finished so the rotation opens the next one.
 A content change that moves deterministic world generation cannot be, and mountains have done that
 twice — version 2 added mountains, and version 3 moved them onto Perlin ridge noise with taller peaks.
 The correct response to another such change is to drop the rows for every earlier schema, so those
@@ -188,7 +198,7 @@ See [the current first-slice baseline](docs/performance-baseline.md) for a repro
 
 ## Current vertical slice
 
-This increment provides a strict TypeScript workspace, a platform-independent deterministic simulation, a versioned JSON WebSocket handshake, a single authoritative world host, durable checkpoint/journal foundations, and a React/Canvas 2D isometric map. Players gather finite ore deposits and timber groves through immediate actions or bounded settler work orders, quarry stone from the mountain ranges, construct a settlement, turn ore into ingots, ingots plus wood into tools, and stone plus wood into brick, and build recipe-validated links whose carriers walk their deliveries between buildings. Brick pays for walls, permanent building tiers, and timed settlement initiatives. Landmark choices and the Engineering/Stewardship split create persistent economic specializations. The HUD explains production, stock targets, route deliveries, missing inputs, population needs, research, and active initiatives. Tests cover deterministic replay, command rejection, resource conservation including queued and in-flight items, content validation, protocol shape validation, snapshot migration, and checkpoint recovery.
+This increment provides a strict TypeScript workspace, a platform-independent deterministic simulation, a versioned JSON WebSocket handshake, a single authoritative world host, durable checkpoint/journal foundations, and a React/Canvas 2D isometric map. Players gather finite ore deposits and timber groves through immediate actions or bounded settler work orders, quarry stone from the mountain ranges, construct a settlement, turn ore into ingots, ingots plus wood into tools, and stone plus wood into brick, and build recipe-validated links whose carriers walk their deliveries between buildings. Brick pays for walls, permanent building tiers, and timed settlement initiatives, and a Civic Charter opens a second age where a foundry casts steel for bastions, guild halls, and the world's rotating shared projects. Landmark choices and the Engineering/Stewardship and casting splits create persistent economic specializations. The HUD explains production, stock targets, route deliveries, missing inputs, population needs, research, and active initiatives. Tests cover deterministic replay, command rejection, resource conservation including queued and in-flight items, content validation, protocol shape validation, snapshot migration, and checkpoint recovery.
 
 ### Automated extraction
 
@@ -229,11 +239,27 @@ into a brick, and brick is what durability costs: a wall has well over twice a w
 blocks raider routes the same way every building does.
 
 Brick and tools also buy a permanent second tier for a smelter, workshop, brickworks, mine, lumber camp,
-quarry, or storage. An upgrade re-enters the ordinary construction pipeline — the building stops working,
+quarry, foundry, or storage. An upgrade re-enters the ordinary construction pipeline — the building stops working,
 a builder delivers its materials over several worker ticks, and it comes back faster, roomier, tougher,
 and at full health — so a tier is paid for in downtime as well as materials. Upgrades wait for a running
 batch rather than discarding consumed inputs, are charged to the building owner's stock, and refund in
 full if cancelled, which leaves the tier-one building working instead of removing it.
+
+### The civic age
+
+A Civic Charter opens a second age, and it needs both first-age chains behind it: the Territorial
+Charter and Masonry. A foundry casts steel from ingots and brick together, so the age cannot be entered
+on one chain alone — a settlement finishes both or trades for what it lacks, which is the point of the
+Engineering/Stewardship split. Steel pays for a bastion, which answers a raid where a watchtower
+answers one raider, for the foundry's own tier, and for the world's steel project. A guild hall is a
+second service rather than a larger hearth: satisfaction counts one service of each kind, so it is
+worth building beside a hearth and worth nothing twice over. Every defence building now contributes its
+own strength rather than the watchtower's rate.
+
+Metalcasting then offers the age's permanent choice, and like the first one it splits a recipe rather
+than gating a building. Precision Casting spends brick where the base recipe spends ingots and is
+quicker; Bulk Casting is the cheapest steel per unit and the slowest to arrive. Neither closes the
+foundry, because steel is what a shared world project asks for.
 
 ### Carriers that walk
 

@@ -10,7 +10,7 @@ import {
 
 const rules = (overrides: Partial<PlacementRules> = {}): PlacementRules => ({
   unlocked: () => true,
-  inventory: { ore: 10, wood: 10, stone: 10, ingot: 10, brick: 10, tool: 10 },
+  inventory: { ore: 10, wood: 10, stone: 10, ingot: 10, brick: 10, tool: 10, steel: 10 },
   isOpenSite: () => true,
   terrainAt: () => 'grass' as TerrainTile,
   minedAmount: () => 0,
@@ -22,7 +22,7 @@ describe('build menu', () => {
     const entries = buildMenuEntries(
       rules({
         unlocked: (technology) => technology !== 'metallurgy',
-        inventory: { ore: 0, wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 },
+        inventory: { ore: 0, wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0, steel: 0 },
       }),
     );
     const workshop = entries.find((entry) => entry.kind === 'workshop');
@@ -53,7 +53,7 @@ describe('build menu', () => {
       placementStatus(
         'smelter',
         { x: 1, y: 1 },
-        rules({ inventory: { ore: 0, wood: 1, stone: 0, ingot: 0, brick: 0, tool: 0 } }),
+        rules({ inventory: { ore: 0, wood: 1, stone: 0, ingot: 0, brick: 0, tool: 0, steel: 0 } }),
       ).reason,
     ).toBe('Needs 2 more wood.');
     expect(placementStatus('smelter', undefined, rules()).reason).toBe(

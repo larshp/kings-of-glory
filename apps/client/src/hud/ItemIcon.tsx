@@ -13,6 +13,7 @@ const glyphs: Readonly<Record<ItemKind, { readonly fill: string; readonly path: 
   ingot: { fill: '#f0c060', path: 'M4 6h8l2 5H2z' },
   brick: { fill: '#c9714f', path: 'M2 4h12v4H2zM2 9h5v4H2zM8 9h6v4H8z' },
   tool: { fill: '#d7e6f3', path: 'M3 13l6-6 2 2-6 6zM9 3h5v3h-5z' },
+  steel: { fill: '#8fa3b8', path: 'M2 3h12v2H2zM7 5h2v6H7zM2 11h12v2H2z' },
 };
 
 export const ItemIcon = ({ item }: { readonly item: ItemKind }) => {

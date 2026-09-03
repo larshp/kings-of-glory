@@ -18,7 +18,15 @@ import {
   type DirectoryEntry,
   type WorldMapChunkSummary,
 } from '@kings/protocol';
-import { type Building, type ItemKind, type SettlementRole } from '@kings/simulation';
+import {
+  activeWorldProjectId,
+  emptyInventory,
+  worldProjectClaimDeadline,
+  worldProjectTarget,
+  type Building,
+  type ItemKind,
+  type SettlementRole,
+} from '@kings/simulation';
 import { CoopPanel } from './hud/CoopPanel.js';
 import { SettingsPanel } from './hud/SettingsPanel.js';
 import { fallbackPlayerId, playerIdPromise } from './connection-status.js';
@@ -526,8 +534,32 @@ export const App = () => {
     : [];
   const transfers = state?.transfers ?? [];
   const personalSettlement = state?.settlements[`settlement-${playerId}`];
-  const frontierBeacon = state?.cooperativeObjectives['frontier-beacon'];
-  const frontierBeaconDefinition = cooperativeObjectiveDefinitions['frontier-beacon'];
+  /**
+   * The one shared project open right now. Which project that is, and how high its bar
+   * stands, both follow from the world's completed count, so the panel never has to be
+   * told separately and cannot show a project the server would refuse.
+   */
+  const worldProject = state
+    ? (() => {
+        const id = activeWorldProjectId(state);
+        const objective = state.cooperativeObjectives[id];
+        const next = activeWorldProjectId({
+          completedWorldProjects: state.completedWorldProjects + 1,
+        });
+        return {
+          id,
+          definition: cooperativeObjectiveDefinitions[id],
+          state: objective,
+          target: worldProjectTarget(state, id),
+          round: objective.round,
+          claimDeadline:
+            objective.completedTick === null
+              ? undefined
+              : worldProjectClaimDeadline(objective.completedTick),
+          nextDisplayName: cooperativeObjectiveDefinitions[next].displayName,
+        };
+      })()
+    : undefined;
   const sharedProjects = Object.values(state?.sharedConstructionProjects ?? {});
   const chatMessages = state?.social.messages ?? [];
   const blockedPlayerIds = Object.keys(state?.social.blockedPlayers[playerId] ?? {});
@@ -558,7 +590,7 @@ export const App = () => {
    */
   const placementRules: PlacementRules = {
     unlocked: (technology) => Boolean(player?.research.unlocked[technology]),
-    inventory: player?.inventory ?? { ore: 0, wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 },
+    inventory: player?.inventory ?? emptyInventory(),
     isOpenSite: (tile) => Boolean(buildablePlacement(tile)),
     terrainAt: (tile) => terrainAt(tile.x, tile.y),
     minedAmount: (tile) => state?.minedTiles[`${tile.x}:${tile.y}`] ?? 0,
@@ -1033,8 +1065,7 @@ export const App = () => {
             ownedSettlements={ownedSettlements}
             personalSettlement={personalSettlement}
             sharedProjects={sharedProjects}
-            frontierBeacon={frontierBeacon}
-            frontierBeaconDefinition={frontierBeaconDefinition}
+            worldProject={worldProject}
             transfers={transfers}
             chatMessages={chatMessages}
             chatText={chatText}

@@ -13,6 +13,7 @@ const stock = (ore: number, wood = 0): InventorySample['inventory'] => ({
   ingot: 0,
   brick: 0,
   tool: 0,
+  steel: 0,
 });
 
 describe('inventory trend', () => {

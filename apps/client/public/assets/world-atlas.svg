@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 320 320">
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="768" viewBox="0 0 320 384">
   <!--
     Authored in 64x64 design cells and rasterised at 2x so the renderer can draw one
     design pixel per logical pixel without blurring on high-density displays.
@@ -244,6 +244,43 @@
       <path fill="#616875" d="M17 50 20 46 23 50Z" />
       <path fill="#616875" d="M41 51 45 47 48 51Z" />
       <path fill="#7c8290" stroke="none" d="M28 47 33 46 34 48.5 29 49.5Z" />
+    </g>
+
+    <g transform="translate(0 320)">
+      <!-- foundry: brick furnace under an iron band, with a molten pour and a tall stack -->
+      <path fill="#9c6b52" d="M8 48 32 60 32 46 8 34Z" />
+      <path fill="#764c39" d="M32 60 56 48 56 34 32 46Z" />
+      <path fill="#b07b5c" d="M8 34 32 22 56 34 32 46Z" />
+      <path fill="#8b8b96" stroke="none" d="M8 40 32 52 32 48 8 36Z" />
+      <path fill="#64646f" stroke="none" d="M32 52 56 40 56 36 32 48Z" />
+      <path fill="#96969f" d="M34 24 42 28 42 10 34 6Z" />
+      <path fill="#64646f" d="M42 28 50 24 50 6 42 10Z" />
+      <path fill="#a6a6b2" d="M34 6 42 2 50 6 42 10Z" />
+      <path fill="#f0932c" d="M14 46 24 51 24 42 14 37Z" />
+      <path fill="#ffe08a" stroke="none" d="M17 45 21 47 21 42.5 17 40.5Z" />
+    </g>
+    <g transform="translate(64 320)">
+      <!-- bastion: crenellated rampart on a brick footing, capped in steel -->
+      <path fill="#8d5f4a" d="M6 50 32 62 32 54 6 42Z" />
+      <path fill="#6d4736" d="M32 62 58 50 58 42 32 54Z" />
+      <path fill="#a3aab2" d="M12 50 32 60 32 26 12 16Z" />
+      <path fill="#7b838d" d="M32 60 52 50 52 16 32 26Z" />
+      <path fill="#b9c0c7" d="M12 16 32 6 52 16 32 26Z" />
+      <path fill="#8b939b" stroke="none" d="M12 34 32 44 52 34 32 24Z" />
+      <path fill="#c7ced4" d="M14 15 18 17 18 8 14 6Z" />
+      <path fill="#97a0a8" d="M46 17 50 15 50 6 46 8Z" />
+      <path fill="#262c36" d="M28 50V41c0-4 8-4 8 0v9Z" />
+      <path fill="#cfd8e0" stroke="none" d="M30.6 3 33.4 3 33.4 9 30.6 9Z" />
+    </g>
+    <g transform="translate(128 320)">
+      <!-- guild hall: long hall under a tiled roof, with the guild banner at its door -->
+      <path fill="#d7c6a4" d="M8 48 32 60 32 44 8 32Z" />
+      <path fill="#a4906f" d="M32 60 56 48 56 32 32 44Z" />
+      <path fill="#4f8a80" d="M5 33 32 45 32 10Z" />
+      <path fill="#376860" d="M32 45 59 33 32 10Z" />
+      <path fill="#6d4b32" d="M14 50 22 54 22 45 14 41Z" />
+      <path fill="#e2e7eb" stroke="none" d="M43.4 20 44.9 20 44.9 42 43.4 42Z" />
+      <path fill="#e0b64a" d="M45 22 53 25 45 29Z" />
     </g>
   </g>
 </svg>

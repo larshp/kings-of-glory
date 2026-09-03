@@ -17,10 +17,13 @@ export type SharedProjectBuildingKind =
   | 'forester'
   | 'quarry'
   | 'brickworks'
-  | 'wall';
+  | 'wall'
+  | 'foundry'
+  | 'bastion'
+  | 'guild-hall';
 
 /** Every item a command can name. Inventories, links, and transfers all speak this set. */
-export type ItemKind = 'ore' | 'wood' | 'stone' | 'ingot' | 'brick' | 'tool';
+export type ItemKind = 'ore' | 'wood' | 'stone' | 'ingot' | 'brick' | 'tool' | 'steel';
 
 /** Maps every placement command onto the building kind it creates. */
 export const PLACEMENT_KINDS = {
@@ -36,6 +39,9 @@ export const PLACEMENT_KINDS = {
   placeQuarry: 'quarry',
   placeBrickworks: 'brickworks',
   placeWall: 'wall',
+  placeFoundry: 'foundry',
+  placeBastion: 'bastion',
+  placeGuildHall: 'guild-hall',
 } as const satisfies Readonly<Record<string, SharedProjectBuildingKind>>;
 export type PlacementCommandType = keyof typeof PLACEMENT_KINDS;
 
@@ -454,6 +460,7 @@ export type RejectionCode =
   | 'logistics-link-exists'
   | 'unknown-logistics-link'
   | 'unknown-objective'
+  | 'objective-inactive'
   | 'objective-complete'
   | 'objective-incomplete'
   | 'objective-contribution-required'

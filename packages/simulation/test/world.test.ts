@@ -3,15 +3,18 @@ import {
   buildings as buildingDefinitions,
   buildingUpgrades,
   CONTENT_VERSION,
+  cooperativeObjectives,
   extractors,
   recipes,
   renewers,
   resources,
   terrainRules,
+  worldProjectRules,
   worldRetention,
 } from '@kings/content';
 import { findPath } from '@kings/pathfinding';
 import {
+  activeWorldProjectId,
   applyCommand,
   advanceTick,
   chunkCoordinate,
@@ -44,6 +47,7 @@ import {
   tick,
   tileCoordinate,
   worldId,
+  worldProjectTarget,
 } from '../src/index.js';
 
 /**
@@ -65,6 +69,7 @@ const emptyInventoryFixture = () => ({
   ingot: 0,
   brick: 0,
   tool: 0,
+  steel: 0,
 });
 
 const oreTileFor = (world: ReturnType<typeof createWorld>, playerId = 'player-a') => {
@@ -567,14 +572,7 @@ describe('world simulation', () => {
     ).toBe(true);
     const smelter = Object.values(world.buildings).find((building) => building.kind === 'smelter')!;
     expect(world.players['player-a']?.inventory.wood).toBe(2);
-    expect(smelter.constructionMaterials).toEqual({
-      ore: 0,
-      wood: 3,
-      stone: 0,
-      ingot: 0,
-      brick: 0,
-      tool: 0,
-    });
+    expect(smelter.constructionMaterials).toEqual({ ...emptyInventoryFixture(), wood: 3 });
     world.players['player-a']!.population.total = 0;
     advanceTick(world);
     expect(smelter).toMatchObject({ constructionTicks: 10, constructionMaterials: { wood: 3 } });
@@ -784,7 +782,7 @@ describe('world simulation', () => {
     for (const player of Object.values(legacy.players)) delete player.inventory.tool;
     for (const building of Object.values(legacy.buildings)) delete building.inventory.tool;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.players['player-a']?.inventory.tool).toBe(0);
     expect(migrated.buildings['center-player-a']?.inventory.tool).toBe(0);
   });
@@ -794,7 +792,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 14;
     delete legacy.randomState;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.randomState).toBeGreaterThan(0);
     expect(inspectWorld(migrated)).toEqual([]);
   });
@@ -845,7 +843,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 16;
     for (const building of Object.values(legacy.buildings)) delete building.recipeId;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.buildings['center-player-a']?.recipeId).toBeNull();
     expect(
       Object.values(migrated.buildings).find((building) => building.kind === 'workshop')?.recipeId,
@@ -883,7 +881,7 @@ describe('world simulation', () => {
       priority: 1,
     };
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.buildings['center-player-a']?.productionState).toBe('idle');
     expect(migrated.logisticsLinks.legacy).toMatchObject({
       capacityPerTrip: 4,
@@ -901,7 +899,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 18;
     for (const building of Object.values(legacy.buildings)) delete building.constructionMaterials;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.buildings['center-player-a']?.constructionMaterials).toEqual(
       emptyInventoryFixture(),
     );
@@ -918,7 +916,7 @@ describe('world simulation', () => {
     legacy.minedTiles = { '12:0': 3 };
     const node = nearestOreTile(legacy.seed, 12, 0, 16)!;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.minedTiles[`${node.x}:${node.y}`]).toBe(3);
   });
 
@@ -928,7 +926,7 @@ describe('world simulation', () => {
     void _objectives;
     void _activity;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 20 });
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.cooperativeObjectives['frontier-beacon']).toMatchObject({
       totalContributed: 0,
       completedTick: null,
@@ -946,7 +944,7 @@ describe('world simulation', () => {
     void _activity;
     void _projects;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 21 });
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.playerActivity['player-a']).toEqual({
       lastActiveTick: 41,
       raidEligibleTick: 341,
@@ -960,7 +958,7 @@ describe('world simulation', () => {
     const { sharedConstructionProjects: _projects, ...legacy } = current;
     void _projects;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 22 });
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.sharedConstructionProjects).toEqual({});
     expect(migrated.playerActivity).toEqual(current.playerActivity);
     expect(inspectWorld(migrated)).toEqual([]);
@@ -973,7 +971,7 @@ describe('world simulation', () => {
     const { social: _social, ...legacy } = current;
     void _social;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 23 });
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.social).toMatchObject({
       playerNames: { 'player-a': 'Settler 1', 'player-b': 'Settler 2' },
       settlementNames: {
@@ -998,7 +996,7 @@ describe('world simulation', () => {
     void _deletedPlayers;
     void _onboardingReservations;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 24 });
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.deletedPlayers).toEqual({});
     expect(inspectWorld(migrated)).toEqual([]);
   });
@@ -1009,7 +1007,7 @@ describe('world simulation', () => {
     const { onboardingReservations: _onboardingReservations, ...legacy } = current;
     void _onboardingReservations;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 25 });
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.onboardingReservations['player-a']).toEqual({
       createdTick: 0,
       expiresTick: 36_000,
@@ -1023,7 +1021,7 @@ describe('world simulation', () => {
     const { contentVersion: _contentVersion, ...legacy } = current;
     void _contentVersion;
     const migrated = deserializeWorld({ ...legacy, schemaVersion: 26 });
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.contentVersion).toBe(CONTENT_VERSION);
   });
 
@@ -1062,7 +1060,7 @@ describe('world simulation', () => {
       players: legacyPlayers,
     });
     expect(migrated).toMatchObject({
-      schemaVersion: 31,
+      schemaVersion: 32,
       contentVersion: CONTENT_VERSION,
       roads: {},
     });
@@ -1171,7 +1169,7 @@ describe('world simulation', () => {
       },
     };
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.contentVersion).toBe(CONTENT_VERSION);
     expect(migrated.carriers).toEqual({});
     expect(migrated.players['player-a']).toMatchObject({
@@ -1201,7 +1199,7 @@ describe('world simulation', () => {
       ),
     };
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.processedCommands).toHaveLength(worldRetention.processedCommands);
     expect(migrated.processedCommands.at(0)).toBe('command-25');
     expect(migrated.processedCommands.at(-1)).toBe(
@@ -1480,8 +1478,113 @@ describe('world simulation', () => {
       ),
     };
     const migrated = deserializeWorld(legacy);
-    expect(migrated).toMatchObject({ schemaVersion: 31, contentVersion: CONTENT_VERSION });
+    expect(migrated).toMatchObject({ schemaVersion: 32, contentVersion: CONTENT_VERSION });
     expect(migrated.players['player-a']?.initiative).toBeNull();
+    expect(inspectWorld(migrated)).toEqual([]);
+  });
+
+  /** A version 31 world: no steel stacks, no rounds, and one shared project that ends. */
+  const version31World = (completedBeaconTick: number | null) => {
+    const current = createWorld(54);
+    joinPlayer(current, 'player-a');
+    const withoutSteel = ({ steel: _steel, ...retained }: typeof current.players.a.inventory) => {
+      void _steel;
+      return retained;
+    };
+    const { completedWorldProjects: _rotation, ...world } = current;
+    void _rotation;
+    return {
+      ...world,
+      schemaVersion: 31,
+      contentVersion: 6,
+      players: Object.fromEntries(
+        Object.entries(current.players).map(([id, player]) => [
+          id,
+          {
+            ...player,
+            inventory: withoutSteel(player.inventory),
+            research: {
+              ...player.research,
+              unlocked: { metallurgy: true, 'territorial-charter': false },
+            },
+          },
+        ]),
+      ),
+      buildings: Object.fromEntries(
+        Object.entries(current.buildings).map(([id, building]) => [
+          id,
+          {
+            ...building,
+            inventory: withoutSteel(building.inventory),
+            constructionMaterials: withoutSteel(building.constructionMaterials),
+          },
+        ]),
+      ),
+      cooperativeObjectives: {
+        'frontier-beacon': {
+          id: 'frontier-beacon',
+          totalContributed: completedBeaconTick === null ? 4 : 20,
+          completedTick: completedBeaconTick,
+          contributionsBySettlement: {
+            'settlement-player-a': completedBeaconTick === null ? 4 : 20,
+          },
+          contributionsByPlayer: { 'player-a': completedBeaconTick === null ? 4 : 20 },
+          rewardClaims: {},
+          contributionHistory: [
+            {
+              commandId: 'legacy-contribution',
+              playerId: 'player-a',
+              settlementId: 'settlement-player-a',
+              item: 'tool',
+              amount: completedBeaconTick === null ? 4 : 20,
+              tick: 0,
+            },
+          ],
+          rewardHistory: [],
+        },
+      },
+    };
+  };
+
+  it('migrates version 31 worlds onto steel stacks and a repeating shared project', () => {
+    const migrated = deserializeWorld(version31World(null));
+    expect(migrated).toMatchObject({ schemaVersion: 32, contentVersion: CONTENT_VERSION });
+    expect(migrated.players['player-a']?.inventory.steel).toBe(0);
+    expect(migrated.buildings['center-player-a']?.inventory.steel).toBe(0);
+    // A technology added with the age arrives locked; one already taken stays taken.
+    expect(migrated.players['player-a']?.research.unlocked).toMatchObject({
+      metallurgy: true,
+      'civic-charter': false,
+      metalcasting: false,
+    });
+    expect(migrated.completedWorldProjects).toBe(0);
+    expect(activeWorldProjectId(migrated)).toBe('frontier-beacon');
+    expect(migrated.cooperativeObjectives['frontier-beacon']).toMatchObject({
+      round: 1,
+      totalContributed: 4,
+    });
+    // Projects the rotation adds start empty rather than needing a contribution ledger.
+    expect(migrated.cooperativeObjectives['grand-foundry']).toMatchObject({
+      round: 1,
+      totalContributed: 0,
+      completedTick: null,
+    });
+    expect(migrated.cooperativeObjectives['frontier-beacon'].contributionHistory[0]?.round).toBe(1);
+    expect(inspectWorld(migrated)).toEqual([]);
+  });
+
+  it('retires a shared project a version 31 world had already finished', () => {
+    const migrated = deserializeWorld(version31World(0));
+    // Its claim window closed long ago, so holding the rotation there would strand the world.
+    expect(migrated.completedWorldProjects).toBe(1);
+    expect(activeWorldProjectId(migrated)).toBe('great-causeway');
+    expect(migrated.cooperativeObjectives['frontier-beacon']).toMatchObject({
+      round: 2,
+      totalContributed: 0,
+      completedTick: null,
+      contributionsByPlayer: {},
+    });
+    expect(migrated.cooperativeObjectives['frontier-beacon'].contributionHistory).toHaveLength(1);
     expect(inspectWorld(migrated)).toEqual([]);
   });
 
@@ -1871,7 +1974,7 @@ describe('world simulation', () => {
       kind: 'storage',
       x: blockedTile.x,
       y: blockedTile.y,
-      inventory: { ore: 0, wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 },
+      inventory: emptyInventoryFixture(),
       inventoryCapacity: 200,
       populationCapacity: 0,
       jobPriority: 0,
@@ -2188,30 +2291,9 @@ describe('world simulation', () => {
       joinPlayer(world, 'player-a');
       joinPlayer(world, 'player-b');
       joinPlayer(world, 'player-c');
-      world.players['player-a']!.inventory = {
-        ore: 0,
-        wood: 0,
-        stone: 0,
-        ingot: 5,
-        brick: 0,
-        tool: 0,
-      };
-      world.players['player-b']!.inventory = {
-        ore: 0,
-        wood: 0,
-        stone: 0,
-        ingot: 95,
-        brick: 0,
-        tool: 0,
-      };
-      world.players['player-c']!.inventory = {
-        ore: 0,
-        wood: 0,
-        stone: 0,
-        ingot: 5,
-        brick: 0,
-        tool: 0,
-      };
+      world.players['player-a']!.inventory = { ...emptyInventoryFixture(), ingot: 5 };
+      world.players['player-b']!.inventory = { ...emptyInventoryFixture(), ingot: 95 };
+      world.players['player-c']!.inventory = { ...emptyInventoryFixture(), ingot: 5 };
       const transfer = (sender: 'player-a' | 'player-c') =>
         applyCommand(world, {
           id: `capacity-${sender}`,
@@ -2411,10 +2493,130 @@ describe('world simulation', () => {
     ).toMatchObject({ accepted: false, code: 'reward-already-claimed' });
     expect(world.players['player-a']!.inventory.ingot).toBe(2);
     expect(objective.rewardHistory).toEqual([
-      { commandId: 'claim-a', playerId: 'player-a', reward: { ingot: 2 }, tick: 0 },
+      { commandId: 'claim-a', playerId: 'player-a', reward: { ingot: 2 }, tick: 0, round: 1 },
     ]);
     expect(inspectWorld(world)).toEqual([]);
     expect(stateHash(deserializeWorld(JSON.parse(JSON.stringify(world))))).toBe(stateHash(world));
+  });
+
+  it('rotates the world onto its next shared project once the claim window closes', () => {
+    const world = createWorld(73);
+    joinPlayer(world, 'player-a');
+    const player = world.players['player-a']!;
+    player.inventory = { ...emptyInventoryFixture(), tool: 20, brick: 24 };
+    expect(activeWorldProjectId(world)).toBe('frontier-beacon');
+    // Only the open project takes contributions, so the world builds one thing at a time.
+    expect(
+      applyCommand(world, {
+        id: 'contribute-queued',
+        playerId: toPlayerId('player-a'),
+        sequence: 1,
+        type: 'contributeToObjective',
+        objectiveId: 'great-causeway',
+        settlementId: 'settlement-player-a',
+        amount: 1,
+      }).result,
+    ).toMatchObject({ accepted: false, code: 'objective-inactive' });
+    expect(
+      applyCommand(world, {
+        id: 'contribute-beacon',
+        playerId: toPlayerId('player-a'),
+        sequence: 2,
+        type: 'contributeToObjective',
+        objectiveId: 'frontier-beacon',
+        settlementId: 'settlement-player-a',
+        amount: worldProjectTarget(world),
+      }).result.accepted,
+    ).toBe(true);
+    const beacon = world.cooperativeObjectives['frontier-beacon'];
+    expect(beacon.completedTick).toBe(0);
+    expect(
+      applyCommand(world, {
+        id: 'claim-beacon',
+        playerId: toPlayerId('player-a'),
+        sequence: 3,
+        type: 'claimObjectiveReward',
+        objectiveId: 'frontier-beacon',
+      }).result.accepted,
+    ).toBe(true);
+    expect(player.inventory.ingot).toBe(2);
+
+    for (let index = 0; index < worldProjectRules.claimWindowTicks; index += 1) advanceTick(world);
+    // Still inside the window: the finished project is not retired a tick early.
+    expect(activeWorldProjectId(world)).toBe('frontier-beacon');
+    expect(beacon.completedTick).toBe(0);
+    const opening = advanceTick(world);
+    expect(opening.map(({ type }) => type)).toContain('objectiveOpened');
+    expect(activeWorldProjectId(world)).toBe('great-causeway');
+    // The round's live totals reset while its audit trail survives the rotation.
+    expect(beacon).toMatchObject({
+      round: 2,
+      totalContributed: 0,
+      completedTick: null,
+      contributionsByPlayer: {},
+      rewardClaims: {},
+    });
+    expect(beacon.contributionHistory).toHaveLength(1);
+    expect(beacon.rewardHistory).toHaveLength(1);
+    expect(
+      applyCommand(world, {
+        id: 'contribute-causeway',
+        playerId: toPlayerId('player-a'),
+        sequence: 4,
+        type: 'contributeToObjective',
+        objectiveId: 'great-causeway',
+        settlementId: 'settlement-player-a',
+        amount: 24,
+      }).result.accepted,
+    ).toBe(true);
+    expect(world.cooperativeObjectives['great-causeway'].completedTick).toBe(world.tick);
+    expect(inspectWorld(world)).toEqual([]);
+    expect(stateHash(deserializeWorld(JSON.parse(JSON.stringify(world))))).toBe(stateHash(world));
+  });
+
+  it('raises every shared-project target once the world finishes a lap, up to the ceiling', () => {
+    const laps = (count: number) => ({
+      completedWorldProjects: count * worldProjectRules.order.length,
+    });
+    expect(worldProjectTarget(laps(0))).toBe(cooperativeObjectives['frontier-beacon'].targetAmount);
+    expect(worldProjectTarget(laps(1))).toBe(
+      cooperativeObjectives['frontier-beacon'].targetAmount + worldProjectRules.targetGrowthPerLap,
+    );
+    // The rotation wraps rather than running out, and the bar stops at a reachable height.
+    expect(activeWorldProjectId({ completedWorldProjects: worldProjectRules.order.length })).toBe(
+      worldProjectRules.order[0],
+    );
+    expect(worldProjectTarget(laps(1_000))).toBe(worldProjectRules.maxTargetAmount);
+  });
+
+  it('lets an unclaimed reward expire with its project rather than carrying it forward', () => {
+    const world = createWorld(73);
+    joinPlayer(world, 'player-a');
+    world.players['player-a']!.inventory = { ...emptyInventoryFixture(), tool: 20 };
+    expect(
+      applyCommand(world, {
+        id: 'contribute-unclaimed',
+        playerId: toPlayerId('player-a'),
+        sequence: 1,
+        type: 'contributeToObjective',
+        objectiveId: 'frontier-beacon',
+        settlementId: 'settlement-player-a',
+        amount: worldProjectTarget(world),
+      }).result.accepted,
+    ).toBe(true);
+    for (let index = 0; index <= worldProjectRules.claimWindowTicks; index += 1) advanceTick(world);
+    expect(activeWorldProjectId(world)).toBe('great-causeway');
+    expect(
+      applyCommand(world, {
+        id: 'claim-too-late',
+        playerId: toPlayerId('player-a'),
+        sequence: 2,
+        type: 'claimObjectiveReward',
+        objectiveId: 'frontier-beacon',
+      }).result,
+    ).toMatchObject({ accepted: false, code: 'objective-incomplete' });
+    expect(world.players['player-a']?.inventory.ingot).toBe(0);
+    expect(inspectWorld(world)).toEqual([]);
   });
 
   it('funds a settlement-owned construction project from multiple members with exact history', () => {
@@ -3813,12 +4015,8 @@ describe('world simulation', () => {
     expect(world.carriers[createdLink.carrierId!]).toBeUndefined();
     storage.inventory.ore = 1;
     smelter.inventory = {
+      ...emptyInventoryFixture(),
       ore: smelter.inventoryCapacity - 1,
-      wood: 0,
-      stone: 0,
-      ingot: 0,
-      brick: 0,
-      tool: 0,
     };
     smelter.progress = 3;
     advanceTick(world);
@@ -3927,7 +4125,7 @@ describe('world simulation', () => {
       inventoryCapacity: 200,
       recipeId: null,
       productionState: 'idle' as const,
-      inventory: { ore: 5, wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 },
+      inventory: { ...emptyInventoryFixture(), ore: 5 },
     };
     const smelter = {
       ...center,
@@ -4047,7 +4245,7 @@ describe('world simulation', () => {
         id: toBuildingId(sourceId),
         kind: 'storage' as const,
         x: center.x + 1,
-        inventory: { ore: (seed * 7) % 101, wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 },
+        inventory: { ...emptyInventoryFixture(), ore: (seed * 7) % 101 },
         inventoryCapacity: 200,
         populationCapacity: 0,
         jobPriority: 0 as const,
@@ -4059,7 +4257,7 @@ describe('world simulation', () => {
         id: toBuildingId(targetId),
         kind: 'smelter' as const,
         x: center.x + 2,
-        inventory: { ore: (seed * 11) % 20, wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 },
+        inventory: { ...emptyInventoryFixture(), ore: (seed * 11) % 20 },
         inventoryCapacity: 20,
         populationCapacity: 0,
         jobPriority: 0 as const,
@@ -4107,7 +4305,7 @@ describe('world simulation', () => {
         id: toBuildingId(`property-recipe-${seed}`),
         kind: 'smelter' as const,
         x: recipeCenter.x + 1,
-        inventory: { ore: 1 + (seed % 5), wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 },
+        inventory: { ...emptyInventoryFixture(), ore: 1 + (seed % 5) },
         inventoryCapacity: 20,
         populationCapacity: 0,
         jobPriority: 1 as const,
@@ -4299,7 +4497,7 @@ describe('world simulation', () => {
     expect(workshop.inventory).toEqual(inventoryBeforeSwitch);
     advanceTick(world);
     expect(workshop.progress).toBe(6);
-    expect(workshop.inventory).toEqual({ ore: 0, wood: 0, stone: 0, ingot: 0, brick: 0, tool: 0 });
+    expect(workshop.inventory).toEqual(emptyInventoryFixture());
     expect(
       applyCommand(world, {
         id: 'change-busy-recipe',
@@ -4434,7 +4632,7 @@ describe('world simulation', () => {
       id: toBuildingId('copy-source'),
       kind: 'workshop' as const,
       x: center.x + 1,
-      inventory: { ore: 0, wood: 0, stone: 0, ingot: 2, brick: 0, tool: 0 },
+      inventory: { ...emptyInventoryFixture(), ingot: 2 },
       inventoryCapacity: 30,
       populationCapacity: 0,
       jobPriority: 3 as const,
@@ -4445,7 +4643,7 @@ describe('world simulation', () => {
       ...source,
       id: toBuildingId('copy-target'),
       x: center.x + 2,
-      inventory: { ore: 0, wood: 1, stone: 0, ingot: 1, brick: 0, tool: 0 },
+      inventory: { ...emptyInventoryFixture(), wood: 1, ingot: 1 },
       jobPriority: 0 as const,
       recipeId: 'forge-tool',
     };
@@ -4508,6 +4706,116 @@ describe('world simulation', () => {
     expect(world.players['player-a']?.population.satisfaction).toBe(60);
   });
 
+  it('casts steel in a foundry from the output of both first-age chains', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const player = world.players['player-a']!;
+    player.inventory = { ...emptyInventoryFixture(), wood: 2, brick: 3 };
+    for (const technology of [
+      'metallurgy',
+      'territorial-charter',
+      'masonry',
+      'civic-charter',
+      'metalcasting',
+    ] as const)
+      player.research.unlocked[technology] = true;
+    expect(
+      applyCommand(world, {
+        id: 'foundry',
+        playerId: toPlayerId('player-a'),
+        sequence: 1,
+        type: 'placeFoundry',
+        x: 12,
+        y: 0,
+      }).result.accepted,
+    ).toBe(true);
+    for (let index = 0; index <= buildingDefinitions.foundry.constructionTicks; index += 1)
+      advanceTick(world);
+    const foundry = Object.values(world.buildings).find((building) => building.kind === 'foundry')!;
+    expect(foundry.constructionTicks).toBe(0);
+    // Steel needs refined ore and fired brick together, which is the point of the age.
+    foundry.inventory.ingot = 2;
+    advanceTick(world);
+    expect(foundry.productionState).toBe('blocked-input');
+    foundry.inventory.brick = 1;
+    advanceTick(world);
+    expect(foundry.progress).toBe(recipes.castSteel.ticks);
+    for (let index = 0; index < recipes.castSteel.ticks; index += 1) advanceTick(world);
+    expect(foundry.inventory).toEqual({ ...emptyInventoryFixture(), steel: 1 });
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('takes each defence building at its own strength rather than the watchtower rate', () => {
+    const world = createWorld(53);
+    joinPlayer(world, 'player-a');
+    const center = world.buildings['center-player-a']!;
+    const target = {
+      ...center,
+      id: toBuildingId('bastion-target'),
+      kind: 'storage' as const,
+      x: center.x + 1,
+      health: 10,
+      maxHealth: 10,
+      inventoryCapacity: 200,
+    };
+    const bastion = {
+      ...center,
+      id: toBuildingId('bastion'),
+      kind: 'bastion' as const,
+      x: center.x + 2,
+      y: center.y + 1,
+      health: buildingDefinitions.bastion.maxHealth,
+      maxHealth: buildingDefinitions.bastion.maxHealth,
+    };
+    world.buildings[target.id] = target;
+    world.buildings[bastion.id] = bastion;
+    world.playerActivity['player-a'] = { lastActiveTick: 9, raidEligibleTick: 0 };
+    world.tick = 9;
+    world.threats.siege = {
+      id: 'siege',
+      targetBuildingId: target.id,
+      health: 10,
+      damage: 2,
+      spawnedTick: 0,
+      x: target.x + 1,
+      y: target.y,
+    };
+    advanceTick(world);
+    expect(world.threats.siege?.health).toBe(10 - buildingDefinitions.bastion.defenseDamage!);
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
+  it('counts one service of each kind towards satisfaction, so a second hearth adds nothing', () => {
+    const world = createWorld();
+    joinPlayer(world, 'player-a');
+    const center = world.buildings['center-player-a']!;
+    const service = (id: string, kind: 'hearth' | 'guild-hall', offset: number) => {
+      const definition = buildingDefinitions[kind];
+      world.buildings[id] = {
+        ...center,
+        id: toBuildingId(id),
+        kind,
+        x: center.x + offset,
+        y: center.y + 1,
+        health: definition.maxHealth,
+        maxHealth: definition.maxHealth,
+        constructionTicks: 0,
+      };
+    };
+    service('hearth-one', 'hearth', 1);
+    advanceTick(world);
+    const withOneHearth = world.players['player-a']!.population.satisfaction;
+    service('hearth-two', 'hearth', 2);
+    advanceTick(world);
+    expect(world.players['player-a']?.population.satisfaction).toBe(withOneHearth);
+    service('guild-hall', 'guild-hall', 3);
+    advanceTick(world);
+    expect(world.players['player-a']?.population.satisfaction).toBe(
+      Math.min(100, withOneHearth + buildingDefinitions['guild-hall'].serviceSatisfaction!),
+    );
+    expect(inspectWorld(world)).toEqual([]);
+  });
+
   it('adds hearth wellbeing to the settlement satisfaction breakdown', () => {
     const world = createWorld();
     joinPlayer(world, 'player-a');
@@ -4534,7 +4842,7 @@ describe('world simulation', () => {
     legacy.schemaVersion = 7;
     delete legacy.settlements;
     const migrated = deserializeWorld(legacy);
-    expect(migrated.schemaVersion).toBe(31);
+    expect(migrated.schemaVersion).toBe(32);
     expect(migrated.settlements['settlement-player-a']?.members['player-a']).toBe('owner');
   });
 

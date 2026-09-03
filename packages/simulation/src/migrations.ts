@@ -8,6 +8,7 @@
 import { type BuildingId, type PlayerId } from './commands.js';
 import {
   CONTENT_VERSION,
+  cooperativeObjectives as cooperativeObjectiveDefinitions,
   onboardingRules,
   resources as resourceDefinitions,
   threats as threatDefinitions,
@@ -23,14 +24,18 @@ import {
   initialSocialState,
   INVENTORY_CAPACITY,
   isProducer,
+  lockedResearch,
   logisticsCarrierCapacity,
   nearestOreTile,
   plotTerritory,
   terrainAt,
   tileKey,
   type Building,
+  type CooperativeObjectiveState,
   type Inventory,
   type LandmarkDiscovery,
+  type ObjectiveContribution,
+  type ObjectiveRewardClaim,
   type LogisticsLink,
   type PlayerState,
   type Plot,
@@ -41,6 +46,13 @@ import {
   type Threat,
   type WorldState,
 } from './world.js';
+
+/**
+ * Worlds older than 32 predate the shared-project rotation, so none of them carry its
+ * counter. Legacy shapes are described against this rather than the live state, which is
+ * what lets one migrator hand its result to the next as a literal.
+ */
+type PreRotationWorld = Omit<WorldState, 'completedWorldProjects'>;
 
 interface LegacyPlayer {
   id: PlayerId;
@@ -126,7 +138,7 @@ interface Version9Player extends Omit<PlayerState, 'population'> {
 type Version9Building = Omit<Building, 'jobPriority'>;
 type LegacyThreat = Omit<Threat, 'x' | 'y'>;
 type LegacyWorldBase = Omit<
-  WorldState,
+  PreRotationWorld,
   | 'schemaVersion'
   | 'randomState'
   | 'peaceful'
@@ -147,7 +159,7 @@ type LegacyBuildingWithoutRecipe = Omit<
   'recipeId' | 'productionState' | 'constructionMaterials'
 >;
 interface Version16World extends Omit<
-  WorldState,
+  PreRotationWorld,
   | 'schemaVersion'
   | 'buildings'
   | 'logisticsLinks'
@@ -168,7 +180,7 @@ interface Version15World extends Omit<Version16World, 'schemaVersion' | 'logisti
   logisticsLinks: Record<string, Version15LogisticsLink>;
 }
 interface Version17World extends Omit<
-  WorldState,
+  PreRotationWorld,
   | 'schemaVersion'
   | 'buildings'
   | 'logisticsLinks'
@@ -185,7 +197,7 @@ interface Version17World extends Omit<
   logisticsLinks: Record<string, PreFlowLogisticsLink>;
 }
 interface Version18World extends Omit<
-  WorldState,
+  PreRotationWorld,
   | 'schemaVersion'
   | 'buildings'
   | 'peaceful'
@@ -200,7 +212,7 @@ interface Version18World extends Omit<
   buildings: Record<string, Omit<Building, 'constructionMaterials'>>;
 }
 interface Version19World extends Omit<
-  WorldState,
+  PreRotationWorld,
   | 'schemaVersion'
   | 'peaceful'
   | 'cooperativeObjectives'
@@ -213,7 +225,7 @@ interface Version19World extends Omit<
   schemaVersion: 19;
 }
 interface Version20World extends Omit<
-  WorldState,
+  PreRotationWorld,
   | 'schemaVersion'
   | 'cooperativeObjectives'
   | 'playerActivity'
@@ -225,7 +237,7 @@ interface Version20World extends Omit<
   schemaVersion: 20;
 }
 interface Version21World extends Omit<
-  WorldState,
+  PreRotationWorld,
   | 'schemaVersion'
   | 'playerActivity'
   | 'sharedConstructionProjects'
@@ -236,7 +248,7 @@ interface Version21World extends Omit<
   schemaVersion: 21;
 }
 interface Version22World extends Omit<
-  WorldState,
+  PreRotationWorld,
   | 'schemaVersion'
   | 'sharedConstructionProjects'
   | 'social'
@@ -246,19 +258,19 @@ interface Version22World extends Omit<
   schemaVersion: 22;
 }
 interface Version23World extends Omit<
-  WorldState,
+  PreRotationWorld,
   'schemaVersion' | 'social' | 'deletedPlayers' | 'onboardingReservations'
 > {
   schemaVersion: 23;
 }
 interface Version24World extends Omit<
-  WorldState,
+  PreRotationWorld,
   'schemaVersion' | 'deletedPlayers' | 'onboardingReservations'
 > {
   schemaVersion: 24;
 }
-/** Masonry adds two items, so every inventory written before it is two stacks short. */
-type PreMasonryInventory = Omit<Inventory, 'stone' | 'brick'>;
+/** Masonry adds two items, so every inventory written before it is three stacks short. */
+type PreMasonryInventory = Omit<Inventory, 'stone' | 'brick' | 'steel'>;
 type Version29Building = Omit<Building, 'tier' | 'upgradeTier' | 'inventory'> & {
   inventory: PreMasonryInventory;
 };
@@ -278,7 +290,7 @@ interface Version29Player extends Omit<PlayerState, 'inventory' | 'research'> {
   };
 }
 interface Version29World extends Omit<
-  WorldState,
+  PreRotationWorld,
   | 'schemaVersion'
   | 'contentVersion'
   | 'players'
@@ -300,6 +312,52 @@ interface Version29World extends Omit<
     }
   >;
 }
+/** The civic age adds one item, so every inventory written before it is one stack short. */
+type PreCivicInventory = Omit<Inventory, 'steel'>;
+/** Rounds arrived with repeating projects, so a version 31 project had run exactly once. */
+type Version31Objective = Omit<
+  CooperativeObjectiveState,
+  'round' | 'contributionHistory' | 'rewardHistory'
+> & {
+  contributionHistory: Array<Omit<ObjectiveContribution, 'round'>>;
+  rewardHistory: Array<Omit<ObjectiveRewardClaim, 'round'>>;
+};
+type Version31Player = Omit<PlayerState, 'inventory' | 'research'> & {
+  inventory: PreCivicInventory;
+  research: Omit<ResearchState, 'unlocked'> & {
+    unlocked: Record<
+      'metallurgy' | 'territorial-charter' | 'engineering' | 'stewardship' | 'masonry',
+      boolean
+    >;
+  };
+};
+type Version31Building = Omit<Building, 'inventory' | 'constructionMaterials'> & {
+  inventory: PreCivicInventory;
+  constructionMaterials: PreCivicInventory;
+};
+interface Version31World extends Omit<
+  PreRotationWorld,
+  | 'schemaVersion'
+  | 'contentVersion'
+  | 'players'
+  | 'buildings'
+  | 'cooperativeObjectives'
+  | 'completedWorldProjects'
+  | 'sharedConstructionProjects'
+> {
+  schemaVersion: 31;
+  contentVersion: 6;
+  players: Record<string, Version31Player>;
+  buildings: Record<string, Version31Building>;
+  cooperativeObjectives: Record<string, Version31Objective>;
+  sharedConstructionProjects: Record<
+    string,
+    Omit<SharedConstructionProject, 'required' | 'contributed'> & {
+      required: PreCivicInventory;
+      contributed: PreCivicInventory;
+    }
+  >;
+}
 type Version30Player = Omit<PlayerState, 'gatherOrder' | 'initiative' | 'discoveries'> & {
   discoveries: Record<string, Omit<LandmarkDiscovery, 'choice'>>;
 };
@@ -308,7 +366,7 @@ type Version30LogisticsLink = Omit<
   'targetMinimum' | 'targetMaximum' | 'deliveredTotal' | 'recentDeliveries'
 >;
 interface Version30World extends Omit<
-  WorldState,
+  PreRotationWorld,
   'schemaVersion' | 'contentVersion' | 'players' | 'logisticsLinks'
 > {
   schemaVersion: 30;
@@ -322,7 +380,7 @@ interface Version28Player extends Omit<PlayerState, 'discoveries' | 'research'> 
   };
 }
 interface Version28World extends Omit<
-  WorldState,
+  PreRotationWorld,
   'schemaVersion' | 'contentVersion' | 'roads' | 'players'
 > {
   schemaVersion: 28;
@@ -529,51 +587,132 @@ const withMasonryStacks = (inventory: PreMasonryInventory): Inventory => ({
   ...inventory,
   stone: 0,
   brick: 0,
+  steel: 0,
 });
+
+const withCivicStack = (inventory: PreCivicInventory): Inventory => ({ ...inventory, steel: 0 });
+
+/**
+ * Version 32 adds the civic age and turns the world's one shared project into a rotation
+ * that repeats. A project the world had already finished counts as its first completed
+ * round: its claim window is long gone, so leaving it open would hold the rotation on a
+ * project nobody can contribute to and leave the world with no shared work at all.
+ */
+const migrateVersion31 = (state: Version31World): WorldState => {
+  const finished = state.cooperativeObjectives['frontier-beacon']?.completedTick !== null;
+  const objectives = Object.fromEntries(
+    Object.values(cooperativeObjectiveDefinitions).map((definition) => {
+      const existing = state.cooperativeObjectives[definition.id];
+      const retired = Boolean(existing) && finished && definition.id === 'frontier-beacon';
+      return [
+        definition.id,
+        existing
+          ? {
+              ...existing,
+              round: retired ? 2 : 1,
+              totalContributed: retired ? 0 : existing.totalContributed,
+              completedTick: retired ? null : existing.completedTick,
+              contributionsBySettlement: retired ? {} : existing.contributionsBySettlement,
+              contributionsByPlayer: retired ? {} : existing.contributionsByPlayer,
+              rewardClaims: retired ? {} : existing.rewardClaims,
+              contributionHistory: existing.contributionHistory.map((contribution) => ({
+                ...contribution,
+                round: 1,
+              })),
+              rewardHistory: existing.rewardHistory.map((reward) => ({ ...reward, round: 1 })),
+            }
+          : initialCooperativeObjectives()[definition.id],
+      ];
+    }),
+  ) as WorldState['cooperativeObjectives'];
+  return {
+    ...state,
+    schemaVersion: 32,
+    contentVersion: CONTENT_VERSION,
+    cooperativeObjectives: objectives,
+    completedWorldProjects: finished ? 1 : 0,
+    players: Object.fromEntries(
+      Object.entries(state.players).map(([id, player]) => [
+        id,
+        {
+          ...player,
+          inventory: withCivicStack(player.inventory),
+          research: {
+            ...player.research,
+            unlocked: { ...lockedResearch(), ...player.research.unlocked },
+          },
+        },
+      ]),
+    ),
+    buildings: Object.fromEntries(
+      Object.entries(state.buildings).map(([id, building]) => [
+        id,
+        {
+          ...building,
+          inventory: withCivicStack(building.inventory),
+          constructionMaterials: withCivicStack(building.constructionMaterials),
+        },
+      ]),
+    ),
+    sharedConstructionProjects: Object.fromEntries(
+      Object.entries(state.sharedConstructionProjects).map(([id, project]) => [
+        id,
+        {
+          ...project,
+          required: withCivicStack(project.required),
+          contributed: withCivicStack(project.contributed),
+        },
+      ]),
+    ),
+  };
+};
 
 /**
  * Version 30 adds the masonry chain, permanent building tiers, and carriers that walk. Every
  * existing building starts at tier one, and links keep their endpoints but drop the cooldown:
  * their route is left unplanned so the first tick surveys it under the shared route budget.
  */
-const migrateVersion30 = (state: Version30World): WorldState => ({
-  ...state,
-  schemaVersion: 31,
-  contentVersion: CONTENT_VERSION,
-  players: Object.fromEntries(
-    Object.entries(state.players).map(([id, player]) => [
-      id,
-      {
-        ...player,
-        initiative: null,
-        discoveries: Object.fromEntries(
-          Object.entries(player.discoveries).map(([key, discovery]) => [
-            key,
-            { ...discovery, reward: {}, choice: 'develop' as const },
-          ]),
-        ),
-      },
-    ]),
-  ),
-  logisticsLinks: Object.fromEntries(
-    Object.entries(state.logisticsLinks).map(([id, link]) => [
-      id,
-      {
-        ...link,
-        targetMinimum: Math.min(
-          INVENTORY_CAPACITY,
-          state.buildings[link.targetBuildingId]?.inventoryCapacity ?? logisticsCarrierCapacity * 2,
-        ),
-        targetMaximum: Math.min(
-          INVENTORY_CAPACITY,
-          state.buildings[link.targetBuildingId]?.inventoryCapacity ?? logisticsCarrierCapacity * 2,
-        ),
-        deliveredTotal: 0,
-        recentDeliveries: [],
-      },
-    ]),
-  ),
-});
+const migrateVersion30 = (state: Version30World): WorldState =>
+  migrateVersion31({
+    ...state,
+    schemaVersion: 31,
+    contentVersion: 6,
+    players: Object.fromEntries(
+      Object.entries(state.players).map(([id, player]) => [
+        id,
+        {
+          ...player,
+          initiative: null,
+          discoveries: Object.fromEntries(
+            Object.entries(player.discoveries).map(([key, discovery]) => [
+              key,
+              { ...discovery, reward: {}, choice: 'develop' as const },
+            ]),
+          ),
+        },
+      ]),
+    ),
+    logisticsLinks: Object.fromEntries(
+      Object.entries(state.logisticsLinks).map(([id, link]) => [
+        id,
+        {
+          ...link,
+          targetMinimum: Math.min(
+            INVENTORY_CAPACITY,
+            state.buildings[link.targetBuildingId]?.inventoryCapacity ??
+              logisticsCarrierCapacity * 2,
+          ),
+          targetMaximum: Math.min(
+            INVENTORY_CAPACITY,
+            state.buildings[link.targetBuildingId]?.inventoryCapacity ??
+              logisticsCarrierCapacity * 2,
+          ),
+          deliveredTotal: 0,
+          recentDeliveries: [],
+        },
+      ]),
+    ),
+  });
 
 const migrateVersion29 = (state: Version29World): WorldState =>
   migrateVersion30({
@@ -961,7 +1100,8 @@ const migrateVersion2 = (legacy: Version2World): WorldState =>
  * Version 16 is the one step that does not chain onward by itself, so it names both.
  */
 const SNAPSHOT_MIGRATIONS: Record<number, (candidate: unknown) => WorldState> = {
-  31: (candidate) => candidate as WorldState,
+  32: (candidate) => candidate as WorldState,
+  31: (candidate) => migrateVersion31(candidate as Version31World),
   30: (candidate) => migrateVersion30(candidate as Version30World),
   29: (candidate) => migrateVersion29(candidate as Version29World),
   28: (candidate) => migrateVersion28(candidate as Version28World),
@@ -1009,7 +1149,8 @@ const SNAPSHOT_CONTENT_VERSIONS: Readonly<Record<number, number>> = {
   28: 3,
   29: 4,
   30: 5,
-  31: CONTENT_VERSION,
+  31: 6,
+  32: CONTENT_VERSION,
 };
 
 /** Forward-only snapshot migration kept inside the platform-independent simulation. */

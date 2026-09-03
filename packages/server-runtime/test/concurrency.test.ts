@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildingId as toBuildingId, isOpenTile, playerId as toPlayerId } from '@kings/simulation';
+import {
+  buildingId as toBuildingId,
+  emptyInventory,
+  isOpenTile,
+  playerId as toPlayerId,
+} from '@kings/simulation';
 import { GlobalWorldHost, MemoryWorldPersistence, type Connection } from '../src/index.js';
 
 /**
@@ -76,14 +81,7 @@ describe('serialized world conflicts', () => {
     const clients = Array.from({ length: 20 }, () => connection());
     await Promise.all(clients.map((client, index) => host.connect(client, `hotspot-${index}`)));
     for (const client of clients) host.setInterest(client, [{ x: 0, y: 0 }]);
-    host.world.players['hotspot-0']!.inventory = {
-      ore: 0,
-      wood: 0,
-      stone: 0,
-      ingot: 0,
-      brick: 0,
-      tool: 0,
-    };
+    host.world.players['hotspot-0']!.inventory = emptyInventory();
 
     await Promise.all(
       clients.slice(1).map((client, index) =>
@@ -126,30 +124,9 @@ describe('serialized world conflicts', () => {
     await host.connect(alice, 'player-a');
     await host.connect(bob, 'player-b');
     await host.connect(carol, 'player-c');
-    host.world.players['player-a']!.inventory = {
-      ore: 0,
-      wood: 0,
-      stone: 0,
-      ingot: 5,
-      brick: 0,
-      tool: 0,
-    };
-    host.world.players['player-b']!.inventory = {
-      ore: 0,
-      wood: 0,
-      stone: 0,
-      ingot: 95,
-      brick: 0,
-      tool: 0,
-    };
-    host.world.players['player-c']!.inventory = {
-      ore: 0,
-      wood: 0,
-      stone: 0,
-      ingot: 5,
-      brick: 0,
-      tool: 0,
-    };
+    host.world.players['player-a']!.inventory = { ...emptyInventory(), ingot: 5 };
+    host.world.players['player-b']!.inventory = { ...emptyInventory(), ingot: 95 };
+    host.world.players['player-c']!.inventory = { ...emptyInventory(), ingot: 5 };
 
     const first = host.command(alice, {
       id: 'overlap-transfer-a',

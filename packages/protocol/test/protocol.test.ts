@@ -73,6 +73,24 @@ describe('client message validation', () => {
         type: 'research',
         technologyId: 'stewardship',
       },
+      // Validation reads the content tables, so the civic age needs no boundary edit.
+      {
+        id: 'metalcasting-1',
+        playerId: 'player-a',
+        sequence: 5,
+        type: 'research',
+        technologyId: 'metalcasting',
+      },
+      { id: 'foundry-1', playerId: 'player-a', sequence: 6, type: 'placeFoundry', x: 4, y: 5 },
+      {
+        id: 'causeway-1',
+        playerId: 'player-a',
+        sequence: 7,
+        type: 'contributeToObjective',
+        objectiveId: 'great-causeway',
+        settlementId: 'settlement-player-a',
+        amount: 1,
+      },
     ])
       expect(parseClientMessage(JSON.stringify({ type: 'command', command }))).toMatchObject({
         type: 'command',

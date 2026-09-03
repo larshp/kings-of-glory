@@ -1,5 +1,5 @@
 /** Content schemas deliberately use plain data so the same definitions work in builds and on the server. */
-export const CONTENT_VERSION = 6 as const;
+export const CONTENT_VERSION = 7 as const;
 
 export interface ItemDefinition {
   readonly id: string;
@@ -125,6 +125,11 @@ export const items = {
   ingot: { id: 'ingot', displayName: 'Ingot', stackLimit: 100 },
   brick: { id: 'brick', displayName: 'Brick', stackLimit: 100 },
   tool: { id: 'tool', displayName: 'Tool', stackLimit: 100 },
+  /**
+   * The civic age's finished good, and the first item both first-age chains have to meet
+   * to produce: steel needs refined ore and fired brick together.
+   */
+  steel: { id: 'steel', displayName: 'Steel', stackLimit: 100 },
 } as const satisfies Readonly<Record<string, ItemDefinition>>;
 
 export type ItemId = keyof typeof items;
@@ -163,7 +168,8 @@ export const terrainRules = {
    */
   mountain: { ridgeScale: 32, octaves: 2, threshold: 0.81, maxLevel: 5 },
   movement: { roughTerrainDelayTicks: 1 },
-  watchtower: { mountainRangeBonus: 2 },
+  /** Height is sight: any defence building beside a range reaches this much further. */
+  defense: { mountainRangeBonus: 2 },
 } as const;
 
 export const landmarks = {
@@ -222,6 +228,34 @@ export const recipes = {
     output: { brick: 1 },
     ticks: 6,
     requiredTechnology: null,
+  },
+  /**
+   * The civic age's core conversion, and the first recipe that consumes the output of both
+   * first-age chains: a settlement that only smelts or only fires brick cannot cast steel
+   * on its own materials.
+   */
+  castSteel: {
+    id: 'cast-steel',
+    input: { ingot: 2, brick: 1 },
+    output: { steel: 1 },
+    ticks: 8,
+    requiredTechnology: 'metalcasting',
+  },
+  /** Precision casting spends brick where the base recipe spends ingots, and is quicker. */
+  castSteelPrecise: {
+    id: 'cast-steel-precise',
+    input: { ingot: 1, brick: 2 },
+    output: { steel: 1 },
+    ticks: 6,
+    requiredTechnology: 'precision-casting',
+  },
+  /** Bulk casting is the cheapest steel per unit and the slowest to arrive. */
+  castSteelBulk: {
+    id: 'cast-steel-bulk',
+    input: { ingot: 3, brick: 2 },
+    output: { steel: 2 },
+    ticks: 11,
+    requiredTechnology: 'bulk-casting',
   },
 } as const satisfies Readonly<Record<string, RecipeDefinition>>;
 
@@ -366,6 +400,52 @@ export const buildings = {
     constructionTicks: 6,
     requiredTechnology: 'masonry',
   },
+  /**
+   * The civic age's producer. It is placed like any other, but it only runs on materials
+   * from two chains at once, so the age is entered by a settlement that finished both or
+   * by two that trade.
+   */
+  foundry: {
+    id: 'foundry',
+    displayName: 'Foundry',
+    cost: { brick: 3, wood: 2 },
+    inventoryCapacity: 30,
+    populationCapacity: 0,
+    maxHealth: 20,
+    constructionTicks: 14,
+    requiredTechnology: 'metalcasting',
+    recipe: 'cast-steel',
+  },
+  /**
+   * A watchtower answers one raider; a bastion answers a raid. It is the first building
+   * that spends steel, so the civic age pays for its own defence.
+   */
+  bastion: {
+    id: 'bastion',
+    displayName: 'Bastion',
+    cost: { brick: 3, steel: 1 },
+    inventoryCapacity: 0,
+    populationCapacity: 0,
+    maxHealth: 60,
+    constructionTicks: 12,
+    defenseDamage: 3,
+    requiredTechnology: 'fortification',
+  },
+  /**
+   * A second service rather than a larger hearth: satisfaction counts one contribution per
+   * kind of service, so a guild hall is worth building beside a hearth and worthless twice.
+   */
+  'guild-hall': {
+    id: 'guild-hall',
+    displayName: 'Guild hall',
+    cost: { brick: 4, tool: 1 },
+    inventoryCapacity: 0,
+    populationCapacity: 0,
+    maxHealth: 25,
+    constructionTicks: 12,
+    serviceSatisfaction: 25,
+    requiredTechnology: 'civic-charter',
+  },
 } as const satisfies Readonly<Record<string, BuildingDefinition>>;
 
 /**
@@ -444,6 +524,17 @@ export const buildingUpgrades = {
     maxHealthMultiplier: 1.5,
     requiredTechnology: 'masonry',
   },
+  /** The one tier paid for in steel, so the civic age's output feeds its own throughput. */
+  foundry: {
+    buildingId: 'foundry',
+    tier: 2,
+    cost: { steel: 1, brick: 3 },
+    constructionTicks: 16,
+    workRateMultiplier: 0.6,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'metalcasting',
+  },
 } as const satisfies Readonly<Record<string, BuildingUpgradeDefinition>>;
 
 export type UpgradableBuildingKind = keyof typeof buildingUpgrades;
@@ -459,6 +550,11 @@ export const producers = {
     buildingId: 'brickworks',
     recipeIds: ['fire-brick'],
     defaultRecipeId: 'fire-brick',
+  },
+  foundry: {
+    buildingId: 'foundry',
+    recipeIds: ['cast-steel', 'cast-steel-precise', 'cast-steel-bulk'],
+    defaultRecipeId: 'cast-steel',
   },
 } as const satisfies Readonly<Record<string, ProducerDefinition>>;
 
@@ -497,11 +593,12 @@ export const logisticsLinks = {
       'smelter',
       'workshop',
       'brickworks',
+      'foundry',
       'mine',
       'lumber-camp',
       'quarry',
     ],
-    acceptedTargetKinds: ['smelter', 'workshop', 'brickworks', 'storage'],
+    acceptedTargetKinds: ['smelter', 'workshop', 'brickworks', 'foundry', 'storage'],
     carrierCapacity: 4,
   },
 } as const satisfies Readonly<Record<string, LogisticsLinkDefinition>>;
@@ -565,6 +662,53 @@ export const technologies = {
     cost: { ingot: 2 },
     ticks: 18,
   },
+  /**
+   * The civic age's gate, and deliberately expensive in both first-age currencies: entering
+   * the age is what a settlement does once the metallurgy and masonry chains both run, not
+   * a step it can reach with one of them.
+   */
+  'civic-charter': {
+    id: 'civic-charter',
+    displayName: 'Civic Charter',
+    prerequisites: ['territorial-charter', 'masonry'],
+    cost: { brick: 3, tool: 2 },
+    ticks: 25,
+  },
+  metalcasting: {
+    id: 'metalcasting',
+    displayName: 'Metalcasting',
+    prerequisites: ['civic-charter'],
+    cost: { brick: 2, ingot: 3 },
+    ticks: 22,
+  },
+  fortification: {
+    id: 'fortification',
+    displayName: 'Fortification',
+    prerequisites: ['civic-charter'],
+    cost: { brick: 4, tool: 1 },
+    ticks: 22,
+  },
+  /**
+   * The civic age's permanent choice. Like the first one it splits a recipe rather than
+   * gating a building, so neither branch closes the foundry or the steel the world's shared
+   * projects ask for — the choice is which chain a settlement would rather spend.
+   */
+  'precision-casting': {
+    id: 'precision-casting',
+    displayName: 'Precision Casting',
+    prerequisites: ['metalcasting'],
+    cost: { steel: 1 },
+    ticks: 20,
+    exclusiveGroup: 'casting-path',
+  },
+  'bulk-casting': {
+    id: 'bulk-casting',
+    displayName: 'Bulk Casting',
+    prerequisites: ['metalcasting'],
+    cost: { steel: 1 },
+    ticks: 20,
+    exclusiveGroup: 'casting-path',
+  },
 } as const satisfies Readonly<Record<string, TechnologyDefinition>>;
 
 export const threats = {
@@ -592,6 +736,10 @@ export const environmentalEvents = {
   },
 } as const;
 
+/**
+ * The world's shared projects. Each one rewards the currency of the age below it, so a
+ * finished project pays back into the chain the next one will ask for.
+ */
 export const cooperativeObjectives = {
   'frontier-beacon': {
     id: 'frontier-beacon',
@@ -600,6 +748,22 @@ export const cooperativeObjectives = {
     contributionItem: 'tool',
     targetAmount: 20,
     reward: { ingot: 2 },
+  },
+  'great-causeway': {
+    id: 'great-causeway',
+    displayName: 'Great Causeway',
+    description: 'Settlements lay brick for a paved road across the frontier.',
+    contributionItem: 'brick',
+    targetAmount: 24,
+    reward: { tool: 2 },
+  },
+  'grand-foundry': {
+    id: 'grand-foundry',
+    displayName: 'Grand Foundry',
+    description: 'Settlements pool steel to raise a foundry the whole world can draw on.',
+    contributionItem: 'steel',
+    targetAmount: 12,
+    reward: { brick: 4 },
   },
 } as const satisfies Readonly<Record<string, CooperativeObjectiveDefinition>>;
 
@@ -624,6 +788,28 @@ export const settlementInitiatives = {
 export type SettlementInitiativeId = keyof typeof settlementInitiatives;
 
 export type CooperativeObjectiveId = keyof typeof cooperativeObjectives;
+
+/**
+ * How the world works through its shared projects. One is open at a time, and the world
+ * never runs out of them: the order wraps, and every completed lap raises each project's
+ * target. A permanent world would otherwise finish its only project once and leave every
+ * player who arrived afterwards with nothing shared left to build.
+ *
+ * A finished project stays open for `claimWindowTicks` so its contributors can collect
+ * before the next one opens. Growth is added and capped rather than multiplied, because a
+ * target has to stay reachable by the number of players a world actually holds.
+ */
+export const worldProjectRules = {
+  order: ['frontier-beacon', 'great-causeway', 'grand-foundry'],
+  claimWindowTicks: 300,
+  targetGrowthPerLap: 8,
+  maxTargetAmount: 60,
+} as const satisfies {
+  readonly order: readonly CooperativeObjectiveId[];
+  readonly claimWindowTicks: number;
+  readonly targetGrowthPerLap: number;
+  readonly maxTargetAmount: number;
+};
 
 /** Server-enforced social limits; terms are placeholders for a reviewed deployment list. */
 export const socialRules = {
@@ -651,6 +837,11 @@ export const worldRetention = {
   processedCommands: 1_024,
   /** Completed player-to-player transfers retained for auditing. */
   transfers: 1_000,
+  /**
+   * Contribution and reward records one shared project retains. Projects repeat for the
+   * life of the world, so this audit trail is the one that would otherwise grow forever.
+   */
+  objectiveHistory: 1_000,
 } as const;
 
 /**
@@ -949,12 +1140,30 @@ export const validateContent = (): string[] => {
       errors.push(`${objective.id} references unknown contribution item`);
     if (!Number.isSafeInteger(objective.targetAmount) || objective.targetAmount < 1)
       errors.push(`${objective.id} has an invalid target`);
+    if (objective.targetAmount > worldProjectRules.maxTargetAmount)
+      errors.push(`${objective.id} starts above the shared-project target ceiling`);
     for (const [item, amount] of Object.entries(objective.reward)) {
       if (!(item in items)) errors.push(`${objective.id} references unknown reward item ${item}`);
       if (!Number.isSafeInteger(amount) || amount < 1)
         errors.push(`${objective.id} has an invalid reward for ${item}`);
     }
   }
+  if (
+    worldProjectRules.order.length < 1 ||
+    // A rotation that repeated a project would give one of them two turns per lap.
+    new Set(worldProjectRules.order).size !== worldProjectRules.order.length ||
+    worldProjectRules.order.some((id) => !(id in cooperativeObjectives)) ||
+    Object.keys(cooperativeObjectives).some(
+      (id) => !(worldProjectRules.order as readonly string[]).includes(id),
+    ) ||
+    !Number.isSafeInteger(worldProjectRules.claimWindowTicks) ||
+    worldProjectRules.claimWindowTicks < 1 ||
+    !Number.isSafeInteger(worldProjectRules.targetGrowthPerLap) ||
+    worldProjectRules.targetGrowthPerLap < 0 ||
+    !Number.isSafeInteger(worldProjectRules.maxTargetAmount) ||
+    worldProjectRules.maxTargetAmount < 1
+  )
+    errors.push('world project rules are invalid');
   for (const initiative of Object.values(settlementInitiatives)) {
     if (!Number.isSafeInteger(initiative.durationTicks) || initiative.durationTicks < 1)
       errors.push(`${initiative.id} has an invalid duration`);

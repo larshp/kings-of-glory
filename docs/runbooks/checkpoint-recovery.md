@@ -17,6 +17,9 @@
 6. Verify `/ready`, `/metrics`, player inventory samples, and the restored state hash before ending maintenance.
 7. If inspection or replay fails, restore the previous completed checkpoint or the most recent tested database backup. Do not edit serialized game state directly.
 
+Database backup creation and isolated restore verification are documented in the
+[backup and restore drill](backup-restore-drill.md) runbook.
+
 ## Evidence to retain
 
 Record checkpoint ID, tick, state hash, journal range, restore duration, database backup identifier, operator, and the reason for recovery.
@@ -24,7 +27,7 @@ Record checkpoint ID, tick, state hash, journal range, restore duration, databas
 ## Recovery objectives
 
 - **RPO:** zero accepted commands. The server journals an accepted command before it mutates the
-  active world. The checkpoint cadence is 300 ticks (about 30 seconds at the 100 ms tick target),
+  active world. The checkpoint cadence is 300 ticks (about five minutes at the standard one-second tick),
   which bounds the usual replay window rather than permitted data loss.
 - **RTO:** five minutes from process start to a verified ready world for the current first-slice
   target. Watch `kings_recovery_duration_ms`, `kings_journal_lag_ticks`, checkpoint failures, and

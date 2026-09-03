@@ -1,24 +1,32 @@
-import { playerId } from './commands.js';
+import { buildingId, playerId } from './commands.js';
+import { deserializeWorld } from './migrations.js';
 import {
   advanceTick,
   applyCommand,
   createWorld,
+  emptyInventory,
   inspectWorld,
+  isOpenTile,
   joinPlayer,
+  logisticsCarrierCapacity,
+  logisticsRouteFor,
   nearestOreTile,
   stateHash,
-  terrainAt,
   type Building,
   type LogisticsLink,
   type TickPhase,
   type WorldState,
 } from './world.js';
 
+export type BotActionKind =
+  'gather' | 'build' | 'research' | 'trade' | 'expand' | 'reconnect' | 'defend';
+
 export interface ScenarioResult {
   state: WorldState;
   hash: string;
   commandCount: number;
   invariantErrors: readonly string[];
+  botActions: Readonly<Record<BotActionKind, number>>;
 }
 
 export interface PhaseProfile {
@@ -27,29 +35,90 @@ export interface PhaseProfile {
   result: ScenarioResult;
 }
 
+export interface BotWorkloadOptions {
+  readonly playerCount: number;
+  readonly targetBuildingsPerPlayer?: number;
+  /** Rebuilds world state from its own snapshot after the given zero-based tick. */
+  readonly reconnectAfterTick?: (tick: number) => boolean;
+  /**
+   * Issues one always-valid command per player per tick. Long runs need it so the
+   * accepted-command path, activity tracking, and the idempotency window stay
+   * exercised after the starter deposits are exhausted.
+   */
+  readonly keepPlayersActive?: boolean;
+}
+
+/**
+ * A resumable bot workload. Batch scenarios drive it to a tick count; the soak
+ * runner drives it against a wall clock for as long as the run lasts.
+ */
+export interface BotWorkload {
+  readonly state: WorldState;
+  readonly tick: number;
+  readonly commandCount: number;
+  readonly botActions: Readonly<Record<BotActionKind, number>>;
+  /** Issues the commands due this tick, advances the simulation, and reconnects when asked. */
+  step(): void;
+  result(): ScenarioResult;
+}
+
 /** Deterministic bot workload used by CI tests and the server load runner. */
 export const runBotScenario = (
   playerCount: number,
   ticks: number,
   targetBuildingsPerPlayer = 5,
 ): ScenarioResult => {
+  const workload = createBotWorkload({
+    playerCount,
+    targetBuildingsPerPlayer,
+    reconnectAfterTick: (tick) => ticks > 1 && tick === Math.floor(ticks / 2),
+  });
+  for (let tick = 0; tick < ticks; tick += 1) workload.step();
+  return workload.result();
+};
+
+export const createBotWorkload = ({
+  playerCount,
+  targetBuildingsPerPlayer = 5,
+  reconnectAfterTick,
+  keepPlayersActive = false,
+}: BotWorkloadOptions): BotWorkload => {
   if (!Number.isInteger(targetBuildingsPerPlayer) || targetBuildingsPerPlayer < 5)
     throw new Error('Bot scenarios require at least five buildings per player.');
-  const state = createWorld(20260719);
+  let state = createWorld(20260719, false);
   const sequence = new Map<string, number>();
   const towerTiles = new Map<string, { x: number; y: number }>();
   const oreTiles = new Map<string, { x: number; y: number }>();
   let commandCount = 0;
+  const botActions: Record<BotActionKind, number> = {
+    gather: 0,
+    build: 0,
+    research: 0,
+    trade: 0,
+    expand: 0,
+    reconnect: 0,
+    defend: 0,
+  };
   const issue = (player: string, command: Record<string, unknown>) => {
     const next = (sequence.get(player) ?? 0) + 1;
     sequence.set(player, next);
     commandCount += 1;
-    return applyCommand(state, {
+    const outcome = applyCommand(state, {
       id: `${player}-${next}`,
       playerId: playerId(player),
       sequence: next,
       ...command,
     } as never);
+    if (outcome.result.accepted) {
+      const type = String(command.type);
+      if (type === 'gather') botActions.gather += 1;
+      else if (type.startsWith('place')) botActions.build += 1;
+      else if (type === 'research') botActions.research += 1;
+      else if (type === 'transferToPlayer') botActions.trade += 1;
+      else if (type === 'claimTerritory') botActions.expand += 1;
+      else if (type === 'repair') botActions.defend += 1;
+    }
+    return outcome;
   };
   const requireIssue = (player: string, command: Record<string, unknown>) => {
     const outcome = issue(player, command);
@@ -63,7 +132,9 @@ export const runBotScenario = (
     joinPlayer(state, player);
     const playerState = state.players[player]!;
     // Covers the whole ore -> ingot -> tool chain after constructing the basic settlement.
-    playerState.inventory.wood = 14 + (targetBuildingsPerPlayer - 5) * 2;
+    // Keep a repair reserve after the density fixture funds all construction;
+    // otherwise the target-size load can silently skip its threat-response path.
+    playerState.inventory.wood = 25 + (targetBuildingsPerPlayer - 5) * 2;
     playerState.inventory.ingot = 1;
     // This is a density fixture rather than a starter-settlement scenario: give
     // it enough abstract construction labor to exercise production and combat
@@ -78,7 +149,11 @@ export const runBotScenario = (
       .flat()
       .filter(
         (tile) =>
-          terrainAt(state.seed, tile.x, tile.y) !== 'water' &&
+          isOpenTile(state.seed, tile.x, tile.y) &&
+          !(
+            tile.y === playerState.plot.y + playerState.plot.size - 2 &&
+            tile.x < playerState.plot.x + playerState.plot.size - 2
+          ) &&
           (tile.x !== playerState.plot.x + playerState.plot.size - 2 ||
             tile.y !== playerState.plot.y + playerState.plot.size - 2),
       );
@@ -101,7 +176,15 @@ export const runBotScenario = (
     if (!oreTile) throw new Error(`No reachable ore deposit for ${player}`);
     oreTiles.set(player, oreTile);
   }
-  for (let tick = 0; tick < ticks; tick += 1) {
+  let tick = 0;
+  const step = () => {
+    if (tick === 1 && playerCount > 1)
+      requireIssue('bot-0', {
+        type: 'transferToPlayer',
+        targetPlayerId: playerId('bot-1'),
+        item: 'wood',
+        amount: 1,
+      });
     if (tick === 20) for (const player of Object.values(state.players)) player.population.total = 2;
     if (tick === 20)
       for (const player of Object.keys(state.players)) {
@@ -176,7 +259,7 @@ export const runBotScenario = (
             amount: 1,
             direction: 'toBuilding',
           });
-        if (storage && storage.constructionTicks === 0 && state.players[player]!.inventory.wood > 0)
+        if (storage && storage.constructionTicks === 0 && state.players[player]!.inventory.wood > 5)
           issue(player, {
             type: 'transfer',
             buildingId: storage.id,
@@ -185,9 +268,95 @@ export const runBotScenario = (
             direction: 'toBuilding',
           });
       }
+    for (const player of Object.keys(state.players)) {
+      const playerState = state.players[player]!;
+      if (
+        playerState.research.unlocked.metallurgy &&
+        !playerState.research.unlocked['territorial-charter'] &&
+        playerState.research.activeTechnology === null
+      ) {
+        const workshop = Object.values(state.buildings).find(
+          (building) => building.ownerId === player && building.kind === 'workshop',
+        );
+        const neededTools = 2 - playerState.inventory.tool;
+        if (workshop && neededTools > 0 && workshop.inventory.tool > 0)
+          issue(player, {
+            type: 'transfer',
+            buildingId: workshop.id,
+            item: 'tool',
+            amount: Math.min(neededTools, workshop.inventory.tool),
+            direction: 'toPlayer',
+          });
+        if (playerState.inventory.tool >= 2)
+          requireIssue(player, { type: 'research', technologyId: 'territorial-charter' });
+      }
+    }
+    const firstBot = state.players['bot-0'];
+    if (firstBot?.research.unlocked['territorial-charter'] && botActions.expand === 0) {
+      const candidates = new Set<string>();
+      for (const key of Object.keys(firstBot.territoryCells)) {
+        const [xText, yText] = key.split(':');
+        const cellX = Number(xText);
+        const cellY = Number(yText);
+        for (const [offsetX, offsetY] of [
+          [1, 0],
+          [0, 1],
+          [-1, 0],
+          [0, -1],
+        ] as const)
+          candidates.add(`${cellX + offsetX}:${cellY + offsetY}`);
+      }
+      for (const key of [...candidates].sort((left, right) => right.localeCompare(left))) {
+        if (Object.values(state.players).some((candidate) => candidate.territoryCells[key]))
+          continue;
+        const [xText, yText] = key.split(':');
+        const x = Number(xText) * 8;
+        const y = Number(yText) * 8;
+        issue('bot-0', { type: 'explore', x, y });
+        if (issue('bot-0', { type: 'claimTerritory', x, y }).result.accepted) break;
+      }
+    }
+    for (const target of Object.values(state.buildings))
+      if (target.health < target.maxHealth)
+        requireIssue(target.ownerId, { type: 'repair', buildingId: target.id });
+    if (keepPlayersActive)
+      for (const player of Object.keys(state.players)) {
+        const playerState = state.players[player]!;
+        requireIssue(player, {
+          type: 'explore',
+          x: playerState.plot.x + (tick % playerState.plot.size),
+          y: playerState.plot.y,
+        });
+      }
     advanceTick(state);
-  }
-  return { state, hash: stateHash(state), commandCount, invariantErrors: inspectWorld(state) };
+    if (reconnectAfterTick?.(tick)) {
+      state = deserializeWorld(state);
+      botActions.reconnect += Object.keys(state.players).length;
+    }
+    tick += 1;
+  };
+  return {
+    get state() {
+      return state;
+    },
+    get tick() {
+      return tick;
+    },
+    get commandCount() {
+      return commandCount;
+    },
+    get botActions() {
+      return botActions;
+    },
+    step,
+    result: () => ({
+      state,
+      hash: stateHash(state),
+      commandCount,
+      invariantErrors: inspectWorld(state),
+      botActions,
+    }),
+  };
 };
 
 /**
@@ -209,11 +378,11 @@ const createInfrastructureStressState = (pairCount: number): WorldState => {
     const targetId = `stress-smelter-${index}`;
     const source: Building = {
       ...center,
-      id: sourceId as never,
+      id: buildingId(sourceId),
       kind: 'storage',
       x: index * 2,
       y: 0,
-      inventory: { ore: 1, wood: 0, ingot: 0, tool: 0 },
+      inventory: { ...emptyInventory(), ore: 1 },
       inventoryCapacity: 200,
       populationCapacity: 0,
       jobPriority: 0,
@@ -222,16 +391,19 @@ const createInfrastructureStressState = (pairCount: number): WorldState => {
     };
     const target: Building = {
       ...source,
-      id: targetId as never,
+      id: buildingId(targetId),
       kind: 'smelter',
       x: index * 2 + 1,
       maxHealth: 10,
       health: 10,
-      inventory: { ore: 0, wood: 0, ingot: 0, tool: 0 },
+      inventory: emptyInventory(),
       inventoryCapacity: 20,
       jobPriority: 0,
       recipeId: 'smelt-ore',
     };
+    // Routes come from the same planner the create-link command uses, because this fixture
+    // stands in for a world where every link was already established.
+    const route = logisticsRouteFor(state, source, target);
     const link: LogisticsLink = {
       id: `stress-link-${index}`,
       ownerId,
@@ -239,7 +411,14 @@ const createInfrastructureStressState = (pairCount: number): WorldState => {
       targetBuildingId: target.id,
       item: 'ore',
       priority: index % 4 === 0 ? 3 : 1,
-      throughputPerTick: 1,
+      targetMinimum: target.inventoryCapacity,
+      targetMaximum: target.inventoryCapacity,
+      deliveredTotal: 0,
+      recentDeliveries: [],
+      capacityPerTrip: logisticsCarrierCapacity,
+      carrierId: `carrier-stress-link-${index}`,
+      route,
+      routeDistance: route.length / 2,
       status: 'idle',
     };
     state.buildings[sourceId] = source;
@@ -263,6 +442,15 @@ export const runInfrastructureStressScenario = (pairCount = 1_000, ticks = 4): S
     hash: stateHash(state),
     commandCount: 0,
     invariantErrors: inspectWorld(state),
+    botActions: {
+      gather: 0,
+      build: 0,
+      research: 0,
+      trade: 0,
+      expand: 0,
+      reconnect: 0,
+      defend: 0,
+    },
   };
 };
 
@@ -299,6 +487,15 @@ export const profileInfrastructureStressScenario = (
       hash: stateHash(state),
       commandCount: 0,
       invariantErrors: inspectWorld(state),
+      botActions: {
+        gather: 0,
+        build: 0,
+        research: 0,
+        trade: 0,
+        expand: 0,
+        reconnect: 0,
+        defend: 0,
+      },
     },
   };
 };

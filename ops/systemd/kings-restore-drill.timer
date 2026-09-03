@@ -1,0 +1,11 @@
+[Unit]
+Description=Quarterly Kings of Glory restore drill
+
+[Timer]
+OnCalendar=*-01,04,07,10-01 04:00:00 UTC
+Persistent=true
+RandomizedDelaySec=30m
+Unit=kings-restore-drill.service
+
+[Install]
+WantedBy=timers.target

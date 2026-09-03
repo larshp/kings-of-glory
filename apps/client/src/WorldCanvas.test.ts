@@ -1,24 +1,172 @@
 import { describe, expect, it } from 'vitest';
 import {
+  borderSides,
+  cameraOrigin,
+  compareIsometricDrawables,
+  MAX_ELEVATION,
   entityAtTile,
+  initialCameraFocus,
   logisticsStatusColor,
   productionRateLabel,
+  resourceDecorationSprite,
+  resourceIsReachable,
+  summitColors,
+  tileHoverLines,
+  tileLayers,
+  tileNoise,
+  tileShade,
   visibleByIsometricDepth,
   visibleChunkCoordinates,
   visibleRenderChunks,
   visibleTileBounds,
 } from './WorldCanvas.js';
+import { spriteFrames } from './render-assets.js';
+import {
+  ELEVATION_STEP,
+  screenToRaisedTile,
+  screenToTile,
+  TILE_HEIGHT,
+  TILE_WIDTH,
+  worldToScreen,
+} from './projection.js';
 
 describe('visibleByIsometricDepth', () => {
-  it('uses distinct logistics overlay colors for flow and actionable blockage', () => {
-    expect(logisticsStatusColor('transferred')).toBe('#68d7f5');
-    expect(logisticsStatusColor('target-full')).toBe('#f4b860');
-    expect(logisticsStatusColor('target-reconfigured')).toBe('#de7780');
+  it('places the focused tile diamond at the viewport center', () => {
+    expect(cameraOrigin(640, 480)).toEqual({ x: 288, y: 224 });
+    expect(
+      visibleTileBounds(640, 480, { x: 4, y: 7 }, { panX: 0, panY: 0, scale: 1 }).center,
+    ).toEqual({ x: 4, y: 7 });
   });
 
-  it('labels the configured producer rate from shared recipe content', () => {
-    expect(productionRateLabel({ recipeId: 'smelt-ore' })).toBe('1 ingot/3t');
-    expect(productionRateLabel({ recipeId: null })).toBe('no recipe');
+  it('focuses the initial map on the player settlement center', () => {
+    const buildings = [
+      { id: 'foreign-center', kind: 'settlement-center', ownerId: 'other', x: 30, y: 40 },
+      { id: 'own-center', kind: 'settlement-center', ownerId: 'player', x: 4, y: 7 },
+    ] as never;
+    expect(initialCameraFocus(buildings, 'player', { x: 0, y: 0, size: 16 })).toEqual({
+      x: 4,
+      y: 7,
+    });
+  });
+
+  it('falls back to the plot center until the settlement center is available', () => {
+    expect(initialCameraFocus([], 'player', { x: 8, y: 12, size: 16 })).toEqual({
+      x: 16,
+      y: 20,
+    });
+  });
+
+  it('describes hovered terrain, ownership, occupants, and buildability', () => {
+    expect(
+      tileHoverLines({
+        tile: { x: 4, y: 7 },
+        terrain: 'grass',
+        elevation: 0,
+        minedAmount: 0,
+        resourceReachable: true,
+        territoryOwner: 'player',
+        playerId: 'player',
+        placementValid: false,
+        building: {
+          kind: 'settlement-center',
+          constructionTicks: 0,
+          health: 25,
+          maxHealth: 25,
+        } as never,
+        threat: undefined,
+      }),
+    ).toEqual([
+      'Tile 4, 7',
+      'Grassland · Your territory',
+      'settlement center · health 25/25',
+      'Not buildable',
+    ]);
+  });
+
+  it('answers for the armed building instead of general buildability', () => {
+    const tile = {
+      tile: { x: 4, y: 7 },
+      terrain: 'grass' as const,
+      elevation: 0,
+      minedAmount: 0,
+      resourceReachable: false,
+      territoryOwner: 'player',
+      playerId: 'player',
+      building: undefined,
+      threat: undefined,
+    };
+    expect(
+      tileHoverLines({
+        ...tile,
+        placementValid: true,
+        armedPlacement: { name: 'Mine', valid: false, reason: 'No ore deposit within 4 tiles.' },
+      }),
+    ).toContain('Cannot place mine: No ore deposit within 4 tiles.');
+    expect(
+      tileHoverLines({
+        ...tile,
+        placementValid: true,
+        armedPlacement: { name: 'Storage', valid: true, reason: '' },
+      }),
+    ).toContain('Place storage here');
+    expect(tileHoverLines({ ...tile, placementValid: true })).toContain('Buildable');
+  });
+
+  it('shows authoritative remaining yield for finite resource tiles', () => {
+    expect(
+      tileHoverLines({
+        tile: { x: 2, y: 3 },
+        terrain: 'ore',
+        elevation: 0,
+        minedAmount: 4,
+        resourceReachable: true,
+        territoryOwner: undefined,
+        playerId: 'player',
+        placementValid: false,
+        building: undefined,
+        threat: undefined,
+      }),
+    ).toEqual(expect.arrayContaining(['ore remaining: 6/10', 'Reachable for gathering']));
+    expect(
+      tileHoverLines({
+        tile: { x: 2, y: 3 },
+        terrain: 'wood',
+        elevation: 0,
+        minedAmount: 99,
+        resourceReachable: false,
+        territoryOwner: undefined,
+        playerId: 'player',
+        placementValid: false,
+        building: undefined,
+        threat: undefined,
+      }),
+    ).toEqual(expect.arrayContaining(['wood remaining: 0/10', 'Out of gathering range']));
+  });
+
+  it('uses the authoritative plot-center gathering range', () => {
+    const plot = { x: 10, y: 20, size: 8 };
+    expect(resourceIsReachable({ x: 22, y: 24 }, plot)).toBe(true);
+    expect(resourceIsReachable({ x: 23, y: 24 }, plot)).toBe(false);
+    expect(resourceIsReachable({ x: 14, y: 24 }, undefined)).toBe(false);
+  });
+
+  it('uses distinct logistics overlay colors for flow and actionable blockage', () => {
+    expect(logisticsStatusColor('transferred')).toBe('#68d7f5');
+    expect(logisticsStatusColor('in-transit')).toBe('#a88cf0');
+    expect(logisticsStatusColor('target-full')).toBe('#f4b860');
+    expect(logisticsStatusColor('target-reconfigured')).toBe('#de7780');
+    expect(logisticsStatusColor('no-route')).toBe('#de7780');
+  });
+
+  it('labels the configured producer rate at the building tier that will run it', () => {
+    expect(productionRateLabel({ kind: 'smelter', tier: 1, recipeId: 'smelt-ore' })).toBe(
+      '1 ingot/3t',
+    );
+    // A tier-two smelter finishes the same recipe faster, so the overlay must say so.
+    expect(productionRateLabel({ kind: 'smelter', tier: 2, recipeId: 'smelt-ore' })).toBe(
+      '1 ingot/2t',
+    );
+    expect(productionRateLabel({ kind: 'smelter', tier: 1, recipeId: null })).toBe('no recipe');
   });
 
   it('culls off-map entities before applying a stable isometric depth order', () => {
@@ -32,6 +180,24 @@ describe('visibleByIsometricDepth', () => {
     expect(visibleByIsometricDepth(entities, { x: 0, y: 0 }, 3).map((entity) => entity.id)).toEqual(
       ['north-west', 'same-depth-earlier-y', 'same-depth-later-y', 'south-east'],
     );
+  });
+
+  it('keeps same-depth resources, buildings, and units visible above raised terrain', () => {
+    const drawables = [
+      { id: 'building', depth: 4, y: 0, order: 2 },
+      { id: 'resource', depth: 4, y: 3, order: 1 },
+      { id: 'mountain-across-row', depth: 4, y: 2, order: 0 },
+      { id: 'threat', depth: 4, y: 1, order: 3 },
+      { id: 'mountain-in-front', depth: 5, y: 0, order: 0 },
+    ];
+
+    expect(drawables.sort(compareIsometricDrawables).map(({ id }) => id)).toEqual([
+      'mountain-across-row',
+      'resource',
+      'building',
+      'threat',
+      'mountain-in-front',
+    ]);
   });
 
   it('moves tile coverage with the camera while retaining the full viewport', () => {
@@ -66,6 +232,141 @@ describe('visibleByIsometricDepth', () => {
       { x: 1, y: 0, minX: 16, maxX: 17, minY: 14, maxY: 15 },
       { x: 1, y: 1, minX: 16, maxX: 17, minY: 16, maxY: 17 },
     ]);
+  });
+
+  it('varies terrain shading deterministically inside each terrain palette', () => {
+    expect(tileNoise(3, -4)).toBe(tileNoise(3, -4));
+    expect(tileNoise(3, -4)).not.toBe(tileNoise(-4, 3));
+    for (const [x, y] of [
+      [0, 0],
+      [1, 0],
+      [7, -3],
+      [-12, 40],
+    ] as const) {
+      expect(tileShade('grass', x, y)).toBe(tileShade('grass', x, y));
+      expect(tileShade('grass', x, y)).toMatch(/^#[0-9a-f]{6}$/);
+    }
+    // Neighbouring tiles must not repeat one alternating pair, which reads as a checkerboard.
+    const row = Array.from({ length: 24 }, (_, index) => tileShade('grass', index, 0));
+    expect(new Set(row).size).toBeGreaterThan(2);
+    // Terrains stay visually distinct even before their clutter is drawn.
+    expect(tileShade('water', 2, 2)).not.toBe(tileShade('grass', 2, 2));
+    expect(tileShade(undefined, 2, 2)).not.toBe(tileShade('grass', 2, 2));
+  });
+
+  it('insets ponds and outcrops so they are surfaces on the ground, not swapped tiles', () => {
+    const grass = tileLayers('grass', 4, 4);
+    expect(grass.patch).toBeUndefined();
+    expect(grass.base).toBe(tileShade('grass', 4, 4));
+
+    const water = tileLayers('water', 4, 4);
+    // A ring of bank stays visible around the pond, and the pond has a lighter centre.
+    expect(water.base).not.toBe(water.patch?.fill);
+    expect(water.patch?.fill).toBe(tileShade('water', 4, 4));
+    expect(water.patch?.inset).toBeGreaterThan(0);
+    expect(water.patch?.sheen).toBeDefined();
+
+    for (const terrain of ['ore', 'wood'] as const) {
+      const deposit = tileLayers(terrain, 4, 4);
+      expect(deposit.base).toBe(tileShade('grass', 4, 4));
+      expect(deposit.patch?.fill).toBe(tileShade(terrain, 4, 4));
+      expect(deposit.patch?.sheen).toBeUndefined();
+    }
+    expect(tileLayers(undefined, 4, 4)).toEqual({ base: tileShade(undefined, 4, 4) });
+  });
+
+  it('caps only the tallest mountain level with snow and lights its walls consistently', () => {
+    const foothill = summitColors(3, 4, 1);
+    const peak = summitColors(3, 4, MAX_ELEVATION);
+    expect(foothill.top).not.toBe(peak.top);
+    // The south-west wall faces the light, so it must never be the darker of the pair.
+    expect(foothill.lit).not.toBe(foothill.shaded);
+    expect(summitColors(3, 4, 1)).toEqual(foothill);
+    for (const color of [foothill.top, foothill.lit, foothill.shaded, peak.top])
+      expect(color).toMatch(/^#[0-9a-f]{6}$/);
+  });
+
+  it('picks the topmost mountain surface under the pointer, not the ground behind it', () => {
+    // A single level-2 tile at (0, 0); everything else is flat.
+    const levelAt = (x: number, y: number) => (x === 0 && y === 0 ? 2 : 0);
+    const flatCentre = worldToScreen({ x: 0, y: 0 });
+    const centre = {
+      x: flatCentre.x + TILE_WIDTH / 2,
+      y: flatCentre.y + TILE_HEIGHT / 2 - 2 * ELEVATION_STEP,
+    };
+    // Over the raised top face the raised tile wins; the flat reading is a different tile.
+    expect(screenToRaisedTile(centre, levelAt, MAX_ELEVATION)).toEqual({ x: 0, y: 0 });
+    expect(screenToTile(centre)).not.toEqual({ x: 0, y: 0 });
+    // Away from the mountain, picking is unchanged from flat ground.
+    const distant = worldToScreen({ x: 6, y: 6 });
+    const distantCentre = { x: distant.x + TILE_WIDTH / 2, y: distant.y + TILE_HEIGHT / 2 };
+    expect(screenToRaisedTile(distantCentre, levelAt, MAX_ELEVATION)).toEqual(
+      screenToTile(distantCentre),
+    );
+    // With no relief at all the elevation-aware pick degenerates to the flat pick.
+    expect(screenToRaisedTile(centre, () => 0, MAX_ELEVATION)).toEqual(screenToTile(centre));
+  });
+
+  it('names a mountain and its height when hovered', () => {
+    expect(
+      tileHoverLines({
+        tile: { x: 9, y: 9 },
+        terrain: 'mountain',
+        elevation: 3,
+        minedAmount: 0,
+        resourceReachable: false,
+        territoryOwner: undefined,
+        playerId: 'player',
+        placementValid: false,
+        building: undefined,
+        threat: undefined,
+      }),
+    ).toEqual([
+      'Tile 9, 9',
+      'Mountain · height 3 · quarriable stone · Unclaimed territory',
+      'stone remaining: 12/12',
+      'Out of gathering range',
+      'Not buildable',
+    ]);
+  });
+
+  it('shows remaining deposit yield through the drawn clutter', () => {
+    expect(resourceDecorationSprite('ore', 0)).toBe('ore-node');
+    expect(resourceDecorationSprite('ore', 4)).toBe('ore-node');
+    expect(resourceDecorationSprite('ore', 5)).toBe('ore-node-low');
+    expect(resourceDecorationSprite('ore', 9)).toBe('ore-node-low');
+    expect(resourceDecorationSprite('ore', 10)).toBe('ore-node-spent');
+    expect(resourceDecorationSprite('ore', 99)).toBe('ore-node-spent');
+    expect(resourceDecorationSprite('wood', 0)).toBe('timber-node');
+    expect(resourceDecorationSprite('wood', 6)).toBe('timber-node-low');
+    expect(resourceDecorationSprite('wood', 10)).toBe('timber-node-spent');
+    expect(resourceDecorationSprite('grass', 0)).toBeUndefined();
+    expect(resourceDecorationSprite(undefined, 0)).toBeUndefined();
+    for (const sprite of [
+      'ore-node',
+      'ore-node-low',
+      'ore-node-spent',
+      'timber-node',
+      'timber-node-low',
+      'timber-node-spent',
+    ] as const)
+      expect(spriteFrames[sprite]).toBeDefined();
+  });
+
+  it('outlines only the sides where a region meets a different owner', () => {
+    const owners: Record<string, string> = { '0:0': 'player', '1:0': 'player', '0:1': 'rival' };
+    const ownerAt = (x: number, y: number) => owners[`${x}:${y}`];
+    // The eastern neighbour shares an owner, so that side stays open.
+    expect(borderSides(0, 0, ownerAt)).toEqual(['south-west', 'north-west', 'north-east']);
+    expect(borderSides(1, 0, ownerAt)).toEqual(['south-east', 'south-west', 'north-east']);
+    expect(borderSides(0, 1, ownerAt)).toEqual([
+      'south-east',
+      'south-west',
+      'north-west',
+      'north-east',
+    ]);
+    // Unowned tiles contribute no border at all.
+    expect(borderSides(5, 5, ownerAt)).toEqual([]);
   });
 
   it('picks a visible threat before a building on the same tile', () => {

@@ -7,13 +7,44 @@ import {
 } from 'react';
 import {
   buildings as buildingDefinitions,
-  producers as producerDefinitions,
+  cooperativeObjectives as cooperativeObjectiveDefinitions,
+  logisticsLinks as logisticsDefinitions,
   recipes,
   technologies,
+  threats as threatDefinitions,
 } from '@kings/content';
-import { PROTOCOL_VERSION, type ClientWorldState, type ServerMessage } from '@kings/protocol';
-import { type Building, type SettlementRole } from '@kings/simulation';
-import { WorldCanvas } from './WorldCanvas.js';
+import {
+  type ClientWorldState,
+  type DirectoryEntry,
+  type WorldMapChunkSummary,
+} from '@kings/protocol';
+import {
+  activeWorldProjectId,
+  emptyInventory,
+  worldProjectClaimDeadline,
+  worldProjectTarget,
+  type Building,
+  type ItemKind,
+  type SettlementRole,
+} from '@kings/simulation';
+import { CoopPanel } from './hud/CoopPanel.js';
+import { SettingsPanel } from './hud/SettingsPanel.js';
+import { fallbackPlayerId, playerIdPromise } from './connection-status.js';
+import { useGameConnection } from './useGameConnection.js';
+import { BuildPanel } from './hud/BuildPanel.js';
+import { ContextInspector } from './hud/ContextInspector.js';
+import { SettlementPanel } from './hud/SettlementPanel.js';
+import { amountLabel, ITEM_KINDS, recipeForBuilding } from './hud/labels.js';
+import {
+  buildMenuEntries,
+  kindForHotkey,
+  placementStatus,
+  type PlacementRules,
+} from './hud/build-menu.js';
+import { researchEntries } from './hud/research.js';
+import { ResourceBar } from './hud/ResourceBar.js';
+import { WorldPanel } from './hud/WorldPanel.js';
+import { initialCameraFocus, WorldCanvas } from './WorldCanvas.js';
 import type {
   OperationsOverlay,
   PickedEntity,
@@ -21,104 +52,102 @@ import type {
   WorldCanvasMetrics,
 } from './WorldCanvas.js';
 import { loadRenderAssets, type RenderAssets } from './render-assets.js';
-import { synchronizeWorld } from './world-sync.js';
 import {
-  defaultPreferences,
+  searchInformation,
+  type InformationCategory,
+  type InformationEntry,
+} from './information-search.js';
+import {
+  appendNotice,
+  groupNotifications,
+  MESSAGE_LOG_LIMIT,
+  type Notice,
+  type NotificationSeverity,
+} from './notifications.js';
+import {
+  inventoryRatesPerMinute,
+  withInventorySample,
+  type InventorySample,
+} from './inventory-trend.js';
+import {
   displayKey,
   loadPreferences,
   PREFERENCE_STORAGE_KEY,
   type CameraAction,
-  type ClientPreferences,
   withCameraBinding,
 } from './preferences.js';
 import './style.css';
 
-const storedPlayerId = sessionStorage.getItem('kings-dev-player-id');
-const playerId = storedPlayerId ?? `dev-${crypto.randomUUID().slice(0, 8)}`;
-if (!storedPlayerId) sessionStorage.setItem('kings-dev-player-id', playerId);
-const defaultServerUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname || 'localhost'}:3001`;
+// The dev server binds port 3001 on the IPv6 wildcard, and WSL only relays that
+// to the Windows host as `::1` — so a page opened at the `127.0.0.1:5173` URL Vite
+// prints would dial an unreachable `127.0.0.1:3001`. `localhost` resolves to a
+// relayed address on both sides, so dev always dials it regardless of page host.
+// Built clients keep following the page hostname so LAN and deployed hosts work.
+/**
+ * The HUD is grouped so the panel a player needs during play is never buried under
+ * settings. Build stays first because it holds the moment-to-moment actions.
+ */
+const HUD_TABS = [
+  { id: 'build', label: 'Build', glyph: 'B' },
+  { id: 'settlement', label: 'Settlement', glyph: 'S' },
+  { id: 'world', label: 'World', glyph: 'W' },
+  { id: 'coop', label: 'Co-op', glyph: 'C' },
+  { id: 'settings', label: 'Settings', glyph: '⚙' },
+] as const;
+type HudTabId = (typeof HUD_TABS)[number]['id'];
 
-const rejectionMessage = (code: string | undefined) => {
-  const messages: Record<string, string> = {
-    'invalid-coordinate': 'That map coordinate is invalid.',
-    'out-of-range': 'That tile is too far from your settlement.',
-    'resource-depleted': 'That deposit is exhausted. Try another resource tile.',
-    'outside-plot': 'Build inside your claimed territory.',
-    occupied: 'Another building already occupies that tile.',
-    'insufficient-wood': 'Gather more wood before starting this construction.',
-    'insufficient-ore': 'Gather or transfer more ore first.',
-    'insufficient-resources': 'Gather, craft, or transfer the required resources first.',
-    'inventory-full': 'Move or use items to make inventory space.',
-    'construction-incomplete': 'Wait for construction to finish before using this building.',
-    busy: 'Wait for the current production batch to finish before changing its recipe.',
-    'invalid-recipe': 'That recipe cannot run in this building.',
-    'incompatible-building': 'Copy settings only between completed producers of the same kind.',
-    'building-destroyed': 'Repair or demolish the destroyed building first.',
-    'technology-locked': 'Research the required technology first.',
-    'not-explored': 'Explore that area before claiming it.',
-    'not-adjacent': 'Claim a sector next to your existing territory.',
-    'unknown-recipient': 'That recipient has not joined this world yet.',
-    'unknown-settlement': 'That settlement is no longer available.',
-    'settlement-permission-denied': 'Your settlement role does not permit that action.',
-    'settlement-invite-missing': 'You do not have an active invitation to that settlement.',
-    'already-settlement-member': 'That player is already a member of this settlement.',
-    'not-settlement-member': 'That player is not a member of this settlement.',
-    'cannot-leave-settlement-owner': 'Transfer ownership before leaving your own settlement.',
-    'cannot-remove-settlement-owner': 'Transfer ownership before removing the current owner.',
-    'cannot-transfer-settlement-ownership-to-self':
-      'Choose another settlement member as the owner.',
-    unauthorized: 'Your connection cannot perform that action for this player.',
-    'persistence-failed': 'The world could not save your action. It was not applied.',
-  };
-  return messages[code ?? ''] ?? `Action rejected: ${code ?? 'unknown reason'}.`;
-};
-
-const setConnectionIndicator = (message: string, hidden = false) => {
-  const indicator = document.getElementById('connection-indicator');
-  if (!indicator) return;
-  indicator.textContent = message;
-  indicator.hidden = hidden;
-};
-const technologyCostLabel = (
-  cost: Readonly<Partial<Record<'ore' | 'wood' | 'ingot' | 'tool', number>>>,
-) =>
-  Object.entries(cost)
-    .map(([item, amount]) => `${amount} ${item}${amount === 1 ? '' : 's'}`)
-    .join(', ');
-const recipeForBuilding = (building: Building) =>
-  Object.values(recipes).find((recipe) => recipe.id === building.recipeId);
-const recipeOptionsForBuilding = (building: Building) => {
-  const producer = producerDefinitions[building.kind as keyof typeof producerDefinitions];
-  return producer
-    ? Object.values(recipes).filter((recipe) =>
-        (producer.recipeIds as readonly string[]).includes(recipe.id),
-      )
-    : [];
-};
+const MAP_LAYERS: readonly {
+  id: OperationsOverlay;
+  label: string;
+  glyph: string;
+}[] = [
+  { id: 'none', label: 'Default', glyph: '◇' },
+  { id: 'resources', label: 'Resources', glyph: 'R' },
+  { id: 'logistics', label: 'Logistics', glyph: 'L' },
+  { id: 'production', label: 'Production', glyph: 'P' },
+  { id: 'bottlenecks', label: 'Bottlenecks', glyph: '!' },
+];
 
 export const App = () => {
+  const [identity, setIdentity] = useState({ playerId: fallbackPlayerId, ready: false });
+  const playerId = identity.playerId;
   const socket = useRef<WebSocket | undefined>(undefined);
   const sequence = useRef(0);
   const stateVersion = useRef<number | undefined>(undefined);
   const clientWorldState = useRef<ClientWorldState | undefined>(undefined);
   const resyncRequested = useRef(false);
-  const pendingCommands = useRef(new Map<string, string>());
+  const pendingCommands = useRef(
+    new Map<string, { message?: string; onAcknowledged?: () => void }>(),
+  );
   const [state, setState] = useState<ClientWorldState>();
   const [status, setStatus] = useState('Connecting');
-  // seq bumps on every message so an identical repeated toast (e.g. "Gathered
-  // wood.") still re-shows and resets its auto-dismiss timer.
-  const [notice, setNoticeState] = useState<{ text: string; seq: number }>({ text: '', seq: 0 });
-  const notify = (text: string) => setNoticeState((previous) => ({ text, seq: previous.seq + 1 }));
-  const dismissNotice = () => setNoticeState((previous) => ({ ...previous, text: '' }));
+  /**
+   * Toasts are a queue rather than one slot: a burst of acknowledgements used to overwrite
+   * each other, so players lost messages they never saw. The log keeps them for review after
+   * the toast has faded, and each toast schedules its own dismissal so an older message is
+   * not held on screen by a newer one.
+   */
+  const [notices, setNotices] = useState<readonly Notice[]>([]);
+  const [messageLog, setMessageLog] = useState<readonly Notice[]>([]);
+  const noticeCount = useRef(0);
+  const dismissNotice = (id: number) =>
+    setNotices((current) => current.filter((notice) => notice.id !== id));
+  const notify = (text: string, severity: NotificationSeverity = 'info') => {
+    const id = (noticeCount.current += 1);
+    setNotices((current) => appendNotice(current, { text, severity }, id));
+    setMessageLog((current) => appendNotice(current, { text, severity }, id, MESSAGE_LOG_LIMIT));
+    // A repeat replaces the newest notice under a new id, so this also restarts its timer.
+    window.setTimeout(() => dismissNotice(id), 5_000);
+  };
   const [selectedTile, setSelectedTile] = useState<{ x: number; y: number }>();
   const [selectedEntity, setSelectedEntity] = useState<PickedEntity>();
   const [hoveredTile, setHoveredTile] = useState<{ x: number; y: number }>();
   const [recipientId, setRecipientId] = useState('');
-  const [recipientItem, setRecipientItem] = useState<'ore' | 'wood' | 'ingot' | 'tool'>('ingot');
+  const [recipientItem, setRecipientItem] = useState<ItemKind>('ingot');
   const [inviteeId, setInviteeId] = useState('');
   const [logisticsSourceId, setLogisticsSourceId] = useState('');
   const [logisticsTargetId, setLogisticsTargetId] = useState('');
-  const [logisticsItem, setLogisticsItem] = useState<'ore' | 'wood' | 'ingot' | 'tool'>('ore');
+  const [logisticsItem, setLogisticsItem] = useState<ItemKind>('ore');
   const [preferences, setPreferences] = useState(() =>
     loadPreferences(localStorage.getItem(PREFERENCE_STORAGE_KEY)),
   );
@@ -133,149 +162,88 @@ export const App = () => {
     showCoordinates: false,
     showChunks: false,
     showEntityIds: false,
+    showPaths: false,
   });
   const [operationsOverlay, setOperationsOverlay] = useState<OperationsOverlay>('none');
+  const [hudTab, setHudTab] = useState<HudTabId>('build');
+  /** The building the player armed, which then follows the pointer until it is placed. */
+  const [armedKind, setArmedKind] = useState<Building['kind']>();
+  const [inventorySamples, setInventorySamples] = useState<readonly InventorySample[]>([]);
+  /** Standard tablist behaviour: arrows move between tabs, Home and End jump to the ends. */
+  const moveHudTabFocus = (event: ReactKeyboardEvent<HTMLButtonElement>, current: HudTabId) => {
+    const index = HUD_TABS.findIndex((tab) => tab.id === current);
+    const target =
+      event.key === 'ArrowRight' || event.key === 'ArrowDown'
+        ? (index + 1) % HUD_TABS.length
+        : event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+          ? (index - 1 + HUD_TABS.length) % HUD_TABS.length
+          : event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? HUD_TABS.length - 1
+              : -1;
+    if (target < 0) return;
+    event.preventDefault();
+    const next = HUD_TABS[target]!.id;
+    setHudTab(next);
+    document.getElementById(`hud-tab-${next}`)?.focus();
+  };
+  /**
+   * Assigned on every render and read only when a key is pressed, so the window listener is
+   * installed once while still acting on current research, materials, and bindings.
+   */
+  const latestHotkeyHandler = useRef<(event: KeyboardEvent) => void>(() => {});
   const messageCount = useRef({ received: 0, sent: 0 });
   const [messageRate, setMessageRate] = useState({ received: 0, sent: 0 });
+  const [updateApplicationMs, setUpdateApplicationMs] = useState(0);
+  const [worldMap, setWorldMap] = useState<{
+    chunks: WorldMapChunkSummary[];
+    nextCursor?: string;
+    totalExploredChunks: number;
+  }>();
+  const [worldMapLoading, setWorldMapLoading] = useState(false);
+  const [directoryQuery, setDirectoryQuery] = useState('');
+  const [directory, setDirectory] = useState<{
+    entries: DirectoryEntry[];
+    nextCursor?: string;
+  }>();
+  const [playerNameDraft, setPlayerNameDraft] = useState('');
+  const [settlementNameDraft, setSettlementNameDraft] = useState('');
+  const [chatText, setChatText] = useState('');
+  const [chatSettlementId, setChatSettlementId] = useState('global');
+  const [accountDeletionConfirmation, setAccountDeletionConfirmation] = useState('');
+  const [informationQuery, setInformationQuery] = useState('');
+  const [informationCategory, setInformationCategory] = useState<InformationCategory | 'all'>(
+    'all',
+  );
 
   useEffect(() => {
-    let stopped = false;
-    let retryTimer: number | undefined;
-    let heartbeatTimer: number | undefined;
-    let attempts = 0;
-    let reconnectAllowed = true;
-    let activeConnection: WebSocket | undefined;
-    const connect = () => {
-      setStatus(attempts === 0 ? 'Connecting' : 'Reconnecting');
-      const connection = new WebSocket(import.meta.env.VITE_SERVER_URL ?? defaultServerUrl);
-      activeConnection = connection;
-      socket.current = connection;
-      connection.onopen = () => {
-        if (stopped || socket.current !== connection) {
-          connection.close();
-          return;
-        }
-        setConnectionIndicator('Connected to the server. Loading your world…');
-        attempts = 0;
-        connection.send(JSON.stringify({ type: 'hello', version: PROTOCOL_VERSION, playerId }));
-        messageCount.current.sent += 1;
-        setStatus('Connected');
-        heartbeatTimer = window.setInterval(() => {
-          if (connection.readyState === WebSocket.OPEN) {
-            connection.send(JSON.stringify({ type: 'ping', nonce: crypto.randomUUID() }));
-            messageCount.current.sent += 1;
-          }
-        }, 15_000);
-      };
-      connection.onerror = () => {
-        setConnectionIndicator('Network error. Retrying the game server connection…');
-        notify('The connection encountered a network error. Retrying…');
-      };
-      connection.onclose = (event) => {
-        if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
-        heartbeatTimer = undefined;
-        if (stopped || !reconnectAllowed) return;
-        if (event.code === 1012) {
-          reconnectAllowed = false;
-          setStatus('Maintenance');
-          setConnectionIndicator('The game server is under maintenance. Please try again shortly.');
-          notify('The server is saving the world for maintenance. Your actions are paused.');
-          return;
-        }
-        if (event.code === 1002 && event.reason === 'Client upgrade required') {
-          reconnectAllowed = false;
-          setStatus('Upgrade required');
-          setConnectionIndicator(
-            'This game client is incompatible with the server. Refresh to update.',
-          );
-          notify('A newer game client is required. Refresh this page after it is deployed.');
-          return;
-        }
-        setConnectionIndicator(
-          `Server connection closed (${event.code}${event.reason ? `: ${event.reason}` : ''}). Retrying…`,
-        );
-        notify(
-          `Connection closed (${event.code}${event.reason ? `: ${event.reason}` : ''}). Retrying…`,
-        );
-        attempts += 1;
-        retryTimer = window.setTimeout(connect, Math.min(5_000, 250 * 2 ** Math.min(attempts, 5)));
-      };
-      connection.onmessage = ({ data }) => {
-        if (stopped || socket.current !== connection) return;
-        let message: ServerMessage;
-        try {
-          message = JSON.parse(data) as ServerMessage;
-        } catch {
-          setConnectionIndicator('The server sent an unreadable update. Reconnecting…');
-          notify('The server sent an unreadable update. Reconnecting…');
-          connection.close(1002, 'Malformed server message');
-          return;
-        }
-        messageCount.current.received += 1;
-        if (message.type === 'welcome') {
-          setStatus('Connected');
-        }
-        const synchronization = synchronizeWorld(
-          { version: stateVersion.current, state: clientWorldState.current },
-          message,
-        );
-        if (synchronization.sync.state !== clientWorldState.current) {
-          setConnectionIndicator('Game world connected.', true);
-          stateVersion.current = synchronization.sync.version;
-          clientWorldState.current = synchronization.sync.state;
-          resyncRequested.current = false;
-          setState(synchronization.sync.state);
-        }
-        if (
-          synchronization.needsResync &&
-          !resyncRequested.current &&
-          connection.readyState === WebSocket.OPEN
-        ) {
-          resyncRequested.current = true;
-          setStatus('Resynchronizing');
-          connection.send(JSON.stringify({ type: 'resync', version: stateVersion.current ?? 0 }));
-          messageCount.current.sent += 1;
-        }
-        if (message.type === 'commandAcknowledged') {
-          const successMessage = pendingCommands.current.get(message.result.commandId);
-          if (successMessage) {
-            notify(successMessage);
-            pendingCommands.current.delete(message.result.commandId);
-          }
-        }
-        if (message.type === 'commandRejected') {
-          pendingCommands.current.delete(message.result.commandId);
-          notify(rejectionMessage(message.result.code));
-        }
-        if (message.type === 'maintenance') {
-          reconnectAllowed = false;
-          setStatus('Maintenance');
-          setConnectionIndicator(message.message);
-          notify(message.message);
-        }
-        if (message.type === 'error') {
-          notify(message.message ?? 'Connection error');
-          if (message.code === 'version-mismatch') {
-            reconnectAllowed = false;
-            setStatus('Upgrade required');
-            setConnectionIndicator(
-              'This game client is incompatible with the server. Refresh to update.',
-            );
-            notify('A newer game client is required. Refresh this page after it is deployed.');
-            connection.close(1002, 'Client upgrade required');
-          }
-        }
-      };
-    };
-    connect();
+    let active = true;
+    void playerIdPromise.then((resolvedPlayerId) => {
+      if (active) setIdentity({ playerId: resolvedPlayerId, ready: true });
+    });
     return () => {
-      stopped = true;
-      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
-      if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
-      if (socket.current === activeConnection) socket.current = undefined;
-      activeConnection?.close();
+      active = false;
     };
   }, []);
+
+  useGameConnection({
+    identity,
+    playerId,
+    socket,
+    clientWorldState,
+    stateVersion,
+    resyncRequested,
+    pendingCommands,
+    messageCount,
+    setState,
+    setStatus,
+    setWorldMap,
+    setWorldMapLoading,
+    setDirectory,
+    setUpdateApplicationMs,
+    notify,
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -311,23 +279,40 @@ export const App = () => {
   }, []);
 
   useEffect(() => {
-    if (!notice.text) return;
-    const timer = window.setTimeout(
-      () => setNoticeState((previous) => ({ ...previous, text: '' })),
-      5_000,
-    );
-    return () => window.clearTimeout(timer);
-  }, [notice.seq, notice.text]);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
+      const target = event.target as HTMLElement | null;
+      // Never take a key away from chat, a name field, or an open dropdown.
+      if (
+        target?.isContentEditable ||
+        ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName ?? '')
+      )
+        return;
+      latestHotkeyHandler.current(event);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   const player = state?.players[playerId];
-  const canAffordTechnology = (
-    cost: Readonly<Partial<Record<'ore' | 'wood' | 'ingot' | 'tool', number>>>,
-  ) => {
-    if (!player) return false;
-    return Object.entries(cost).every(
-      ([item, amount]) => player.inventory[item as keyof typeof player.inventory] >= (amount ?? 0),
-    );
-  };
+  /** Read by the sampling interval, which must not restart every time the world updates. */
+  const latestInventory = useRef(player?.inventory);
+  latestInventory.current = player?.inventory;
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const inventory = latestInventory.current;
+      if (!inventory) return;
+      setInventorySamples((current) =>
+        withInventorySample(current, { at: performance.now(), inventory }),
+      );
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const inventoryRates = useMemo(
+    () => inventoryRatesPerMinute(inventorySamples),
+    [inventorySamples],
+  );
   const rebindCamera = (action: CameraAction) => (event: ReactKeyboardEvent<HTMLInputElement>) => {
     event.preventDefault();
     const updated = withCameraBinding(preferences, action, event.code);
@@ -338,10 +323,18 @@ export const App = () => {
     setPreferences(updated);
     notify(`Camera control updated to ${displayKey(event.code)}.`);
   };
-  const send = (command: Record<string, unknown>, successMessage?: string) => {
+  const send = (
+    command: Record<string, unknown>,
+    successMessage?: string,
+    onAcknowledged?: () => void,
+  ) => {
     if (socket.current?.readyState !== WebSocket.OPEN) return;
     const id = crypto.randomUUID();
-    if (successMessage) pendingCommands.current.set(id, successMessage);
+    if (successMessage || onAcknowledged)
+      pendingCommands.current.set(id, {
+        ...(successMessage ? { message: successMessage } : {}),
+        ...(onAcknowledged ? { onAcknowledged } : {}),
+      });
     socket.current.send(
       JSON.stringify({
         type: 'command',
@@ -353,6 +346,32 @@ export const App = () => {
   const sendInterest = (chunks: readonly { x: number; y: number }[]) => {
     if (socket.current?.readyState !== WebSocket.OPEN) return;
     socket.current.send(JSON.stringify({ type: 'interest', chunks }));
+    messageCount.current.sent += 1;
+  };
+  const requestWorldMap = (after?: string) => {
+    if (socket.current?.readyState !== WebSocket.OPEN) return;
+    setWorldMapLoading(true);
+    socket.current.send(
+      JSON.stringify({
+        type: 'worldMap',
+        requestId: `map-${crypto.randomUUID()}`,
+        ...(after ? { after } : {}),
+        limit: 64,
+      }),
+    );
+    messageCount.current.sent += 1;
+  };
+  const requestDirectory = (after?: string) => {
+    if (socket.current?.readyState !== WebSocket.OPEN) return;
+    socket.current.send(
+      JSON.stringify({
+        type: 'directorySearch',
+        requestId: `directory-${crypto.randomUUID()}`,
+        query: directoryQuery.trim(),
+        ...(after ? { after } : {}),
+        limit: 20,
+      }),
+    );
     messageCount.current.sent += 1;
   };
   const plot = useMemo(() => player?.plot, [player]);
@@ -374,23 +393,60 @@ export const App = () => {
             ? 'member'
             : undefined;
   };
-  const manageableBuildings = state
-    ? Object.values(state.buildings).filter((building) => roleForBuilding(building))
-    : [];
+  const selectedBuildingId = selectedEntity?.type === 'building' ? selectedEntity.id : undefined;
+  /**
+   * A stable listing order, with whatever the player picked on the map first so a
+   * large settlement does not require scrolling to reach the selected building.
+   */
+  const manageableBuildings = (
+    state ? Object.values(state.buildings).filter((building) => roleForBuilding(building)) : []
+  ).sort(
+    (left, right) =>
+      Number(right.id === selectedBuildingId) - Number(left.id === selectedBuildingId) ||
+      left.kind.localeCompare(right.kind) ||
+      left.id.localeCompare(right.id),
+  );
+  const canRouteItems = (building: Building) =>
+    building.constructionTicks === 0 &&
+    (roleForBuilding(building) === 'owner' || roleForBuilding(building) === 'logistics');
   const logisticsSources = manageableBuildings.filter(
     (building) =>
-      (building.kind === 'storage' ||
-        building.kind === 'smelter' ||
-        building.kind === 'workshop') &&
-      building.constructionTicks === 0 &&
-      (roleForBuilding(building) === 'owner' || roleForBuilding(building) === 'logistics'),
+      (logisticsDefinitions.internalInventory.acceptedSourceKinds as readonly string[]).includes(
+        building.kind,
+      ) && canRouteItems(building),
   );
   const logisticsTargets = manageableBuildings.filter(
     (building) =>
-      (building.kind === 'smelter' || building.kind === 'workshop') &&
-      building.constructionTicks === 0 &&
-      (roleForBuilding(building) === 'owner' || roleForBuilding(building) === 'logistics'),
+      (logisticsDefinitions.internalInventory.acceptedTargetKinds as readonly string[]).includes(
+        building.kind,
+      ) && canRouteItems(building),
   );
+  /** Water and mountains block construction, exactly as the server rules do. */
+  const isOpenTerrain = (x: number, y: number) => {
+    const terrain = terrainAt(x, y);
+    return terrain !== undefined && terrain !== 'water' && terrain !== 'mountain';
+  };
+  /**
+   * Mirrors the authoritative protected-area rules the client can see: a settlement keeps
+   * a westward access lane from its centre, and every settlement keeps a buffer around its
+   * plot. Without this the HUD would call tiles buildable that the server then rejects. The
+   * server stays the judge: it also knows settlements this client cannot see.
+   */
+  const ownCenter = state?.buildings[`center-${playerId}`];
+  const isProtectedArea = (x: number, y: number) => {
+    if (plot && ownCenter && y === ownCenter.y && x >= plot.x && x < ownCenter.x) return true;
+    const buffer = threatDefinitions['raider-swarm'].settlementBufferTiles;
+    // Every plot is the same size and puts its centre two tiles inside the far corner, so a
+    // visible foreign centre is enough to reconstruct that settlement's buffered plot.
+    const size = plot?.size ?? 8;
+    const offset = size - 2;
+    return Object.values(state?.buildings ?? {}).some((building) => {
+      if (building.kind !== 'settlement-center' || building.ownerId === playerId) return false;
+      const minX = building.x - offset - buffer;
+      const minY = building.y - offset - buffer;
+      return x >= minX && y >= minY && x < minX + size + buffer * 2 && y < minY + size + buffer * 2;
+    });
+  };
   const fallbackPlacement = plot
     ? Array.from({ length: plot.size }, (_, x) =>
         Array.from({ length: plot.size }, (_, y) => ({ x: plot.x + x, y: plot.y + y })),
@@ -398,8 +454,8 @@ export const App = () => {
         .flat()
         .find(
           (tile) =>
-            terrainAt(tile.x, tile.y) !== undefined &&
-            terrainAt(tile.x, tile.y) !== 'water' &&
+            isOpenTerrain(tile.x, tile.y) &&
+            !isProtectedArea(tile.x, tile.y) &&
             !Object.values(state?.buildings ?? {}).some(
               (building) => building.x === tile.x && building.y === tile.y,
             ),
@@ -412,8 +468,8 @@ export const App = () => {
       : '';
     return candidate &&
       player?.territoryCells[territory] &&
-      terrainAt(candidate.x, candidate.y) !== undefined &&
-      terrainAt(candidate.x, candidate.y) !== 'water' &&
+      isOpenTerrain(candidate.x, candidate.y) &&
+      !isProtectedArea(candidate.x, candidate.y) &&
       !Object.values(state?.buildings ?? {}).some(
         (building) => building.x === candidate.x && building.y === candidate.y,
       )
@@ -426,12 +482,31 @@ export const App = () => {
   const selectedTerritoryOwner = selectedTile
     ? state?.territory[`${Math.floor(selectedTile.x / 8)}:${Math.floor(selectedTile.y / 8)}`]
     : undefined;
-  const transfer = (
-    building: Building,
-    item: 'ore' | 'wood' | 'ingot' | 'tool',
-    direction: 'toBuilding' | 'toPlayer',
-  ) => send({ type: 'transfer', buildingId: building.id, item, amount: 1, direction });
-  const frontier = plot ? { x: plot.x + 16, y: plot.y } : { x: 0, y: 0 };
+  const transfer = (building: Building, item: ItemKind, direction: 'toBuilding' | 'toPlayer') =>
+    send({ type: 'transfer', buildingId: building.id, item, amount: 1, direction });
+  /** The sector both frontier actions target, described the way the server judges it. */
+  const sectorKey = (tile: { x: number; y: number }) =>
+    `${Math.floor(tile.x / 8)}:${Math.floor(tile.y / 8)}`;
+  const selectedSector = selectedTile
+    ? {
+        explored: Boolean(
+          player?.exploredChunks[
+            `${Math.floor(selectedTile.x / 16)}:${Math.floor(selectedTile.y / 16)}`
+          ],
+        ),
+        claimedBy: state?.territory[sectorKey(selectedTile)]
+          ? state.territory[sectorKey(selectedTile)] === playerId
+            ? ('you' as const)
+            : ('other' as const)
+          : undefined,
+        adjacentToOwnClaim: (() => {
+          const [x, y] = sectorKey(selectedTile).split(':').map(Number);
+          return [`${x! + 1}:${y!}`, `${x! - 1}:${y!}`, `${x!}:${y! + 1}`, `${x!}:${y! - 1}`].some(
+            (neighbor) => player?.territoryCells[neighbor],
+          );
+        })(),
+      }
+    : undefined;
   const activeThreats = state
     ? Object.values(state.threats).filter((threat) => {
         const target = state.buildings[threat.targetBuildingId];
@@ -440,22 +515,136 @@ export const App = () => {
     : [];
   const exploredChunkCount = Object.keys(player?.exploredChunks ?? {}).length;
   const visibleChunkCount = Object.keys(player?.visibleChunks ?? {}).length;
+  const progressionEra = player?.research.unlocked.engineering
+    ? 'Engineering path'
+    : player?.research.unlocked.stewardship
+      ? 'Stewardship path'
+      : player?.research.unlocked['territorial-charter']
+        ? 'Expansion era'
+        : player?.research.unlocked.metallurgy
+          ? 'Industry era'
+          : 'Founding era';
+  const research = player
+    ? researchEntries({
+        unlocked: player.research.unlocked,
+        activeTechnology: player.research.activeTechnology,
+        ticksRemaining: player.research.ticksRemaining,
+        inventory: player.inventory,
+      })
+    : [];
   const transfers = state?.transfers ?? [];
   const personalSettlement = state?.settlements[`settlement-${playerId}`];
+  /**
+   * The one shared project open right now. Which project that is, and how high its bar
+   * stands, both follow from the world's completed count, so the panel never has to be
+   * told separately and cannot show a project the server would refuse.
+   */
+  const worldProject = state
+    ? (() => {
+        const id = activeWorldProjectId(state);
+        const objective = state.cooperativeObjectives[id];
+        const next = activeWorldProjectId({
+          completedWorldProjects: state.completedWorldProjects + 1,
+        });
+        return {
+          id,
+          definition: cooperativeObjectiveDefinitions[id],
+          state: objective,
+          target: worldProjectTarget(state, id),
+          round: objective.round,
+          claimDeadline:
+            objective.completedTick === null
+              ? undefined
+              : worldProjectClaimDeadline(objective.completedTick),
+          nextDisplayName: cooperativeObjectiveDefinitions[next].displayName,
+        };
+      })()
+    : undefined;
+  const sharedProjects = Object.values(state?.sharedConstructionProjects ?? {});
+  const chatMessages = state?.social.messages ?? [];
+  const blockedPlayerIds = Object.keys(state?.social.blockedPlayers[playerId] ?? {});
+  const ownedSettlements = settlements.filter((settlement) => settlement.ownerId === playerId);
   const logisticsLinks = Object.values(state?.logisticsLinks ?? {});
   const logisticsTarget = state?.buildings[logisticsTargetId];
   const logisticsItems = logisticsTarget
     ? (() => {
-        const definition = buildingDefinitions[logisticsTarget.kind];
-        if (!('recipe' in definition)) return [] as Array<'ore' | 'wood' | 'ingot' | 'tool'>;
-        const recipe = Object.values(recipes).find(
-          (candidate) => candidate.id === definition.recipe,
-        );
-        return Object.keys(recipe?.input ?? {}) as Array<'ore' | 'wood' | 'ingot' | 'tool'>;
+        // Storage buffers any item; producers only accept their configured recipe inputs.
+        if (logisticsTarget.kind === 'storage') return ITEM_KINDS;
+        const recipe = recipeForBuilding(logisticsTarget);
+        return Object.keys(recipe?.input ?? {}) as ItemKind[];
       })()
     : [];
   const actionTile = selectedTile ?? (plot ? { x: plot.x, y: plot.y } : { x: 0, y: 0 });
   const selectedResource = terrainAt(actionTile.x, actionTile.y);
+  const inspectBuilding = (building: Building) => {
+    setSelectedTile({ x: building.x, y: building.y });
+    setSelectedEntity({ type: 'building', id: building.id });
+  };
+  const closeInspector = () => {
+    setSelectedTile(undefined);
+    setSelectedEntity(undefined);
+  };
+  /**
+   * The world facts a site is judged by, shared so the menu, the ghost on the map, and the
+   * click that places a building can never disagree about whether a tile will be accepted.
+   */
+  const placementRules: PlacementRules = {
+    unlocked: (technology) => Boolean(player?.research.unlocked[technology]),
+    inventory: player?.inventory ?? emptyInventory(),
+    isOpenSite: (tile) => Boolean(buildablePlacement(tile)),
+    terrainAt: (tile) => terrainAt(tile.x, tile.y),
+    minedAmount: (tile) => state?.minedTiles[`${tile.x}:${tile.y}`] ?? 0,
+  };
+  const buildMenu = buildMenuEntries(placementRules);
+  const armedEntry = buildMenu.find((entry) => entry.kind === armedKind);
+  const armedStatus = armedKind
+    ? placementStatus(armedKind, previewCandidate, placementRules)
+    : undefined;
+  /**
+   * Arms a building for placement. Doing it from a hotkey also opens the Build tab, so the
+   * armed entry and its cost are visible wherever the player pressed the key.
+   */
+  const armBuilding = (kind: Building['kind'] | undefined) => {
+    if (!kind) {
+      setArmedKind(undefined);
+      return;
+    }
+    const entry = buildMenu.find((candidate) => candidate.kind === kind);
+    if (!entry) return;
+    if (entry.unavailable) {
+      notify(`${entry.name}: ${entry.unavailable}`, 'warning');
+      return;
+    }
+    setHudTab('build');
+    setArmedKind(kind);
+  };
+  /**
+   * A map click places the armed building where the site allows it, and otherwise only moves
+   * the selection and answers why. Shift keeps the building armed for the next site.
+   */
+  const selectTile = (tile: { x: number; y: number }, modifiers: { shift: boolean }) => {
+    setSelectedTile(tile);
+    if (!armedKind || !armedEntry) return;
+    const status = placementStatus(armedKind, tile, placementRules);
+    if (!status.valid) {
+      notify(`Cannot place ${armedEntry.name.toLowerCase()}: ${status.reason}`, 'warning');
+      return;
+    }
+    send({ type: armedEntry.commandType, ...tile }, `Placing ${armedEntry.name.toLowerCase()}.`);
+    if (!modifiers.shift) setArmedKind(undefined);
+  };
+  latestHotkeyHandler.current = (event) => {
+    if (event.key === 'Escape') {
+      setArmedKind(undefined);
+      return;
+    }
+    // A camera binding on a digit keeps panning; only unbound digits arm a building.
+    if (Object.values(preferences.camera).includes(event.code)) return;
+    const kind = kindForHotkey(event.key);
+    if (!kind) return;
+    event.preventDefault();
+    armBuilding(kind);
+  };
   const ownedBuildings = Object.values(state?.buildings ?? {}).filter(
     (building) => building.ownerId === playerId,
   );
@@ -496,6 +685,155 @@ export const App = () => {
       ]
     : [];
   const nextOnboardingStep = onboardingSteps.find((step) => !step.complete);
+  const onboardingReservation = state?.onboardingReservations[playerId];
+  const activeAlertEntries: Array<InformationEntry & { readonly severity: NotificationSeverity }> =
+    player
+      ? [
+          ...(player.population.capacity <= player.population.total
+            ? [
+                {
+                  id: 'alert-housing',
+                  category: 'alerts' as const,
+                  severity: 'warning' as const,
+                  title: 'Housing is full',
+                  detail: 'Build housing before the settlement can grow.',
+                },
+              ]
+            : []),
+          ...(player.population.satisfaction < 50 && player.population.total > 2
+            ? [
+                {
+                  id: 'alert-wellbeing',
+                  category: 'alerts' as const,
+                  severity: 'warning' as const,
+                  title: 'Low wellbeing',
+                  detail: 'Surplus settlers may leave at the next settlement review.',
+                },
+              ]
+            : []),
+          ...(player.population.unemployed > 0
+            ? [
+                {
+                  id: 'alert-unemployed',
+                  category: 'alerts' as const,
+                  severity: 'info' as const,
+                  title: `${player.population.unemployed} settlers available`,
+                  detail: 'Build or prioritize production and construction work.',
+                },
+              ]
+            : []),
+          ...(!hasCompletedHearth
+            ? [
+                {
+                  id: 'alert-hearth',
+                  category: 'alerts' as const,
+                  severity: 'info' as const,
+                  title: 'Hearth needed',
+                  detail: 'Build a hearth to improve settlement wellbeing.',
+                },
+              ]
+            : []),
+          ...(activeThreats.length > 0
+            ? [
+                {
+                  id: 'alert-threats',
+                  category: 'alerts' as const,
+                  severity: 'critical' as const,
+                  title: `${activeThreats.length} active raider threat${activeThreats.length === 1 ? '' : 's'}`,
+                  detail: 'Review damaged targets, repairs, and watchtower coverage.',
+                },
+              ]
+            : []),
+        ]
+      : [];
+  const alertGroups = groupNotifications(activeAlertEntries);
+  const informationEntries: InformationEntry[] = player
+    ? [
+        ...Object.values(buildingDefinitions).map((definition) => {
+          const instances = ownedBuildings.filter((building) => building.kind === definition.id);
+          const constructing = instances.filter(
+            (building) => building.constructionTicks > 0,
+          ).length;
+          const technology = definition.requiredTechnology
+            ? technologies[definition.requiredTechnology]
+            : undefined;
+          return {
+            id: `construction-${definition.id}`,
+            category: 'construction' as const,
+            title: definition.displayName,
+            detail: `${amountLabel(definition.cost)}; ${definition.constructionTicks} worker ticks; ${instances.length} owned${constructing ? `, ${constructing} constructing` : ''}; ${technology ? `${technology.displayName} required` : 'available in the Founding era'}.`,
+            keywords: [definition.id, technology?.displayName ?? 'unlocked'],
+          };
+        }),
+        ...Object.values(recipes).map((recipe) => ({
+          id: `recipe-${recipe.id}`,
+          category: 'recipes' as const,
+          title: recipe.id,
+          detail: `${amountLabel(recipe.input)} → ${amountLabel(recipe.output)} in ${recipe.ticks} ticks.`,
+          keywords: [...Object.keys(recipe.input), ...Object.keys(recipe.output)],
+        })),
+        {
+          id: 'inventory-player',
+          category: 'inventory' as const,
+          title: 'Player inventory',
+          detail: amountLabel(player.inventory),
+          keywords: ['carried personal'],
+        },
+        ...manageableBuildings.map((building) => ({
+          id: `inventory-${building.id}`,
+          category: 'inventory' as const,
+          title: `${buildingDefinitions[building.kind].displayName} · ${building.id}`,
+          detail: `${amountLabel(building.inventory)}; ${building.inventoryCapacity} total capacity.`,
+          keywords: [building.kind, building.productionState],
+        })),
+        {
+          id: 'population-total',
+          category: 'population' as const,
+          title: 'Settlement population',
+          detail: `${player.population.total}/${player.population.capacity} housed; ${player.population.employed} employed; ${player.population.unemployed} available; ${player.population.satisfaction} wellbeing.`,
+          keywords: ['settlers jobs housing shelter satisfaction'],
+        },
+        ...Object.values(technologies).map((technology) => ({
+          id: `research-${technology.id}`,
+          category: 'research' as const,
+          title: technology.displayName,
+          detail: `${player.research.unlocked[technology.id] ? 'Unlocked' : player.research.activeTechnology === technology.id ? `${player.research.ticksRemaining} ticks remaining` : 'Available to research'}; costs ${amountLabel(technology.cost)}; prerequisites ${technology.prerequisites.join(', ') || 'none'}.`,
+          keywords: [technology.id, ...technology.prerequisites],
+        })),
+        {
+          id: 'defense-overview',
+          category: 'defense' as const,
+          title: 'Settlement defense',
+          detail: `${activeThreats.length} active threats; ${ownedBuildings.filter((building) => building.kind === 'watchtower' && building.constructionTicks === 0).length} completed watchtowers.`,
+          keywords: ['raiders watchtower repair health'],
+        },
+        ...activeThreats.map((threat) => ({
+          id: `defense-${threat.id}`,
+          category: 'defense' as const,
+          title: `Raider ${threat.id}`,
+          detail: `${threat.health} health; targeting ${threat.targetBuildingId} at ${threat.x}, ${threat.y}.`,
+          keywords: ['threat attack target'],
+        })),
+        ...(activeAlertEntries.length > 0
+          ? activeAlertEntries.map(({ severity, ...alert }) => ({
+              ...alert,
+              keywords: [...(alert.keywords ?? []), severity],
+            }))
+          : [
+              {
+                id: 'alerts-clear',
+                category: 'alerts' as const,
+                title: 'No active alerts',
+                detail: 'Housing, wellbeing, employment, hearth, and defense checks are clear.',
+              },
+            ]),
+      ]
+    : [];
+  const informationResults = searchInformation(
+    informationEntries,
+    informationQuery,
+    informationCategory,
+  );
 
   return (
     <main
@@ -505,23 +843,39 @@ export const App = () => {
       <WorldCanvas
         buildings={Object.values(state?.buildings ?? {})}
         threats={Object.values(state?.threats ?? {})}
+        carriers={Object.values(state?.carriers ?? {})}
         terrain={state?.terrain ?? {}}
+        elevation={state?.elevation ?? {}}
+        minedTiles={state?.minedTiles ?? {}}
         territory={state?.territory ?? {}}
+        roads={state?.roads ?? {}}
+        discoveries={Object.values(player?.discoveries ?? {})}
         logisticsLinks={logisticsLinks}
         operationsOverlay={operationsOverlay}
         cameraBindings={preferences.camera}
-        focus={
-          plot
-            ? { x: plot.x + Math.floor(plot.size / 2), y: plot.y + Math.floor(plot.size / 2) }
-            : { x: 0, y: 0 }
-        }
+        focus={initialCameraFocus(Object.values(state?.buildings ?? {}), playerId, plot)}
+        playerId={playerId}
+        playerPlot={plot}
+        hoveredTile={hoveredTile}
         selectedTile={selectedTile}
         placementPreview={
           previewCandidate
-            ? { tile: previewCandidate, valid: Boolean(previewPlacement) }
+            ? {
+                tile: previewCandidate,
+                valid: armedKind ? Boolean(armedStatus?.valid) : Boolean(previewPlacement),
+                ...(armedKind && armedEntry && armedStatus
+                  ? {
+                      armed: {
+                        kind: armedKind,
+                        name: armedEntry.name,
+                        reason: armedStatus.reason,
+                      },
+                    }
+                  : {}),
+              }
             : undefined
         }
-        onSelectTile={setSelectedTile}
+        onSelectTile={selectTile}
         onSelectEntity={setSelectedEntity}
         onHoverTile={setHoveredTile}
         onMetrics={setCanvasMetrics}
@@ -530,908 +884,262 @@ export const App = () => {
         assets={renderAssets}
         debug={rendererDebug}
       />
-      <aside className="hud">
-        <h1>Kings of Glory</h1>
-        <p className="map-help">
-          Map: drag to pan, scroll to zoom, arrows to select, {displayKey(preferences.camera.panUp)}
-          /{displayKey(preferences.camera.panLeft)}/{displayKey(preferences.camera.panDown)}/
-          {displayKey(preferences.camera.panRight)} to pan. Gray tiles are ore deposits, brown tiles
-          are timber groves, and blue tiles are public claimed sectors.
-        </p>
-        <p className="status">{status}</p>
-        {!renderAssets && !assetLoadError && (
-          <section className="asset-loading" aria-live="polite" aria-label="Loading map artwork">
-            <strong>Loading map artwork</strong>
-            <span>
-              {assetLoadProgress.loaded}/{assetLoadProgress.total} atlas
-              {assetLoadProgress.total === 1 ? '' : 'es'} loaded
-            </span>
-          </section>
-        )}
-        {assetLoadError && (
-          <section className="asset-loading error" role="alert">
-            <strong>Map artwork unavailable</strong>
-            <span>{assetLoadError}</span>
-            <button onClick={() => setAssetLoadAttempt((attempt) => attempt + 1)}>
-              Retry artwork
-            </button>
-          </section>
-        )}
-        {status === 'Maintenance' && (
-          <p className="alert" role="alert">
-            The server is completing maintenance. Refresh the page in a moment to reconnect.
+      <header className="game-topbar">
+        <div className="brand-lockup">
+          <h1>Kings of Glory</h1>
+          <p className="status">
+            <span className="status-dot" aria-hidden="true" />
+            {status}
+          </p>
+        </div>
+        {player && <ResourceBar inventory={player.inventory} rates={inventoryRates} />}
+        {player && nextOnboardingStep && (
+          <p className="onboarding-next">
+            <span>Next objective</span>
+            {nextOnboardingStep.text}
           </p>
         )}
-        {status === 'Upgrade required' && (
-          <p className="alert" role="alert">
-            This client no longer matches the server. Refresh the page to load the update.
-          </p>
-        )}
-        <section className="settings-panel" aria-labelledby="settings-title">
-          <h2 id="settings-title">Accessibility and controls</h2>
-          <label htmlFor="text-scale">Text size</label>
-          <select
-            id="text-scale"
-            value={preferences.textScale}
-            onChange={(event) =>
-              setPreferences((current) => ({
-                ...current,
-                textScale: Number(event.target.value) as ClientPreferences['textScale'],
-              }))
-            }
-          >
-            <option value={100}>Default</option>
-            <option value={120}>Large</option>
-            <option value={140}>Extra large</option>
-          </select>
-          <label className="checkbox-label" htmlFor="reduced-motion">
-            <input
-              id="reduced-motion"
-              type="checkbox"
-              checked={preferences.reducedMotion}
-              onChange={(event) =>
-                setPreferences((current) => ({ ...current, reducedMotion: event.target.checked }))
-              }
-            />
-            Reduce motion
-          </label>
-          <p className="settings-help">Focus a camera binding, then press its replacement key.</p>
-          {(
-            [
-              ['panUp', 'Pan up'],
-              ['panLeft', 'Pan left'],
-              ['panDown', 'Pan down'],
-              ['panRight', 'Pan right'],
-            ] as const
-          ).map(([action, label]) => (
-            <label key={action} htmlFor={`binding-${action}`}>
-              {label}
-              <input
-                id={`binding-${action}`}
-                className="binding-input"
-                readOnly
-                value={displayKey(preferences.camera[action])}
-                onKeyDown={rebindCamera(action)}
-                aria-describedby="camera-binding-help"
-              />
-            </label>
-          ))}
-          <p className="settings-help" id="camera-binding-help">
-            Arrow keys always select tiles; camera bindings must be unique.
-          </p>
+      </header>
+
+      <section className="map-toolbar" aria-label="Map layers">
+        <span className="map-toolbar-label">Map layers</span>
+        {MAP_LAYERS.map((layer) => (
           <button
+            aria-label={`${layer.label} map layer`}
+            aria-pressed={operationsOverlay === layer.id}
+            className={operationsOverlay === layer.id ? 'map-tool selected' : 'map-tool'}
+            key={layer.id}
+            onClick={() => setOperationsOverlay(layer.id)}
+            title={layer.label}
             type="button"
-            onClick={() => {
-              setPreferences(defaultPreferences);
-              notify('Accessibility and camera controls restored to defaults.');
-            }}
           >
-            Restore control defaults
+            <span aria-hidden="true">{layer.glyph}</span>
+            <span>{layer.label}</span>
           </button>
-        </section>
-        <details className="renderer-debug">
-          <summary>Renderer diagnostics</summary>
-          <p>Diagnostics are local-only and do not change the shared world.</p>
-          <label className="checkbox-label" htmlFor="renderer-debug-enabled">
-            <input
-              id="renderer-debug-enabled"
-              type="checkbox"
-              checked={rendererDebug.enabled}
-              onChange={(event) =>
-                setRendererDebug((current) => ({ ...current, enabled: event.target.checked }))
-              }
-            />
-            Show map overlays
-          </label>
-          <label className="checkbox-label" htmlFor="renderer-debug-coordinates">
-            <input
-              id="renderer-debug-coordinates"
-              type="checkbox"
-              disabled={!rendererDebug.enabled}
-              checked={rendererDebug.showCoordinates}
-              onChange={(event) =>
-                setRendererDebug((current) => ({
-                  ...current,
-                  showCoordinates: event.target.checked,
-                }))
-              }
-            />
-            Tile coordinates
-          </label>
-          <label className="checkbox-label" htmlFor="renderer-debug-chunks">
-            <input
-              id="renderer-debug-chunks"
-              type="checkbox"
-              disabled={!rendererDebug.enabled}
-              checked={rendererDebug.showChunks}
-              onChange={(event) =>
-                setRendererDebug((current) => ({ ...current, showChunks: event.target.checked }))
-              }
-            />
-            Chunk labels
-          </label>
-          <label className="checkbox-label" htmlFor="renderer-debug-entities">
-            <input
-              id="renderer-debug-entities"
-              type="checkbox"
-              disabled={!rendererDebug.enabled}
-              checked={rendererDebug.showEntityIds}
-              onChange={(event) =>
-                setRendererDebug((current) => ({ ...current, showEntityIds: event.target.checked }))
-              }
-            />
-            Entity IDs
-          </label>
-        </details>
-        <section className="operations-overlay" aria-labelledby="operations-overlay-title">
-          <h2 id="operations-overlay-title">Operations overlay</h2>
-          <label htmlFor="operations-overlay-select">
-            Map layer
-            <select
-              id="operations-overlay-select"
-              value={operationsOverlay}
-              onChange={(event) => setOperationsOverlay(event.target.value as OperationsOverlay)}
-            >
-              <option value="none">None</option>
-              <option value="resources">Resources</option>
-              <option value="logistics">Logistics flow</option>
-              <option value="production">Production state</option>
-              <option value="bottlenecks">Bottlenecks</option>
-            </select>
-          </label>
-          <p>Layers are local views of already-authorized world state.</p>
-        </section>
-        <details className="performance-panel">
-          <summary>Performance</summary>
-          <p>
-            {canvasMetrics?.framesPerSecond ?? '—'} FPS · {canvasMetrics?.renderedTiles ?? '—'}{' '}
-            tiles · {canvasMetrics?.visibleBuildings ?? '—'} buildings ·{' '}
-            {canvasMetrics?.visibleThreats ?? '—'} threats
-          </p>
-          <p>
-            {canvasMetrics?.activeChunks ?? '—'} active chunks · {messageRate.received} received/s ·{' '}
-            {messageRate.sent} sent/s
-          </p>
-        </details>
-        {!state && (
-          <section className="startup-card" aria-labelledby="startup-title">
-            <h2 id="startup-title">Entering the global world</h2>
-            <p>
-              {status === 'Connected'
-                ? 'Preparing your settlement and nearby map…'
-                : 'Connecting to the local game server…'}
-            </p>
-            <p>
-              Start both services with <code>npm run dev</code>, then refresh this page.
-            </p>
-          </section>
-        )}
-        {rendererError && (
-          <p className="alert" role="alert">
-            Map renderer unavailable: {rendererError}
-          </p>
-        )}
-        {player ? (
-          <>
-            <p>
-              Plot: {plot?.x}, {plot?.y}
-            </p>
-            <p>
-              Settlers {player.population.total}/{player.population.capacity} · Satisfaction{' '}
-              {player.population.satisfaction}
-            </p>
-            <p>
-              Jobs: {player.population.employed} employed · {player.population.unemployed} available
-            </p>
-            <p>
-              Exploration: {exploredChunkCount} explored · {visibleChunkCount} currently visible
-            </p>
-            {player.population.capacity <= player.population.total && (
-              <p className="alert">
-                Housing is full. Build housing before your settlement can grow.
-              </p>
-            )}
-            {player.population.satisfaction < 50 && player.population.total > 2 && (
-              <p className="alert">
-                Low wellbeing will cause surplus settlers to leave at the next settlement review.
-              </p>
-            )}
-            {player.population.unemployed > 0 && (
-              <p className="alert">
-                {player.population.unemployed} settler
-                {player.population.unemployed === 1 ? '' : 's'} need work. Build or prioritize a
-                smelter.
-              </p>
-            )}
-            {!hasCompletedHearth && (
-              <p className="alert">Build a hearth to improve settlement wellbeing.</p>
-            )}
-            <section className="settlement-stats" aria-labelledby="settlement-stats-title">
-              <h2 id="settlement-stats-title">Settlement needs</h2>
-              <p>
-                Shelter:{' '}
-                {player.population.capacity >= player.population.total ? 'met' : 'shortage'} (
-                {player.population.total}/{player.population.capacity})
-              </p>
-              <p>
-                Work: {player.population.employed}/{player.population.total} settlers assigned
-              </p>
-              <p>Wellbeing: {hasCompletedHearth ? 'hearth active' : 'hearth needed'}</p>
-            </section>
-            <p>
-              Ore {player.inventory.ore} · Wood {player.inventory.wood} · Ingot{' '}
-              {player.inventory.ingot} · Tool {player.inventory.tool}
-            </p>
-            <p>
-              Selected tile: {actionTile.x}, {actionTile.y}
-              {selectedResource === 'ore'
-                ? ' (ore deposit)'
-                : selectedResource === 'wood'
-                  ? ' (timber grove)'
-                  : ''}
-            </p>
-            {selectedEntity && (
-              <p>
-                Selected {selectedEntity.type}:{' '}
-                {selectedEntity.type === 'building'
-                  ? (state.buildings[selectedEntity.id]?.kind ?? selectedEntity.id)
-                  : `raider ${selectedEntity.id}`}
-              </p>
-            )}
-            {selectedTile && (
-              <p>
-                Sector:{' '}
-                {selectedTerritoryOwner ? `claimed by ${selectedTerritoryOwner}` : 'unclaimed'}
-              </p>
-            )}
-            <p className={selectedTile && !placement ? 'threat-active' : ''}>
-              {selectedTile
-                ? placement
-                  ? 'Selected tile is buildable'
-                  : 'Selected tile cannot be built on'
-                : 'Select a tile to choose a build site'}
-            </p>
-            <section className="onboarding" aria-labelledby="getting-started-title">
-              <h2 id="getting-started-title">Getting started</h2>
-              {nextOnboardingStep && (
-                <p className="onboarding-next">Next: {nextOnboardingStep.text}</p>
-              )}
-              <ol>
-                {onboardingSteps.map((step) => (
-                  <li className={step.complete ? 'complete' : undefined} key={step.text}>
-                    {step.complete ? 'Done: ' : ''}
-                    {step.text}
-                  </li>
-                ))}
-              </ol>
-            </section>
+        ))}
+      </section>
+
+      <aside className="hud" aria-label="Game controls">
+        <nav className="hud-tabs" role="tablist" aria-label="Interface sections">
+          {HUD_TABS.map(({ id, label, glyph }) => (
             <button
-              disabled={selectedResource !== 'ore' && selectedResource !== 'wood'}
-              onClick={() =>
-                send(
-                  { type: 'gather', ...actionTile },
-                  selectedResource === 'wood' ? 'Gathered wood.' : 'Gathered ore.',
-                )
-              }
+              aria-controls={`hud-panel-${id}`}
+              aria-selected={hudTab === id}
+              className={hudTab === id ? 'hud-tab selected' : 'hud-tab'}
+              id={`hud-tab-${id}`}
+              key={id}
+              onClick={() => setHudTab(id)}
+              onKeyDown={(event) => moveHudTabFocus(event, id)}
+              role="tab"
+              tabIndex={hudTab === id ? 0 : -1}
+              title={label}
+              type="button"
             >
-              Gather{' '}
-              {selectedResource === 'ore'
-                ? 'ore'
-                : selectedResource === 'wood'
-                  ? 'wood'
-                  : 'resource'}
+              <span className="hud-tab-glyph" aria-hidden="true">
+                {glyph}
+              </span>
+              <span>{label}</span>
             </button>
-            <h2>Construction</h2>
-            <button
-              disabled={!placement}
-              onClick={() => placement && send({ type: 'placeSmelter', ...placement })}
-            >
-              Place smelter ({buildingDefinitions.smelter.cost.wood} wood)
-            </button>
-            <button
-              disabled={!placement || !player.research.unlocked.metallurgy}
-              onClick={() => placement && send({ type: 'placeWorkshop', ...placement })}
-            >
-              Place workshop ({buildingDefinitions.workshop.cost.wood} wood;{' '}
-              {technologies.metallurgy.displayName} required)
-            </button>
-            <button
-              disabled={!placement}
-              onClick={() => placement && send({ type: 'placeStorage', ...placement })}
-            >
-              Place storage ({buildingDefinitions.storage.cost.wood} wood)
-            </button>
-            <button
-              disabled={!placement}
-              onClick={() => placement && send({ type: 'placeHousing', ...placement })}
-            >
-              Place housing ({buildingDefinitions.housing.cost.wood} wood)
-            </button>
-            <button
-              disabled={!placement}
-              onClick={() => placement && send({ type: 'placeHearth', ...placement })}
-            >
-              Place hearth ({buildingDefinitions.hearth.cost.wood} wood; wellbeing service)
-            </button>
-            <button
-              disabled={!placement || !player.research.unlocked.metallurgy}
-              onClick={() => placement && send({ type: 'placeWatchtower', ...placement })}
-            >
-              Place watchtower ({buildingDefinitions.watchtower.cost.wood} wood;{' '}
-              {technologies.metallurgy.displayName} required)
-            </button>
-            <h2>Defense</h2>
-            <p className={activeThreats.length > 0 ? 'threat-active' : ''}>
-              {activeThreats.length > 0
-                ? `${activeThreats.length} raider threat${activeThreats.length === 1 ? '' : 's'} active`
-                : 'No active raider threats'}
-            </p>
-            <h2>Cooperation</h2>
-            <label htmlFor="recipient-id">Recipient player ID</label>
-            <input
-              id="recipient-id"
-              value={recipientId}
-              onChange={(event) => setRecipientId(event.target.value)}
-              placeholder="dev-…"
-            />
-            <label htmlFor="recipient-item">Resource to send</label>
-            <select
-              id="recipient-item"
-              value={recipientItem}
-              onChange={(event) =>
-                setRecipientItem(event.target.value as 'ore' | 'wood' | 'ingot' | 'tool')
-              }
-            >
-              <option value="ore">Ore</option>
-              <option value="wood">Wood</option>
-              <option value="ingot">Ingot</option>
-              <option value="tool">Tool</option>
-            </select>
-            <button
-              disabled={!recipientId.trim() || player.inventory[recipientItem] < 1}
-              onClick={() =>
-                send({
-                  type: 'transferToPlayer',
-                  targetPlayerId: recipientId.trim(),
-                  item: recipientItem,
-                  amount: 1,
-                })
-              }
-            >
-              Send 1 {recipientItem}
-            </button>
-            <section className="settlement-panel" aria-labelledby="settlement-title">
-              <h2 id="settlement-title">Settlement roles</h2>
-              <p>
-                Owners invite members. Builders maintain production; logistics members move items.
-              </p>
-              <label htmlFor="invitee-id">Invite player ID</label>
-              <input
-                id="invitee-id"
-                value={inviteeId}
-                onChange={(event) => setInviteeId(event.target.value)}
-                placeholder="dev-player"
-              />
-              <button
-                disabled={!personalSettlement || !inviteeId.trim()}
-                onClick={() =>
-                  personalSettlement &&
-                  send({
-                    type: 'inviteToSettlement',
-                    settlementId: personalSettlement.id,
-                    targetPlayerId: inviteeId.trim(),
-                  })
-                }
+          ))}
+        </nav>
+        <div className="hud-surface">
+          <header className="hud-header">
+            {!renderAssets && !assetLoadError && (
+              <section
+                className="asset-loading"
+                aria-live="polite"
+                aria-label="Loading map artwork"
               >
-                Invite to my settlement
-              </button>
-              {settlements.map((settlement) => {
-                const role = settlement.members[playerId];
-                const invited = settlement.invitations[playerId];
-                return (
-                  <section className="settlement" key={settlement.id}>
-                    <strong>{settlement.id}</strong>
-                    {invited && !role && (
-                      <button
-                        onClick={() =>
-                          send({ type: 'acceptSettlementInvite', settlementId: settlement.id })
-                        }
-                      >
-                        Accept invitation
-                      </button>
-                    )}
-                    {role && (
-                      <>
-                        <span>Your role: {role}</span>
-                        {role !== 'owner' && (
-                          <button
-                            onClick={() =>
-                              send({ type: 'leaveSettlement', settlementId: settlement.id })
-                            }
-                          >
-                            Leave settlement
-                          </button>
-                        )}
-                        <ul className="member-list">
-                          {Object.entries(settlement.members).map(([memberId, memberRole]) => (
-                            <li key={memberId}>
-                              {memberId}: {memberRole}
-                              {role === 'owner' && memberId !== playerId && (
-                                <span className="role-controls">
-                                  <button
-                                    onClick={() =>
-                                      send({
-                                        type: 'setSettlementRole',
-                                        settlementId: settlement.id,
-                                        targetPlayerId: memberId,
-                                        role: 'builder',
-                                      })
-                                    }
-                                  >
-                                    Builder
-                                  </button>
-                                  <button
-                                    onClick={() =>
-                                      send({
-                                        type: 'setSettlementRole',
-                                        settlementId: settlement.id,
-                                        targetPlayerId: memberId,
-                                        role: 'logistics',
-                                      })
-                                    }
-                                  >
-                                    Logistics
-                                  </button>
-                                  <button
-                                    onClick={() =>
-                                      send({
-                                        type: 'setSettlementRole',
-                                        settlementId: settlement.id,
-                                        targetPlayerId: memberId,
-                                        role: 'member',
-                                      })
-                                    }
-                                  >
-                                    Member
-                                  </button>
-                                  <button
-                                    onClick={() =>
-                                      send({
-                                        type: 'transferSettlementOwnership',
-                                        settlementId: settlement.id,
-                                        targetPlayerId: memberId,
-                                      })
-                                    }
-                                  >
-                                    Transfer ownership
-                                  </button>
-                                  <button
-                                    onClick={() =>
-                                      send({
-                                        type: 'removeSettlementMember',
-                                        settlementId: settlement.id,
-                                        targetPlayerId: memberId,
-                                      })
-                                    }
-                                  >
-                                    Remove member
-                                  </button>
-                                </span>
-                              )}
-                            </li>
-                          ))}
-                        </ul>
-                      </>
-                    )}
-                  </section>
-                );
-              })}
-            </section>
-            {transfers.length > 0 && (
-              <section aria-labelledby="transfer-history-title">
-                <h2 id="transfer-history-title">Recent transfers</h2>
-                <ul className="transfer-history">
-                  {transfers.slice(-5).map((transfer) => (
-                    <li key={transfer.id}>
-                      {transfer.fromPlayerId === playerId ? 'Sent' : 'Received'} {transfer.amount}{' '}
-                      {transfer.item} {transfer.fromPlayerId === playerId ? 'to' : 'from'}{' '}
-                      {transfer.fromPlayerId === playerId
-                        ? transfer.toPlayerId
-                        : transfer.fromPlayerId}
-                    </li>
-                  ))}
-                </ul>
+                <strong>Loading map artwork</strong>
+                <span>
+                  {assetLoadProgress.loaded}/{assetLoadProgress.total} atlas
+                  {assetLoadProgress.total === 1 ? '' : 'es'} loaded
+                </span>
               </section>
             )}
-            <section className="automation-panel" aria-labelledby="automation-title">
-              <h2 id="automation-title">Automation</h2>
-              <p>
-                Link completed storage or production buildings to a producer. Higher-priority links
-                reserve source and target capacity first; each link uses its configured throughput.
+            {assetLoadError && (
+              <section className="asset-loading error" role="alert">
+                <strong>Map artwork unavailable</strong>
+                <span>{assetLoadError}</span>
+                <button onClick={() => setAssetLoadAttempt((attempt) => attempt + 1)}>
+                  Retry artwork
+                </button>
+              </section>
+            )}
+            {status === 'Maintenance' && (
+              <p className="alert" role="alert">
+                The server is completing maintenance. Refresh the page in a moment to reconnect.
               </p>
-              <label htmlFor="logistics-source">Source</label>
-              <select
-                id="logistics-source"
-                value={logisticsSourceId}
-                onChange={(event) => setLogisticsSourceId(event.target.value)}
-              >
-                <option value="">Choose source</option>
-                {logisticsSources.map((building) => (
-                  <option key={building.id} value={building.id}>
-                    {building.id}
-                  </option>
-                ))}
-              </select>
-              <label htmlFor="logistics-target">Producer target</label>
-              <select
-                id="logistics-target"
-                value={logisticsTargetId}
-                onChange={(event) => setLogisticsTargetId(event.target.value)}
-              >
-                <option value="">Choose producer</option>
-                {logisticsTargets.map((building) => (
-                  <option key={building.id} value={building.id}>
-                    {building.id}
-                  </option>
-                ))}
-              </select>
-              <label htmlFor="logistics-item">Input item</label>
-              <select
-                id="logistics-item"
-                value={logisticsItems.includes(logisticsItem) ? logisticsItem : ''}
-                onChange={(event) =>
-                  setLogisticsItem(event.target.value as 'ore' | 'wood' | 'ingot' | 'tool')
-                }
-              >
-                <option value="">Choose input</option>
-                {logisticsItems.map((item) => (
-                  <option key={item} value={item}>
-                    {item}
-                  </option>
-                ))}
-              </select>
-              <button
-                disabled={
-                  !logisticsSourceId ||
-                  !logisticsTargetId ||
-                  !logisticsItems.includes(logisticsItem)
-                }
-                onClick={() =>
-                  send({
-                    type: 'createLogisticsLink',
-                    sourceBuildingId: logisticsSourceId,
-                    targetBuildingId: logisticsTargetId,
-                    item: logisticsItem,
-                  })
-                }
-              >
-                Create input link
-              </button>
-              {logisticsLinks.map((link) => {
-                const source = state?.buildings[link.sourceBuildingId];
-                const target = state?.buildings[link.targetBuildingId];
-                const canRemove =
-                  link.ownerId === playerId ||
-                  (source &&
-                    target &&
-                    ['owner', 'logistics'].includes(roleForBuilding(source) ?? '') &&
-                    ['owner', 'logistics'].includes(roleForBuilding(target) ?? ''));
-                return (
-                  <p className="logistics-link" key={link.id}>
-                    {link.sourceBuildingId} → {link.targetBuildingId} ({link.item},{' '}
-                    {link.throughputPerTick}/tick, {link.status.replaceAll('-', ' ')})
-                    <select
-                      aria-label={`Priority for ${link.id}`}
-                      disabled={!canRemove}
-                      value={link.priority}
-                      onChange={(event) =>
-                        send({
-                          type: 'setLogisticsPriority',
-                          linkId: link.id,
-                          priority: Number(event.target.value),
-                        })
-                      }
-                    >
-                      <option value={0}>Paused</option>
-                      <option value={1}>Normal</option>
-                      <option value={2}>High</option>
-                      <option value={3}>Urgent</option>
-                    </select>
-                    <button
-                      disabled={!canRemove}
-                      onClick={() => send({ type: 'removeLogisticsLink', linkId: link.id })}
-                    >
-                      Remove
-                    </button>
-                  </p>
-                );
-              })}
-            </section>
-            <h2>Progression</h2>
-            <p>
-              Research: {player.research.activeTechnology ?? 'idle'} (
-              {player.research.ticksRemaining} ticks)
-            </p>
-            <button
-              disabled={
-                Boolean(player.research.activeTechnology) ||
-                player.research.unlocked.metallurgy ||
-                !canAffordTechnology(technologies.metallurgy.cost)
-              }
-              onClick={() => send({ type: 'research', technologyId: 'metallurgy' })}
-            >
-              Research {technologies.metallurgy.displayName} (
-              {technologyCostLabel(technologies.metallurgy.cost)})
-            </button>
-            <button
-              disabled={
-                Boolean(player.research.activeTechnology) ||
-                !player.research.unlocked.metallurgy ||
-                player.research.unlocked['territorial-charter'] ||
-                !canAffordTechnology(technologies['territorial-charter'].cost)
-              }
-              onClick={() => send({ type: 'research', technologyId: 'territorial-charter' })}
-            >
-              Research {technologies['territorial-charter'].displayName} (
-              {technologyCostLabel(technologies['territorial-charter'].cost)})
-            </button>
-            <button onClick={() => send({ type: 'explore', ...frontier })}>Explore frontier</button>
-            <button
-              disabled={!player.research.unlocked['territorial-charter']}
-              onClick={() => send({ type: 'claimTerritory', ...frontier })}
-            >
-              Claim frontier sector
-            </button>
-            <h2>Buildings</h2>
-            {manageableBuildings.map((building) => {
-              const role = roleForBuilding(building);
-              const canBuild = role === 'owner' || role === 'builder';
-              const canMoveItems = role === 'owner' || role === 'logistics';
-              const recipe = recipeForBuilding(building);
-              const recipeOptions = recipeOptionsForBuilding(building);
-              const configurationTargets = manageableBuildings.filter(
-                (candidate) =>
-                  candidate.id !== building.id &&
-                  candidate.kind === building.kind &&
-                  candidate.constructionTicks === 0,
-              );
-              const missingInputs = recipe
-                ? Object.entries(recipe.input).filter(
-                    ([item, amount]) =>
-                      building.inventory[item as keyof typeof building.inventory] < amount,
-                  )
-                : [];
-              return (
-                <section className="building" key={building.id}>
-                  <strong>{building.kind}</strong>
-                  {building.ownerId !== playerId && <span>Shared by {building.ownerId}</span>}
-                  <span>
-                    Health {building.health}/{building.maxHealth}
-                  </span>
-                  {building.health < building.maxHealth && (
-                    <span className="alert">
-                      Damaged by a threat or acid rain. Repair to restore production and protect
-                      this building.
-                    </span>
-                  )}
-                  <span>
-                    Inventory: ore {building.inventory.ore} · wood {building.inventory.wood} · ingot{' '}
-                    {building.inventory.ingot} · tool {building.inventory.tool}
-                  </span>
-                  {building.populationCapacity > 0 && (
-                    <span>Housing capacity: {building.populationCapacity}</span>
-                  )}
-                  {building.constructionTicks > 0 ? (
-                    <>
-                      <span>Construction: {building.constructionTicks} worker ticks</span>
-                      {Object.values(building.constructionMaterials).some(
-                        (amount) => amount > 0,
-                      ) && (
-                        <span>
-                          Delivery remaining: ore {building.constructionMaterials.ore} Â· wood{' '}
-                          {building.constructionMaterials.wood} Â· ingot{' '}
-                          {building.constructionMaterials.ingot} Â· tool{' '}
-                          {building.constructionMaterials.tool}
-                        </span>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      {recipe && (
-                        <>
-                          {recipeOptions.length > 1 && (
-                            <label>
-                              Recipe
-                              <select
-                                disabled={!canBuild || building.progress > 0}
-                                value={building.recipeId ?? ''}
-                                onChange={(event) =>
-                                  send({
-                                    type: 'setRecipe',
-                                    buildingId: building.id,
-                                    recipeId: event.target.value,
-                                  })
-                                }
-                              >
-                                {recipeOptions.map((option) => (
-                                  <option key={option.id} value={option.id}>
-                                    {option.id}: {technologyCostLabel(option.input)} →{' '}
-                                    {technologyCostLabel(option.output)}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                          )}
-                          <span>
-                            Production: {building.progress}/{recipe.ticks} ticks
-                          </span>
-                          <span>Machine: {building.productionState.replaceAll('-', ' ')}</span>
-                          {building.health === building.maxHealth &&
-                            building.jobPriority > 0 &&
-                            building.progress === 0 &&
-                            missingInputs.length > 0 && (
-                              <span className="alert">
-                                Stalled: needs{' '}
-                                {missingInputs
-                                  .map(([item, amount]) => `${amount} ${item}`)
-                                  .join(' and ')}
-                                .
-                              </span>
-                            )}
-                        </>
-                      )}
-                      {(building.kind === 'smelter' || building.kind === 'workshop') && (
-                        <>
-                          <label>
-                            Job priority
-                            <select
-                              disabled={!canBuild}
-                              value={building.jobPriority}
-                              onChange={(event) =>
-                                send({
-                                  type: 'setJobPriority',
-                                  buildingId: building.id,
-                                  priority: Number(event.target.value),
-                                })
-                              }
-                            >
-                              <option value={0}>Paused</option>
-                              <option value={1}>Normal</option>
-                              <option value={2}>High</option>
-                              <option value={3}>Urgent</option>
-                            </select>
-                          </label>
-                          {configurationTargets.length > 0 && (
-                            <label>
-                              Copy settings to
-                              <select
-                                defaultValue=""
-                                disabled={!canBuild || building.progress > 0}
-                                onChange={(event) => {
-                                  if (!event.target.value) return;
-                                  send({
-                                    type: 'copyBuildingConfiguration',
-                                    sourceBuildingId: building.id,
-                                    targetBuildingId: event.target.value,
-                                  });
-                                  event.target.value = '';
-                                }}
-                              >
-                                <option value="">Choose producer</option>
-                                {configurationTargets.map((target) => (
-                                  <option key={target.id} value={target.id}>
-                                    {target.id}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                          )}
-                        </>
-                      )}
-                      <button
-                        disabled={!canMoveItems || player.inventory.ore < 1}
-                        onClick={() => transfer(building, 'ore', 'toBuilding')}
-                      >
-                        Load 1 ore
-                      </button>
-                      <button
-                        disabled={!canMoveItems || player.inventory.wood < 1}
-                        onClick={() => transfer(building, 'wood', 'toBuilding')}
-                      >
-                        Load 1 wood
-                      </button>
-                      <button
-                        disabled={!canMoveItems || player.inventory.ingot < 1}
-                        onClick={() => transfer(building, 'ingot', 'toBuilding')}
-                      >
-                        Load 1 ingot
-                      </button>
-                      <button
-                        disabled={!canMoveItems || building.inventory.ingot < 1}
-                        onClick={() => transfer(building, 'ingot', 'toPlayer')}
-                      >
-                        Take 1 ingot
-                      </button>
-                      <button
-                        disabled={!canMoveItems || building.inventory.tool < 1}
-                        onClick={() => transfer(building, 'tool', 'toPlayer')}
-                      >
-                        Take 1 tool
-                      </button>
-                      {building.kind === 'smelter' && (
-                        <button
-                          disabled={!canBuild}
-                          onClick={() => send({ type: 'smelt', buildingId: building.id })}
-                        >
-                          Start smelting
-                        </button>
-                      )}
-                      <button
-                        disabled={!canBuild || building.health >= building.maxHealth}
-                        onClick={() => send({ type: 'repair', buildingId: building.id })}
-                      >
-                        Repair
-                      </button>
-                      {building.kind !== 'settlement-center' && (
-                        <button
-                          disabled={!canBuild}
-                          onClick={() => send({ type: 'demolish', buildingId: building.id })}
-                        >
-                          Demolish
-                        </button>
-                      )}
-                    </>
-                  )}
-                  {building.constructionTicks > 0 && building.kind !== 'settlement-center' && (
-                    <button
-                      disabled={!canBuild}
-                      onClick={() => send({ type: 'cancelConstruction', buildingId: building.id })}
-                    >
-                      Cancel construction
-                    </button>
-                  )}
-                </section>
-              );
-            })}
-          </>
-        ) : (
-          <p>Loading world…</p>
-        )}
+            )}
+            {status === 'Upgrade required' && (
+              <p className="alert" role="alert">
+                This client no longer matches the server. Refresh the page to load the update.
+              </p>
+            )}
+            {!state && (
+              <section className="startup-card" aria-labelledby="startup-title">
+                <h2 id="startup-title">Entering the global world</h2>
+                <p>
+                  {status === 'Connected'
+                    ? 'Preparing your settlement and nearby map…'
+                    : 'Connecting to the local game server…'}
+                </p>
+                <p>
+                  Start both services with <code>npm run dev</code>, then refresh this page.
+                </p>
+              </section>
+            )}
+            {rendererError && (
+              <p className="alert" role="alert">
+                Map renderer unavailable: {rendererError}
+              </p>
+            )}
+          </header>
+          <BuildPanel
+            hidden={hudTab !== 'build'}
+            state={state}
+            player={player}
+            playerId={playerId}
+            preferences={preferences}
+            selectedBuildingId={selectedBuildingId}
+            buildMenu={buildMenu}
+            armedKind={armedKind}
+            armedName={armedEntry?.name}
+            armedStatus={armedStatus}
+            onArm={armBuilding}
+            onInspectBuilding={inspectBuilding}
+            manageableBuildings={manageableBuildings}
+            roleForBuilding={roleForBuilding}
+            logisticsLinks={logisticsLinks}
+            logisticsSources={logisticsSources}
+            logisticsTargets={logisticsTargets}
+            logisticsItems={logisticsItems}
+            logisticsSourceId={logisticsSourceId}
+            setLogisticsSourceId={setLogisticsSourceId}
+            logisticsTargetId={logisticsTargetId}
+            setLogisticsTargetId={setLogisticsTargetId}
+            logisticsItem={logisticsItem}
+            setLogisticsItem={setLogisticsItem}
+            send={send}
+          />
+          <SettlementPanel
+            hidden={hudTab !== 'settlement'}
+            player={player}
+            plot={plot}
+            progressionEra={progressionEra}
+            worldTick={state?.tick ?? 0}
+            onboardingSteps={onboardingSteps ?? []}
+            onboardingReservation={onboardingReservation}
+            hasCompletedHearth={hasCompletedHearth}
+            exploredChunkCount={exploredChunkCount}
+            visibleChunkCount={visibleChunkCount}
+            researchEntries={research}
+            messageLog={messageLog}
+            activeAlertEntries={activeAlertEntries}
+            alertGroups={alertGroups}
+            informationQuery={informationQuery}
+            setInformationQuery={setInformationQuery}
+            informationCategory={informationCategory}
+            setInformationCategory={setInformationCategory}
+            informationResults={informationResults}
+            send={send}
+          />
+          <WorldPanel
+            hidden={hudTab !== 'world'}
+            player={player}
+            activeThreats={activeThreats}
+            selectedTile={selectedTile}
+            selectedSector={selectedSector}
+            worldMap={worldMap}
+            worldMapLoading={worldMapLoading}
+            requestWorldMap={requestWorldMap}
+            send={send}
+          />
+          <CoopPanel
+            hidden={hudTab !== 'coop'}
+            state={state}
+            player={player}
+            playerId={playerId}
+            selectedTile={selectedTile}
+            settlements={settlements}
+            ownedSettlements={ownedSettlements}
+            personalSettlement={personalSettlement}
+            sharedProjects={sharedProjects}
+            worldProject={worldProject}
+            transfers={transfers}
+            chatMessages={chatMessages}
+            chatText={chatText}
+            setChatText={setChatText}
+            chatSettlementId={chatSettlementId}
+            setChatSettlementId={setChatSettlementId}
+            blockedPlayerIds={blockedPlayerIds}
+            directory={directory}
+            directoryQuery={directoryQuery}
+            setDirectoryQuery={setDirectoryQuery}
+            requestDirectory={requestDirectory}
+            inviteeId={inviteeId}
+            setInviteeId={setInviteeId}
+            recipientId={recipientId}
+            setRecipientId={setRecipientId}
+            recipientItem={recipientItem}
+            setRecipientItem={setRecipientItem}
+            playerNameDraft={playerNameDraft}
+            setPlayerNameDraft={setPlayerNameDraft}
+            settlementNameDraft={settlementNameDraft}
+            setSettlementNameDraft={setSettlementNameDraft}
+            accountDeletionConfirmation={accountDeletionConfirmation}
+            setAccountDeletionConfirmation={setAccountDeletionConfirmation}
+            send={send}
+          />
+          <SettingsPanel
+            hidden={hudTab !== 'settings'}
+            preferences={preferences}
+            setPreferences={setPreferences}
+            rebindCamera={rebindCamera}
+            rendererDebug={rendererDebug}
+            setRendererDebug={setRendererDebug}
+            canvasMetrics={canvasMetrics}
+            renderAssets={renderAssets}
+            messageRate={messageRate}
+            updateApplicationMs={updateApplicationMs}
+            notify={notify}
+          />
+        </div>
       </aside>
+      <ContextInspector
+        state={state}
+        player={player}
+        playerId={playerId}
+        selectedTile={selectedTile}
+        selectedEntity={selectedEntity}
+        selectedBuildingId={selectedBuildingId}
+        selectedResource={selectedResource}
+        selectedTerritoryOwner={selectedTerritoryOwner}
+        actionTile={actionTile}
+        placement={placement}
+        manageableBuildings={manageableBuildings}
+        roleForBuilding={roleForBuilding}
+        transfer={transfer}
+        send={send}
+        onClose={closeInspector}
+      />
       <div className="toast-region" role="status" aria-live="polite">
-        {notice.text && (
-          <div className="toast" key={notice.seq}>
-            <span className="toast-message">{notice.text}</span>
+        {notices.map((notice) => (
+          <div className={`toast ${notice.severity}`} key={notice.id}>
+            <span className="toast-message">
+              {notice.text}
+              {notice.count > 1 ? ` ×${notice.count}` : ''}
+            </span>
             <button
               type="button"
               className="toast-dismiss"
               aria-label="Dismiss notification"
-              onClick={dismissNotice}
+              onClick={() => dismissNotice(notice.id)}
             >
               ×
             </button>
           </div>
-        )}
+        ))}
       </div>
     </main>
   );

@@ -1,14 +1,286 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="192" viewBox="0 0 256 192">
-  <g stroke="#182337" stroke-width="3" stroke-linejoin="round">
-    <g transform="translate(0 0)"><path fill="#e6c45d" d="M8 50 20 22h24l12 28Z"/><path fill="#fff0a5" d="M24 22h16v18H24z"/><path fill="#9c7131" d="M6 50h52v6H6z"/></g>
-    <g transform="translate(64 0)"><path fill="#b75835" d="M8 50 13 25h38l5 25Z"/><path fill="#f1b15c" d="M21 15h22v15H21z"/><path fill="#704031" d="M18 34h28v16H18z"/></g>
-    <g transform="translate(128 0)"><path fill="#c9783e" d="M8 49 12 26h40l4 23Z"/><path fill="#e7c36a" d="M14 22 32 10l18 12Z"/><path fill="#5d3930" d="M21 34h22v15H21z"/></g>
-    <g transform="translate(192 0)"><path fill="#8e7049" d="M10 50V20h44v30Z"/><path fill="#c7a768" d="M8 22 32 8l24 14Z"/><path fill="#43342d" d="M18 30h28v20H18z"/></g>
-    <g transform="translate(0 64)"><path fill="#ba8753" d="M12 51V27l20-14 20 14v24Z"/><path fill="#e6c38a" d="M8 29 32 10l24 19Z"/><path fill="#6a4837" d="M25 36h14v15H25z"/></g>
-    <g transform="translate(64 64)"><path fill="#d88a3b" d="M14 50V31h36v19Z"/><path fill="#f3c65f" d="M10 33 32 15l22 18Z"/><path fill="#7c432d" d="M26 37h12v13H26z"/></g>
-    <g transform="translate(128 64)"><path fill="#8d9eb0" d="M27 51V16h10v35Z"/><path fill="#d3dce5" d="M20 20 32 8l12 12Z"/><path fill="#596a7c" d="M18 51h28v5H18z"/></g>
-    <g transform="translate(192 64)"><path fill="#a57843" d="M20 52 25 25h14l5 27Z"/><path fill="#efd18b" d="M16 27 32 10l16 17Z"/><path fill="#fff2bf" d="M23 48h18v4H23z"/></g>
-    <g transform="translate(0 128)"><path fill="#dc4e4e" d="m14 42 8-18 10 9 10-9 8 18-8 10H22Z"/><circle fill="#fff1d6" cx="26" cy="39" r="3"/><circle fill="#fff1d6" cx="38" cy="39" r="3"/></g>
-    <g transform="translate(64 128)" fill="none" stroke="#f6d365" stroke-width="4"><path d="m8 38 24-16 24 16-24 16Z"/><path d="m16 38 16-10 16 10-16 10Z"/></g>
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="768" viewBox="0 0 320 384">
+  <!--
+    Authored in 64x64 design cells and rasterised at 2x so the renderer can draw one
+    design pixel per logical pixel without blurring on high-density displays.
+    Every building rests on a base diamond centred at (32, 48) in cell coordinates and
+    is lit from the upper left: left faces are the lighter tone of each pair.
+  -->
+  <g stroke="#141d2e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round">
+    <g transform="translate(0 0)">
+      <!-- settlement centre: stone hall under a hipped roof -->
+      <path fill="#d7c6a4" d="M8 48 32 60 32 46 8 34Z" />
+      <path fill="#a4906f" d="M32 60 56 48 56 34 32 46Z" />
+      <path fill="#6d4b32" d="M16 52 22 55 22 47 16 44Z" />
+      <path fill="#c05a44" d="M5 35 32 47 32 8Z" />
+      <path fill="#8e3b30" d="M32 47 59 35 32 8Z" />
+      <path fill="#e2e7eb" stroke="none" d="M31.4 2 32.9 2 32.9 10 31.4 10Z" />
+      <path fill="#e0b64a" d="M33 2.5 41 5 33 7.5Z" />
+    </g>
+    <g transform="translate(64 0)">
+      <!-- smelter: banded furnace with a chimney and a lit mouth -->
+      <path fill="#96969f" d="M8 48 32 60 32 48 8 36Z" />
+      <path fill="#6e6e7a" d="M32 60 56 48 56 36 32 48Z" />
+      <path fill="#7e7e8b" d="M8 36 32 24 56 36 32 48Z" />
+      <path fill="#8b8b96" d="M30 24 37 27.5 37 12.5 30 9Z" />
+      <path fill="#64646f" d="M37 27.5 44 24 44 9 37 12.5Z" />
+      <path fill="#9a9aa6" d="M30 9 37 5.5 44 9 37 12.5Z" />
+      <circle fill="#cfd8e0" cx="37" cy="4.5" r="3.4" />
+      <circle fill="#b6c2cd" cx="45" cy="7.5" r="2.4" />
+      <path fill="#f0a03c" d="M14 46 22 50 22 42 14 38Z" />
+      <path fill="#ffe08a" stroke="none" d="M16.5 45 20 46.8 20 43 16.5 41.2Z" />
+    </g>
+    <g transform="translate(128 0)">
+      <!-- workshop: timber walls under a slate gable -->
+      <path fill="#c9a878" d="M8 48 32 60 32 48 8 36Z" />
+      <path fill="#96784e" d="M32 60 56 48 56 36 32 48Z" />
+      <path fill="#7493a5" d="M5 37 32 50 32 14Z" />
+      <path fill="#587482" d="M32 50 59 37 32 14Z" />
+      <path fill="#7fb6d6" d="M38 49 46 45 46 39 38 43Z" />
+    </g>
+    <g transform="translate(192 0)">
+      <!-- storage: flat-roofed warehouse stacked with crates -->
+      <path fill="#b09a78" d="M8 48 32 60 32 46 8 34Z" />
+      <path fill="#856d52" d="M32 60 56 48 56 34 32 46Z" />
+      <path fill="#c0a984" d="M8 34 32 22 56 34 32 46Z" />
+      <path fill="#5c4229" d="M14 47 24 52 24 42 14 37Z" />
+      <path fill="#cfa96a" d="M18 30 24 33 24 25 18 22Z" />
+      <path fill="#a5813f" d="M24 33 30 30 30 22 24 25Z" />
+      <path fill="#cfa96a" d="M34 32 40 35 40 28 34 25Z" />
+      <path fill="#a5813f" d="M40 35 46 32 46 25 40 28Z" />
+    </g>
+    <g transform="translate(256 0)">
+      <!-- housing: thatched cottage -->
+      <path fill="#dccca9" d="M10 49 32 60 32 49 10 38Z" />
+      <path fill="#ac9c7e" d="M32 60 54 49 54 38 32 49Z" />
+      <path fill="#cba15a" d="M7 39 32 51 32 16Z" />
+      <path fill="#a17b38" d="M32 51 57 39 32 16Z" />
+      <path fill="#74a9c8" d="M17 47.5 23 50.5 23 44.5 17 41.5Z" />
+    </g>
+
+    <g transform="translate(0 64)">
+      <!-- hearth: ringed fire pit -->
+      <circle fill="#f0932c" opacity=".26" stroke="none" cx="32" cy="42" r="14" />
+      <path fill="#8e8678" d="M12 50 32 60 52 50 32 40Z" />
+      <path fill="#3a3730" d="M20 50 32 56 44 50 32 44Z" />
+      <path fill="#f0932c" d="M32 45c-6-8-3-12 0-20 3 8 6 12 0 20Z" />
+      <path fill="#ffd166" stroke="none" d="M32 42c-3.5-5-1.8-8 0-12 1.8 4 3.5 7 0 12Z" />
+      <circle fill="#a8a094" cx="14" cy="49" r="3" />
+      <circle fill="#a8a094" cx="50" cy="49" r="3" />
+      <circle fill="#a8a094" cx="32" cy="59" r="3" />
+    </g>
+    <g transform="translate(64 64)">
+      <!-- watchtower: crenellated keep with a pennant -->
+      <path fill="#a3aab2" d="M14 50 32 58 32 28 14 20Z" />
+      <path fill="#7b838d" d="M32 58 50 50 50 20 32 28Z" />
+      <path fill="#b9c0c7" d="M14 20 32 12 50 20 32 28Z" />
+      <path fill="#8b939b" stroke="none" d="M14 36 32 44 50 36 32 28Z" />
+      <path fill="#c7ced4" d="M16 19 20 21 20 13 16 11Z" />
+      <path fill="#97a0a8" d="M44 21 48 19 48 11 44 13Z" />
+      <path fill="#d9584f" d="M32 3 44 6 32 9Z" />
+      <path fill="#e2e7eb" stroke="none" d="M31 2 33 2 33 13 31 13Z" />
+    </g>
+    <g transform="translate(128 64)">
+      <!-- mine: timbered adit cut into a rock face -->
+      <path fill="#7c848f" d="M6 52 14 30 32 20 52 30 58 52 32 60Z" />
+      <path fill="#8e96a1" stroke="none" d="M14 30.5 32 20.5 32 59 6.5 51.5Z" />
+      <path fill="#262c36" d="M25 54V41c0-6 14-6 14 0v13Z" />
+      <path fill="#b5822f" d="M21 41h22v4H21Z" />
+      <path fill="#9a6f28" d="M21 54h4V41h-4Zm18 0h4V41h-4Z" />
+    </g>
+    <g transform="translate(192 64)">
+      <!-- lumber camp: cleared yard, stacked logs, and a standing conifer -->
+      <path fill="#6a5b45" d="M6 52 32 63 58 52 32 41Z" />
+      <path fill="#6b4a2e" d="M20 40h3v-8h-3Z" />
+      <path fill="#2f6b3f" d="M21.5 34 13 34 21.5 14 30 34Z" />
+      <path fill="#8a5f38" d="M22 48 48 43 50 48 24 53Z" />
+      <circle fill="#d0a06a" cx="23" cy="50.5" r="3.2" />
+      <path fill="#7a5230" d="M18 54 46 49 48 54 20 59Z" />
+      <circle fill="#d0a06a" cx="19" cy="56.5" r="3.2" />
+    </g>
+    <g transform="translate(256 64)">
+      <!-- construction: staked scaffold over delivered materials -->
+      <path fill="#6f6552" d="M8 50 32 62 56 50 32 38Z" />
+      <path fill="#b39a72" d="M14 47 32 56 32 48 14 39Z" />
+      <path fill="#8a7457" d="M32 56 50 47 50 39 32 48Z" />
+      <path fill="#c9b48c" d="M14 39 32 30 50 39 32 48Z" />
+      <path fill="#b98a4c" d="M12 44 16 46 16 16 12 14Z" />
+      <path fill="#96702c" d="M48 46 52 44 52 14 48 16Z" />
+      <path fill="#c39a56" d="M12 26 50 18 52 23 14 31Z" />
+    </g>
+
+    <g transform="translate(0 128)">
+      <!-- raider: hooded marauder with an axe -->
+      <path fill="#7a5230" d="M45 54h3l-1-30h-3Z" />
+      <path fill="#b9c1c9" d="M44 24 52 20 52 30 44 28Z" />
+      <path fill="#b0403c" d="M22 56 32 60 42 56 40 34 24 34Z" />
+      <path fill="#37283a" d="M24 34c1-10 15-10 16 0Z" />
+      <path fill="#1e1720" stroke="none" d="M27.5 33 36.5 33 35.5 28 28.5 28Z" />
+      <circle fill="#ffdc7a" stroke="none" cx="29.5" cy="30.5" r="1.6" />
+      <circle fill="#ffdc7a" stroke="none" cx="34.5" cy="30.5" r="1.6" />
+    </g>
+    <g transform="translate(64 128)" fill="none">
+      <!-- selection marker: drawn centred on the tile, not on a building base -->
+      <path stroke="#f6d365" stroke-width="3" d="M2 32 32 16 62 32 32 48Z" />
+      <path stroke="#fff3c4" stroke-width="2" d="M12 32 32 21 52 32 32 43Z" />
+    </g>
+    <g transform="translate(128 128)">
+      <!-- ore deposit: full -->
+      <path fill="#6d7382" d="M23 56 28 50 37 50 39 55Z" />
+      <path fill="#8d93a3" d="M14 52 20 40 30 38 36 46 32 54Z" />
+      <path fill="#a8aebd" stroke="none" d="M20.5 41.5 29 39.5 32.5 45 21 47Z" />
+      <path fill="#7c8290" d="M32 54 36 45 46 44 50 52Z" />
+      <path fill="#969cab" stroke="none" d="M37 46 45 45 47.5 50 36 51Z" />
+      <circle fill="#e8c45c" stroke="none" cx="24" cy="45" r="2" />
+      <circle fill="#e8c45c" stroke="none" cx="41" cy="48" r="1.8" />
+      <circle fill="#e8c45c" stroke="none" cx="30" cy="50" r="1.4" />
+    </g>
+    <g transform="translate(192 128)">
+      <!-- ore deposit: half worked -->
+      <path fill="#6d7382" d="M16 55 20 50 24 55Z" />
+      <path fill="#6d7382" d="M43 54 47 49 50 54Z" />
+      <path fill="#868c9c" d="M22 53 26 42 36 41 41 49 36 55Z" />
+      <path fill="#a1a7b6" stroke="none" d="M27 43 35 42 38.5 48 27.5 49.5Z" />
+      <circle fill="#e8c45c" stroke="none" cx="29" cy="47" r="1.9" />
+    </g>
+    <g transform="translate(256 128)">
+      <!-- ore deposit: exhausted pit -->
+      <path fill="#4a505d" d="M14 52 32 44 50 52 32 58Z" />
+      <path fill="#343a45" stroke="none" d="M22 52 32 48 42 52 32 55Z" />
+      <path fill="#5d6371" d="M18 50 21 46 24 50Z" />
+      <path fill="#5d6371" d="M42 50 45 46 48 50Z" />
+    </g>
+
+    <g transform="translate(0 192)">
+      <!-- timber grove: full -->
+      <path fill="#27562f" d="M18 52 11 52 18 37 25 52Z" />
+      <path fill="#6b4a2e" d="M44 52h3v-6h-3Z" />
+      <path fill="#2a6038" d="M45.5 47 38 47 45.5 30 53 47Z" />
+      <path fill="#6b4a2e" d="M29 55h5V45h-5Z" />
+      <path fill="#2f6b3f" d="M31.5 47 21 47 31.5 22 42 47Z" />
+      <path fill="#3f8a4f" stroke="none" d="M31.5 25 31.5 45.5 23.5 45.5Z" />
+    </g>
+    <g transform="translate(64 192)">
+      <!-- timber grove: half cut -->
+      <path fill="#7a5230" d="M13 55h9v-7h-9Z" />
+      <path fill="#b48a5e" d="M13 48 17.5 45.5 22 48 17.5 50.5Z" />
+      <path fill="#6b4a2e" d="M30 55h4V45h-4Z" />
+      <path fill="#2f6b3f" d="M32 47 22 47 32 25 42 47Z" />
+      <path fill="#3f8a4f" stroke="none" d="M32 28 32 45.5 24.5 45.5Z" />
+    </g>
+    <g transform="translate(128 192)">
+      <!-- timber grove: cleared stumps -->
+      <path fill="#6f4c2c" d="M18 54h8v-7h-8Z" />
+      <path fill="#a8804f" d="M18 47 22 44.8 26 47 22 49.2Z" />
+      <path fill="#6f4c2c" d="M38 53h6v-5h-6Z" />
+      <path fill="#a8804f" d="M38 48 41 46.4 44 48 41 49.6Z" />
+      <path fill="#7a5230" d="M12 57 44 51 46 55 14 61Z" />
+      <circle fill="#c99a68" cx="13" cy="59" r="2.6" />
+    </g>
+    <g transform="translate(192 192)">
+      <!-- quarry: stepped cut into a mountainside with a loading ramp -->
+      <path fill="#8a919d" d="M6 48 32 60 58 48 32 36Z" />
+      <path fill="#a2a9b5" stroke="none" d="M14 46 32 37 50 46 32 55Z" />
+      <path fill="#6a7180" d="M18 40 32 33 46 40 32 47Z" />
+      <path fill="#c3cad5" d="M22 26 32 21 42 26 32 31Z" />
+      <path fill="#7e8593" d="M22 26 32 31 32 21Z" />
+      <path fill="#5c6270" stroke="none" d="M26 47 32 50 38 47 32 44Z" />
+      <path fill="#b5822f" d="M40 52 52 46 54 50 42 56Z" />
+      <circle fill="#d0a06a" cx="43" cy="54" r="3" />
+    </g>
+    <g transform="translate(256 192)">
+      <!-- brickworks: banked kiln with a stack of fired brick -->
+      <path fill="#9c6b52" d="M10 48 32 60 32 46 10 34Z" />
+      <path fill="#764c39" d="M32 60 54 48 54 34 32 46Z" />
+      <path fill="#b07b5c" d="M10 34 32 22 54 34 32 46Z" />
+      <path fill="#3a2b25" d="M20 46V38c0-5 12-5 12 0v8Z" />
+      <path fill="#f0932c" d="M23 46v-6c0-3 6-3 6 0v6Z" />
+      <path fill="#8b8b96" d="M36 24 42 27 42 12 36 9Z" />
+      <path fill="#64646f" d="M42 27 48 24 48 9 42 12Z" />
+      <path fill="#c25f43" d="M14 52 24 57 24 50 14 45Z" />
+      <path fill="#96422e" d="M24 57 34 52 34 45 24 50Z" />
+    </g>
+
+    <g transform="translate(0 256)">
+      <!-- wall: brick rampart with a crenellated top -->
+      <path fill="#b8836a" d="M8 44 32 56 32 34 8 22Z" />
+      <path fill="#8d5f4a" d="M32 56 56 44 56 22 32 34Z" />
+      <path fill="#cf9a7e" d="M8 22 32 10 56 22 32 34Z" />
+      <path fill="#a06f57" stroke="none" d="M12 36 32 46 32 40 12 30Z" />
+      <path fill="#7f5642" stroke="none" d="M32 46 52 36 52 30 32 40Z" />
+      <path fill="#d8a488" d="M12 18 20 14 28 18 20 22Z" />
+      <path fill="#d8a488" d="M36 18 44 14 52 18 44 22Z" />
+    </g>
+    <g transform="translate(64 256)">
+      <!-- carrier: hauler pushing a laden handcart -->
+      <path fill="#6b4a2e" d="M30 52 50 46 52 51 32 57Z" />
+      <path fill="#8a5f38" stroke="none" d="M33 50 47 46 48 49 34 53Z" />
+      <path fill="#c9a05e" d="M34 45 44 42 46 47 36 50Z" />
+      <circle fill="#3a3730" cx="34" cy="56" r="3.6" />
+      <circle fill="#7c8290" stroke="none" cx="34" cy="56" r="1.4" />
+      <path fill="#4f7f9c" d="M18 50 26 53 28 38 20 35Z" />
+      <path fill="#3c657d" d="M28 53 30 38 28 38 26 53Z" />
+      <path fill="#e0bb92" d="M20 35 24 32 28 35 24 38Z" />
+      <circle fill="#e0bb92" stroke="none" cx="24" cy="29" r="4.2" />
+    </g>
+    <g transform="translate(128 256)">
+      <!-- stone deposit: an unworked outcrop on a range -->
+      <path fill="#7b828f" d="M14 52 22 38 34 36 42 46 36 55Z" />
+      <path fill="#9aa1ae" stroke="none" d="M22.5 39.5 33 37.5 37.5 45 24 47.5Z" />
+      <path fill="#697080" d="M34 55 38 44 48 43 52 52Z" />
+      <path fill="#8f96a4" stroke="none" d="M39 45 47 44 49.5 50 38 51Z" />
+      <path fill="#c3cad5" stroke="none" d="M25 41 31 40 33 43.5 26.5 44.5Z" />
+    </g>
+    <g transform="translate(192 256)">
+      <!-- stone deposit: half quarried -->
+      <path fill="#7b828f" d="M18 55 22 50 26 55Z" />
+      <path fill="#868d9a" d="M24 53 28 43 38 42 42 49 36 55Z" />
+      <path fill="#a1a8b5" stroke="none" d="M29 44 37 43 39.5 48 28.5 49.5Z" />
+      <path fill="#697080" d="M44 54 48 49 51 54Z" />
+    </g>
+    <g transform="translate(256 256)">
+      <!-- stone deposit: worked out, only rubble and a cut face left -->
+      <path fill="#4d535f" d="M14 52 32 44 50 52 32 58Z" />
+      <path fill="#373d47" stroke="none" d="M22 52 32 48 42 52 32 55Z" />
+      <path fill="#616875" d="M17 50 20 46 23 50Z" />
+      <path fill="#616875" d="M41 51 45 47 48 51Z" />
+      <path fill="#7c8290" stroke="none" d="M28 47 33 46 34 48.5 29 49.5Z" />
+    </g>
+
+    <g transform="translate(0 320)">
+      <!-- foundry: brick furnace under an iron band, with a molten pour and a tall stack -->
+      <path fill="#9c6b52" d="M8 48 32 60 32 46 8 34Z" />
+      <path fill="#764c39" d="M32 60 56 48 56 34 32 46Z" />
+      <path fill="#b07b5c" d="M8 34 32 22 56 34 32 46Z" />
+      <path fill="#8b8b96" stroke="none" d="M8 40 32 52 32 48 8 36Z" />
+      <path fill="#64646f" stroke="none" d="M32 52 56 40 56 36 32 48Z" />
+      <path fill="#96969f" d="M34 24 42 28 42 10 34 6Z" />
+      <path fill="#64646f" d="M42 28 50 24 50 6 42 10Z" />
+      <path fill="#a6a6b2" d="M34 6 42 2 50 6 42 10Z" />
+      <path fill="#f0932c" d="M14 46 24 51 24 42 14 37Z" />
+      <path fill="#ffe08a" stroke="none" d="M17 45 21 47 21 42.5 17 40.5Z" />
+    </g>
+    <g transform="translate(64 320)">
+      <!-- bastion: crenellated rampart on a brick footing, capped in steel -->
+      <path fill="#8d5f4a" d="M6 50 32 62 32 54 6 42Z" />
+      <path fill="#6d4736" d="M32 62 58 50 58 42 32 54Z" />
+      <path fill="#a3aab2" d="M12 50 32 60 32 26 12 16Z" />
+      <path fill="#7b838d" d="M32 60 52 50 52 16 32 26Z" />
+      <path fill="#b9c0c7" d="M12 16 32 6 52 16 32 26Z" />
+      <path fill="#8b939b" stroke="none" d="M12 34 32 44 52 34 32 24Z" />
+      <path fill="#c7ced4" d="M14 15 18 17 18 8 14 6Z" />
+      <path fill="#97a0a8" d="M46 17 50 15 50 6 46 8Z" />
+      <path fill="#262c36" d="M28 50V41c0-4 8-4 8 0v9Z" />
+      <path fill="#cfd8e0" stroke="none" d="M30.6 3 33.4 3 33.4 9 30.6 9Z" />
+    </g>
+    <g transform="translate(128 320)">
+      <!-- guild hall: long hall under a tiled roof, with the guild banner at its door -->
+      <path fill="#d7c6a4" d="M8 48 32 60 32 44 8 32Z" />
+      <path fill="#a4906f" d="M32 60 56 48 56 32 32 44Z" />
+      <path fill="#4f8a80" d="M5 33 32 45 32 10Z" />
+      <path fill="#376860" d="M32 45 59 33 32 10Z" />
+      <path fill="#6d4b32" d="M14 50 22 54 22 45 14 41Z" />
+      <path fill="#e2e7eb" stroke="none" d="M43.4 20 44.9 20 44.9 42 43.4 42Z" />
+      <path fill="#e0b64a" d="M45 22 53 25 45 29Z" />
+    </g>
   </g>
 </svg>

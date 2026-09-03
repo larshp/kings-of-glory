@@ -1,13 +1,55 @@
-import type { Command, CommandResult, WorldState } from '@kings/simulation';
+import { cooperativeObjectives, settlementInitiatives, technologies } from '@kings/content';
+import { PLACEMENT_KINDS } from '@kings/simulation';
+import type { Command, CommandResult, ItemKind, WorldState } from '@kings/simulation';
 
-export type TerrainTile = 'grass' | 'water' | 'ore' | 'wood';
+export type TerrainTile = 'grass' | 'water' | 'ore' | 'wood' | 'mountain';
 export interface ChunkInterest {
   readonly x: number;
   readonly y: number;
 }
+export interface WorldMapChunkSummary {
+  readonly x: number;
+  readonly y: number;
+  readonly currentlyVisible: boolean;
+  readonly terrain: Readonly<Record<TerrainTile, number>>;
+  readonly ownBuildingCount: number;
+  readonly visibleForeignBuildingCount: number;
+  readonly visibleThreatCount: number;
+  readonly claimedSectors: readonly { readonly ownerId: string; readonly count: number }[];
+}
+export interface WorldMapPage {
+  readonly after?: string;
+  readonly chunks: readonly WorldMapChunkSummary[];
+  readonly nextCursor?: string;
+  readonly totalExploredChunks: number;
+}
+export type DirectoryEntry =
+  | { readonly type: 'player'; readonly playerId: string; readonly displayName: string }
+  | {
+      readonly type: 'settlement';
+      readonly settlementId: string;
+      readonly displayName: string;
+      readonly ownerId: string;
+      readonly memberCount: number;
+    };
+export interface DirectoryPage {
+  readonly query: string;
+  readonly after?: string;
+  readonly entries: readonly DirectoryEntry[];
+  readonly nextCursor?: string;
+}
 /** Network view: omits the global terrain seed so unexplored resources cannot be reconstructed. */
-export interface ClientWorldState extends Omit<WorldState, 'seed' | 'randomState'> {
+export interface ClientWorldState extends Omit<
+  WorldState,
+  'seed' | 'randomState' | 'deletedPlayers'
+> {
   readonly terrain: Record<string, TerrainTile>;
+  /**
+   * Mountain height in levels per tile, keyed like `terrain`. Every other tile is level
+   * zero. It is filtered to explored chunks exactly like terrain, so unexplored relief
+   * cannot be reconstructed.
+   */
+  readonly elevation: Record<string, number>;
   /** Public sector ownership, kept separate from private player state. */
   readonly territory: Record<string, string>;
 }
@@ -20,13 +62,16 @@ export interface ClientWorldState extends Omit<WorldState, 'seed' | 'randomState
 export type ClientWorldDelta = Partial<ClientWorldState>;
 
 /** Bump whenever a client can no longer safely interpret server state messages. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 8;
 export const MAX_MESSAGE_BYTES = 64 * 1024;
+export const MAX_INTEREST_CHUNKS = 64;
 
 export type ClientMessage =
   | { type: 'hello'; version: number; playerId: string }
   | { type: 'command'; command: Command }
   | { type: 'interest'; chunks: readonly ChunkInterest[] }
+  | { type: 'worldMap'; requestId: string; after?: string; limit: number }
+  | { type: 'directorySearch'; requestId: string; query: string; after?: string; limit: number }
   | { type: 'resync'; version: number }
   | { type: 'ping'; nonce: string };
 
@@ -61,10 +106,12 @@ export type ServerMessage =
   | { type: 'commandAcknowledged'; result: Extract<CommandResult, { accepted: true }> }
   | { type: 'commandRejected'; result: Extract<CommandResult, { accepted: false }> }
   | { type: 'pong'; nonce: string }
+  | { type: 'worldMapPage'; requestId: string; page: WorldMapPage }
+  | { type: 'directoryPage'; requestId: string; page: DirectoryPage }
   | { type: 'maintenance'; message: string }
   | {
       type: 'error';
-      code: 'bad-message' | 'version-mismatch' | 'message-too-large';
+      code: 'bad-message' | 'version-mismatch' | 'message-too-large' | 'server-busy';
       message: string;
     };
 
@@ -72,14 +119,22 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object';
 const isIdentifier = (value: unknown): value is string =>
   typeof value === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(value);
-const isItem = (value: unknown): value is 'ore' | 'wood' | 'ingot' | 'tool' =>
-  value === 'ore' || value === 'wood' || value === 'ingot' || value === 'tool';
+const ITEM_KINDS: readonly ItemKind[] = ['ore', 'wood', 'stone', 'ingot', 'brick', 'tool'];
+const isItem = (value: unknown): value is ItemKind =>
+  typeof value === 'string' && (ITEM_KINDS as readonly string[]).includes(value);
+const sharedBuildingKinds: readonly string[] = Object.values(PLACEMENT_KINDS);
+const isSharedBuildingKind = (value: unknown) =>
+  typeof value === 'string' && sharedBuildingKinds.includes(value);
+const isBoundedText = (value: unknown, maxLength: number): value is string =>
+  typeof value === 'string' && value.length <= maxLength;
 const isChunkInterest = (value: unknown): value is readonly ChunkInterest[] =>
   Array.isArray(value) &&
-  value.length <= 64 &&
+  value.length <= MAX_INTEREST_CHUNKS &&
   value.every(
     (chunk) => isRecord(chunk) && Number.isSafeInteger(chunk.x) && Number.isSafeInteger(chunk.y),
   );
+const isChunkCursor = (value: unknown): value is string =>
+  typeof value === 'string' && /^-?\d+:-?\d+$/.test(value) && value.length <= 32;
 const isCommand = (value: unknown): value is Command => {
   if (
     !isRecord(value) ||
@@ -92,23 +147,79 @@ const isCommand = (value: unknown): value is Command => {
   )
     return false;
   if (
-    value.type === 'gather' ||
-    value.type === 'placeSmelter' ||
-    value.type === 'placeWorkshop' ||
-    value.type === 'placeStorage' ||
-    value.type === 'placeHousing' ||
-    value.type === 'placeHearth' ||
-    value.type === 'placeWatchtower' ||
     value.type === 'explore' ||
-    value.type === 'claimTerritory'
+    value.type === 'claimTerritory' ||
+    value.type === 'placeRoad' ||
+    value.type in PLACEMENT_KINDS
   )
     return Number.isSafeInteger(value.x) && Number.isSafeInteger(value.y);
+  if (value.type === 'gather')
+    return (
+      Number.isSafeInteger(value.x) &&
+      Number.isSafeInteger(value.y) &&
+      (value.amount === undefined ||
+        (Number.isSafeInteger(value.amount) &&
+          typeof value.amount === 'number' &&
+          value.amount >= 1 &&
+          value.amount <= 20))
+    );
+  if (value.type === 'cancelGatherOrder') return true;
+  if (value.type === 'resolveLandmark')
+    return (
+      Number.isSafeInteger(value.x) &&
+      Number.isSafeInteger(value.y) &&
+      (value.choice === 'salvage' || value.choice === 'develop')
+    );
+  if (value.type === 'startSettlementInitiative')
+    return typeof value.initiativeId === 'string' && value.initiativeId in settlementInitiatives;
   if (value.type === 'moveScout')
     return (
       isIdentifier(value.scoutId) && Number.isSafeInteger(value.x) && Number.isSafeInteger(value.y)
     );
+  // Checked against the content tables so new technologies and projects are not rejected
+  // at the boundary by a list that has to be edited alongside them.
   if (value.type === 'research')
-    return value.technologyId === 'metallurgy' || value.technologyId === 'territorial-charter';
+    return typeof value.technologyId === 'string' && value.technologyId in technologies;
+  if (value.type === 'contributeToObjective')
+    return (
+      typeof value.objectiveId === 'string' &&
+      value.objectiveId in cooperativeObjectives &&
+      isIdentifier(value.settlementId) &&
+      typeof value.amount === 'number' &&
+      Number.isSafeInteger(value.amount) &&
+      value.amount > 0
+    );
+  if (value.type === 'claimObjectiveReward')
+    return typeof value.objectiveId === 'string' && value.objectiveId in cooperativeObjectives;
+  if (value.type === 'setPlayerName') return isBoundedText(value.name, 64);
+  if (value.type === 'setSettlementName')
+    return isIdentifier(value.settlementId) && isBoundedText(value.name, 64);
+  if (value.type === 'sendChatMessage')
+    return (
+      isBoundedText(value.text, 1_024) &&
+      (value.channel === 'global' ||
+        (value.channel === 'settlement' && isIdentifier(value.settlementId)))
+    );
+  if (value.type === 'setPlayerBlocked')
+    return isIdentifier(value.targetPlayerId) && typeof value.blocked === 'boolean';
+  if (value.type === 'reportChatMessage')
+    return isIdentifier(value.messageId) && isBoundedText(value.reason, 400);
+  if (value.type === 'deleteAccount') return isBoundedText(value.confirmation, 16);
+  if (value.type === 'createSharedConstructionProject')
+    return (
+      isIdentifier(value.settlementId) &&
+      isSharedBuildingKind(value.buildingKind) &&
+      Number.isSafeInteger(value.x) &&
+      Number.isSafeInteger(value.y)
+    );
+  if (value.type === 'contributeToSharedConstructionProject')
+    return (
+      isIdentifier(value.projectId) &&
+      isItem(value.item) &&
+      typeof value.amount === 'number' &&
+      Number.isSafeInteger(value.amount) &&
+      value.amount > 0
+    );
   if (value.type === 'transferToPlayer')
     return (
       isIdentifier(value.targetPlayerId) &&
@@ -144,6 +255,17 @@ const isCommand = (value: unknown): value is Command => {
       value.priority >= 0 &&
       value.priority <= 3
     );
+  if (value.type === 'setLogisticsStockTarget')
+    return (
+      isIdentifier(value.linkId) &&
+      Number.isSafeInteger(value.minimum) &&
+      Number.isSafeInteger(value.maximum) &&
+      typeof value.minimum === 'number' &&
+      typeof value.maximum === 'number' &&
+      value.minimum >= 0 &&
+      value.minimum <= value.maximum &&
+      value.maximum <= 100
+    );
   if (value.type === 'setJobPriority')
     return (
       isIdentifier(value.buildingId) &&
@@ -160,7 +282,8 @@ const isCommand = (value: unknown): value is Command => {
     value.type === 'smelt' ||
     value.type === 'repair' ||
     value.type === 'cancelConstruction' ||
-    value.type === 'demolish'
+    value.type === 'demolish' ||
+    value.type === 'upgradeBuilding'
   )
     return isIdentifier(value.buildingId);
   return (
@@ -182,11 +305,37 @@ export const parseClientMessage = (raw: string): ClientMessage | undefined => {
     if (
       message.type === 'hello' &&
       typeof message.version === 'number' &&
+      Number.isSafeInteger(message.version) &&
+      message.version >= 0 &&
       isIdentifier(message.playerId)
     )
       return message as ClientMessage;
     if (message.type === 'command' && isCommand(message.command)) return message as ClientMessage;
     if (message.type === 'interest' && isChunkInterest(message.chunks))
+      return message as ClientMessage;
+    if (
+      message.type === 'worldMap' &&
+      isIdentifier(message.requestId) &&
+      (message.after === undefined || isChunkCursor(message.after)) &&
+      Number.isSafeInteger(message.limit) &&
+      typeof message.limit === 'number' &&
+      message.limit >= 1 &&
+      message.limit <= 256
+    )
+      return message as ClientMessage;
+    if (
+      message.type === 'directorySearch' &&
+      isIdentifier(message.requestId) &&
+      typeof message.query === 'string' &&
+      message.query.length <= 32 &&
+      (message.after === undefined ||
+        (typeof message.after === 'string' &&
+          /^(player|settlement):[A-Za-z0-9._-]{1,64}$/.test(message.after))) &&
+      Number.isSafeInteger(message.limit) &&
+      typeof message.limit === 'number' &&
+      message.limit >= 1 &&
+      message.limit <= 50
+    )
       return message as ClientMessage;
     if (
       message.type === 'resync' &&
@@ -195,8 +344,7 @@ export const parseClientMessage = (raw: string): ClientMessage | undefined => {
       message.version >= 0
     )
       return message as ClientMessage;
-    if (message.type === 'ping' && typeof message.nonce === 'string')
-      return message as ClientMessage;
+    if (message.type === 'ping' && isIdentifier(message.nonce)) return message as ClientMessage;
     return undefined;
   } catch {
     return undefined;

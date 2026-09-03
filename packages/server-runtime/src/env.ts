@@ -4,9 +4,16 @@ export interface ServerEnvironment {
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   persistence: 'memory' | 'postgres';
   production: boolean;
+  trustProxy: boolean;
   peaceful: boolean;
+  /** Wall-clock duration of one authoritative tick. Standard play uses one second. */
+  tickIntervalMs: number;
+  /** Development convenience only; production migrations use a separate credential and process. */
+  migrateOnStartup?: boolean;
   allowedOrigins: readonly string[];
   databaseUrl?: string;
+  sessionSecret?: string;
+  previousSessionSecret?: string;
 }
 export const parseEnvironment = (env: Record<string, string | undefined>): ServerEnvironment => {
   const port = Number(env.PORT ?? '3001');
@@ -14,7 +21,10 @@ export const parseEnvironment = (env: Record<string, string | undefined>): Serve
   const logLevel = env.LOG_LEVEL ?? 'info';
   const persistence = env.PERSISTENCE ?? 'memory';
   const production = env.NODE_ENV === 'production';
+  const trustProxy = env.TRUST_PROXY === 'true';
   const peaceful = env.PEACEFUL !== 'false';
+  const tickIntervalMs = Number(env.TICK_INTERVAL_MS ?? '1000');
+  const migrateOnStartup = env.MIGRATE_ON_STARTUP ? env.MIGRATE_ON_STARTUP === 'true' : !production;
   const allowedOrigins = (env.ALLOWED_ORIGINS ?? '')
     .split(',')
     .map((origin) => origin.trim())
@@ -22,6 +32,8 @@ export const parseEnvironment = (env: Record<string, string | undefined>): Serve
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error('PORT must be an integer between 1 and 65535.');
   if (!Number.isSafeInteger(worldSeed)) throw new Error('WORLD_SEED must be a safe integer.');
+  if (!Number.isSafeInteger(tickIntervalMs) || tickIntervalMs < 50 || tickIntervalMs > 10_000)
+    throw new Error('TICK_INTERVAL_MS must be an integer between 50 and 10000.');
   if (!['debug', 'info', 'warn', 'error'].includes(logLevel))
     throw new Error('LOG_LEVEL must be debug, info, warn, or error.');
   if (persistence !== 'memory' && persistence !== 'postgres')
@@ -30,14 +42,31 @@ export const parseEnvironment = (env: Record<string, string | undefined>): Serve
     throw new Error('DATABASE_URL is required when PERSISTENCE=postgres.');
   if (production && allowedOrigins.length === 0)
     throw new Error('ALLOWED_ORIGINS is required in production.');
+  if (production && (!env.SESSION_SECRET || env.SESSION_SECRET.length < 32))
+    throw new Error('SESSION_SECRET of at least 32 characters is required in production.');
+  if (env.SESSION_SECRET_PREVIOUS && env.SESSION_SECRET_PREVIOUS.length < 32)
+    throw new Error('SESSION_SECRET_PREVIOUS must be at least 32 characters when set.');
+  if (production && !trustProxy)
+    throw new Error('TRUST_PROXY=true is required for production TLS enforcement.');
+  if (env.MIGRATE_ON_STARTUP && !['true', 'false'].includes(env.MIGRATE_ON_STARTUP))
+    throw new Error('MIGRATE_ON_STARTUP must be true or false.');
+  if (production && migrateOnStartup)
+    throw new Error(
+      'MIGRATE_ON_STARTUP must be false in production; run the migration job separately.',
+    );
   return {
     port,
     worldSeed,
     logLevel: logLevel as ServerEnvironment['logLevel'],
     persistence,
     production,
+    trustProxy,
     peaceful,
+    tickIntervalMs,
+    migrateOnStartup,
     allowedOrigins,
     ...(env.DATABASE_URL ? { databaseUrl: env.DATABASE_URL } : {}),
+    ...(env.SESSION_SECRET ? { sessionSecret: env.SESSION_SECRET } : {}),
+    ...(env.SESSION_SECRET_PREVIOUS ? { previousSessionSecret: env.SESSION_SECRET_PREVIOUS } : {}),
   };
 };

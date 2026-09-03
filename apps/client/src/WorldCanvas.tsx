@@ -1,16 +1,46 @@
 import { useEffect, useRef } from 'react';
-import { recipes } from '@kings/content';
+import { threats as threatDefinitions } from '@kings/content';
 import type { TerrainTile } from '@kings/protocol';
-import { type Building, type LogisticsLink, type Threat } from '@kings/simulation';
+import type {
+  Building,
+  Carrier,
+  LandmarkDiscovery,
+  LogisticsLink,
+  Threat,
+} from '@kings/simulation';
 import type { CameraBindings } from './preferences.js';
 import { drawSprite, type RenderAssets, type SpriteId } from './render-assets.js';
 import {
+  ELEVATION_STEP,
+  screenToRaisedTile,
   screenToTile,
-  screenToWorld,
   TILE_HEIGHT,
   TILE_WIDTH,
   worldToScreen,
 } from './projection.js';
+import {
+  borderSides,
+  cameraOrigin,
+  compareIsometricDrawables,
+  entityAtTile,
+  logisticsStatusColor,
+  MAX_ELEVATION,
+  productionRateLabel,
+  resourceDecorationSprite,
+  resourceIsReachable,
+  summitColors,
+  tileHoverLines,
+  tileLayers,
+  visibleByIsometricDepth,
+  visibleChunkCoordinates,
+  visibleRenderChunks,
+  visibleTileBounds,
+  type OperationsOverlay,
+  type PickedEntity,
+  type Viewport,
+} from './world-canvas-model.js';
+
+export * from './world-canvas-model.js';
 
 export interface WorldCanvasMetrics {
   readonly framesPerSecond: number;
@@ -18,6 +48,7 @@ export interface WorldCanvasMetrics {
   readonly visibleBuildings: number;
   readonly visibleThreats: number;
   readonly activeChunks: number;
+  readonly renderObjectCount: number;
 }
 
 export interface WorldCanvasDebugState {
@@ -25,159 +56,26 @@ export interface WorldCanvasDebugState {
   readonly showCoordinates: boolean;
   readonly showChunks: boolean;
   readonly showEntityIds: boolean;
+  readonly showPaths: boolean;
 }
-
-export type OperationsOverlay = 'none' | 'resources' | 'logistics' | 'production' | 'bottlenecks';
-
-export const logisticsStatusColor = (status: LogisticsLink['status']) =>
-  status === 'transferred'
-    ? '#68d7f5'
-    : status === 'target-full' || status === 'source-empty'
-      ? '#f4b860'
-      : status === 'target-reconfigured' || status === 'constructing'
-        ? '#de7780'
-        : '#8796a6';
-
-export const productionRateLabel = (building: Pick<Building, 'recipeId'>) => {
-  const recipe = Object.values(recipes).find((candidate) => candidate.id === building.recipeId);
-  if (!recipe) return 'no recipe';
-  const output = Object.entries(recipe.output)
-    .map(([item, amount]) => `${amount} ${item}`)
-    .join(' + ');
-  return `${output}/${recipe.ticks}t`;
-};
-
-interface Viewport {
-  readonly panX: number;
-  readonly panY: number;
-  readonly scale: number;
-}
-
-export interface VisibleTileBounds {
-  readonly minX: number;
-  readonly maxX: number;
-  readonly minY: number;
-  readonly maxY: number;
-  readonly center: { x: number; y: number };
-}
-
-interface IsometricEntity {
-  readonly id: string;
-  readonly x: number;
-  readonly y: number;
-}
-
-export type PickedEntity =
-  | { readonly type: 'building'; readonly id: string }
-  | { readonly type: 'threat'; readonly id: string };
-
-/** Threats render above buildings, so they win a click on the same tile. */
-export const entityAtTile = (
-  tile: { x: number; y: number },
-  buildings: readonly Building[],
-  threats: readonly Threat[],
-): PickedEntity | undefined => {
-  const threat = threats.find((candidate) => candidate.x === tile.x && candidate.y === tile.y);
-  if (threat) return { type: 'threat', id: threat.id };
-  const building = buildings.find((candidate) => candidate.x === tile.x && candidate.y === tile.y);
-  return building ? { type: 'building', id: building.id } : undefined;
-};
-
-/** Filters first, then orders only the visible entities by stable isometric depth. */
-export const visibleByIsometricDepth = <Entity extends IsometricEntity>(
-  entities: readonly Entity[],
-  focus: { x: number; y: number },
-  radius = 9,
-): Entity[] =>
-  entities
-    .filter(
-      (entity) => Math.abs(entity.x - focus.x) <= radius && Math.abs(entity.y - focus.y) <= radius,
-    )
-    .sort(
-      (left, right) =>
-        left.x + left.y - (right.x + right.y) ||
-        left.y - right.y ||
-        left.id.localeCompare(right.id),
-    );
-
-/** Calculates the world tile rectangle needed to cover the current transformed viewport. */
-export const visibleTileBounds = (
-  width: number,
-  height: number,
-  focus: { x: number; y: number },
-  viewport: Viewport,
-): VisibleTileBounds => {
-  const screenToAbsoluteWorld = (screenX: number, screenY: number) => {
-    const local = screenToWorld({
-      x: (screenX - width / 2 - viewport.panX) / viewport.scale,
-      y: (screenY - 80 - viewport.panY) / viewport.scale,
-    });
-    return { x: focus.x + local.x, y: focus.y + local.y };
-  };
-  const corners = [
-    screenToAbsoluteWorld(0, 0),
-    screenToAbsoluteWorld(width, 0),
-    screenToAbsoluteWorld(0, height),
-    screenToAbsoluteWorld(width, height),
-  ];
-  const xValues = corners.map((corner) => corner.x);
-  const yValues = corners.map((corner) => corner.y);
-  return {
-    minX: Math.floor(Math.min(...xValues)) - 2,
-    maxX: Math.ceil(Math.max(...xValues)) + 2,
-    minY: Math.floor(Math.min(...yValues)) - 2,
-    maxY: Math.ceil(Math.max(...yValues)) + 2,
-    center: screenToAbsoluteWorld(width / 2, height / 2),
-  };
-};
-
-/** Stable, bounded chunk subscription derived from the current viewport tile rectangle. */
-export const visibleChunkCoordinates = (bounds: VisibleTileBounds) => {
-  const chunks: Array<{ x: number; y: number }> = [];
-  for (let x = Math.floor(bounds.minX / 16); x <= Math.floor(bounds.maxX / 16); x += 1)
-    for (let y = Math.floor(bounds.minY / 16); y <= Math.floor(bounds.maxY / 16); y += 1)
-      chunks.push({ x, y });
-  return chunks;
-};
-
-/**
- * The immediate-mode canvas keeps a compact container for each visible chunk.
- * It avoids allocating one render object per tile; a pool is deliberately not
- * used because the renderer has no per-tile objects to recycle.
- */
-export const visibleRenderChunks = (bounds: VisibleTileBounds) =>
-  visibleChunkCoordinates(bounds).map((chunk) => ({
-    ...chunk,
-    minX: Math.max(bounds.minX, chunk.x * 16),
-    maxX: Math.min(bounds.maxX, chunk.x * 16 + 15),
-    minY: Math.max(bounds.minY, chunk.y * 16),
-    maxY: Math.min(bounds.maxY, chunk.y * 16 + 15),
-  }));
-
-const terrainColor = (terrain: TerrainTile | undefined, x: number, y: number) =>
-  terrain === 'water'
-    ? '#2f6d93'
-    : terrain === 'ore'
-      ? '#6b6b79'
-      : terrain === 'wood'
-        ? '#7d5433'
-        : terrain === 'grass'
-          ? (x + y) % 2 === 0
-            ? '#3b6a48'
-            : '#315d3d'
-          : (x + y) % 2 === 0
-            ? '#29463c'
-            : '#233d34';
 
 export const WorldCanvas = ({
   buildings,
   threats,
+  carriers,
   terrain,
+  elevation,
+  minedTiles,
   territory,
+  roads,
+  discoveries,
   logisticsLinks,
   operationsOverlay,
   focus,
+  playerId,
+  playerPlot,
   cameraBindings,
+  hoveredTile,
   selectedTile,
   placementPreview,
   onSelectTile,
@@ -191,15 +89,33 @@ export const WorldCanvas = ({
 }: {
   buildings: readonly Building[];
   threats: readonly Threat[];
+  carriers: readonly Carrier[];
   terrain: Readonly<Record<string, TerrainTile>>;
+  elevation: Readonly<Record<string, number>>;
+  minedTiles: Readonly<Record<string, number>>;
   territory: Readonly<Record<string, string>>;
+  roads: Readonly<Record<string, string>>;
+  discoveries: readonly LandmarkDiscovery[];
   logisticsLinks: readonly LogisticsLink[];
   operationsOverlay: OperationsOverlay;
   focus: { x: number; y: number };
+  playerId: string;
+  playerPlot: { readonly x: number; readonly y: number; readonly size: number } | undefined;
   cameraBindings: CameraBindings;
+  hoveredTile: { x: number; y: number } | undefined;
   selectedTile: { x: number; y: number } | undefined;
-  placementPreview: { tile: { x: number; y: number }; valid: boolean } | undefined;
-  onSelectTile?: (tile: { x: number; y: number }) => void;
+  /**
+   * The tile a placement would use. While a building is armed it also carries that
+   * building, so the map can show the actual structure and say why a site is refused.
+   */
+  placementPreview:
+    | {
+        tile: { x: number; y: number };
+        valid: boolean;
+        armed?: { kind: Building['kind']; name: string; reason: string };
+      }
+    | undefined;
+  onSelectTile?: (tile: { x: number; y: number }, modifiers: { shift: boolean }) => void;
   onSelectEntity?: (entity: PickedEntity | undefined) => void;
   onHoverTile?: (tile: { x: number; y: number } | undefined) => void;
   onMetrics?: (metrics: WorldCanvasMetrics) => void;
@@ -212,12 +128,20 @@ export const WorldCanvas = ({
   const viewport = useRef<Viewport>({ panX: 0, panY: 0, scale: 1 });
   const latestBuildings = useRef(buildings);
   const latestThreats = useRef(threats);
+  const latestCarriers = useRef(carriers);
   const latestTerrain = useRef(terrain);
+  const latestElevation = useRef(elevation);
+  const latestMinedTiles = useRef(minedTiles);
   const latestTerritory = useRef(territory);
+  const latestRoads = useRef(roads);
+  const latestDiscoveries = useRef(discoveries);
   const latestLogisticsLinks = useRef(logisticsLinks);
   const latestOperationsOverlay = useRef(operationsOverlay);
   const latestFocus = useRef(focus);
+  const latestPlayerId = useRef(playerId);
+  const latestPlayerPlot = useRef(playerPlot);
   const latestCameraBindings = useRef(cameraBindings);
+  const latestHoveredTile = useRef(hoveredTile);
   const latestSelectedTile = useRef(selectedTile);
   const latestPlacementPreview = useRef(placementPreview);
   const latestSelectTile = useRef(onSelectTile);
@@ -230,12 +154,20 @@ export const WorldCanvas = ({
   const latestDebug = useRef(debug);
   latestBuildings.current = buildings;
   latestThreats.current = threats;
+  latestCarriers.current = carriers;
   latestTerrain.current = terrain;
+  latestElevation.current = elevation;
+  latestMinedTiles.current = minedTiles;
   latestTerritory.current = territory;
+  latestRoads.current = roads;
+  latestDiscoveries.current = discoveries;
   latestLogisticsLinks.current = logisticsLinks;
   latestOperationsOverlay.current = operationsOverlay;
   latestFocus.current = focus;
+  latestPlayerId.current = playerId;
+  latestPlayerPlot.current = playerPlot;
   latestCameraBindings.current = cameraBindings;
+  latestHoveredTile.current = hoveredTile;
   latestSelectedTile.current = selectedTile;
   latestPlacementPreview.current = placementPreview;
   latestSelectTile.current = onSelectTile;
@@ -275,16 +207,28 @@ export const WorldCanvas = ({
       Math.abs(tileBounds.minY - tileBounds.center.y),
       Math.abs(tileBounds.maxY - tileBounds.center.y),
     );
-    context.translate(width / 2 + view.panX, 80 + view.panY);
+    const origin = cameraOrigin(width, height);
+    context.save();
+    context.translate(origin.x + view.panX, origin.y + view.panY);
     context.scale(view.scale, view.scale);
 
-    const diamond = (point: { x: number; y: number }, fill: string, stroke?: string) => {
+    const tilePoint = (x: number, y: number) =>
+      worldToScreen({ x: x - latestFocus.current.x, y: y - latestFocus.current.y });
+    /** `inset` shrinks the diamond towards its centre in screen pixels. */
+    const diamondPath = (point: { x: number; y: number }, inset = 0) => {
+      const centerX = point.x + TILE_WIDTH / 2;
+      const centerY = point.y + TILE_HEIGHT / 2;
+      const halfWidth = TILE_WIDTH / 2 - inset * 2;
+      const halfHeight = TILE_HEIGHT / 2 - inset;
       context.beginPath();
-      context.moveTo(point.x, point.y + TILE_HEIGHT / 2);
-      context.lineTo(point.x + TILE_WIDTH / 2, point.y);
-      context.lineTo(point.x + TILE_WIDTH, point.y + TILE_HEIGHT / 2);
-      context.lineTo(point.x + TILE_WIDTH / 2, point.y + TILE_HEIGHT);
+      context.moveTo(centerX - halfWidth, centerY);
+      context.lineTo(centerX, centerY - halfHeight);
+      context.lineTo(centerX + halfWidth, centerY);
+      context.lineTo(centerX, centerY + halfHeight);
       context.closePath();
+    };
+    const diamond = (point: { x: number; y: number }, fill: string, stroke?: string) => {
+      diamondPath(point);
       context.fillStyle = fill;
       context.fill();
       if (stroke) {
@@ -293,46 +237,29 @@ export const WorldCanvas = ({
         context.stroke();
       }
     };
+    /** Adds one diamond side to the current path, using the screen-corner order. */
+    const addSide = (
+      point: { x: number; y: number },
+      side: 'south-east' | 'south-west' | 'north-west' | 'north-east',
+    ) => {
+      const west = { x: point.x, y: point.y + TILE_HEIGHT / 2 };
+      const north = { x: point.x + TILE_WIDTH / 2, y: point.y };
+      const east = { x: point.x + TILE_WIDTH, y: point.y + TILE_HEIGHT / 2 };
+      const south = { x: point.x + TILE_WIDTH / 2, y: point.y + TILE_HEIGHT };
+      const [from, to] =
+        side === 'south-east'
+          ? [south, east]
+          : side === 'south-west'
+            ? [west, south]
+            : side === 'north-west'
+              ? [north, west]
+              : [north, east];
+      context.moveTo(from.x, from.y);
+      context.lineTo(to.x, to.y);
+    };
 
-    for (const chunk of visibleRenderChunks(tileBounds)) {
-      for (let x = chunk.minX; x <= chunk.maxX; x += 1) {
-        for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
-          diamond(
-            worldToScreen({ x: x - latestFocus.current.x, y: y - latestFocus.current.y }),
-            terrainColor(latestTerrain.current[`${x}:${y}`], x, y),
-          );
-          if (latestTerritory.current[`${Math.floor(x / 8)}:${Math.floor(y / 8)}`])
-            diamond(
-              worldToScreen({ x: x - latestFocus.current.x, y: y - latestFocus.current.y }),
-              'rgba(86, 136, 217, 0.16)',
-            );
-        }
-      }
-    }
-    if (latestOperationsOverlay.current === 'resources') {
-      context.font = '10px system-ui';
-      for (const chunk of visibleRenderChunks(tileBounds))
-        for (let x = chunk.minX; x <= chunk.maxX; x += 1)
-          for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
-            const resource = latestTerrain.current[`${x}:${y}`];
-            if (resource !== 'ore' && resource !== 'wood') continue;
-            const point = worldToScreen({
-              x: x - latestFocus.current.x,
-              y: y - latestFocus.current.y,
-            });
-            diamond(
-              point,
-              resource === 'ore' ? 'rgba(159, 188, 255, 0.32)' : 'rgba(139, 216, 134, 0.28)',
-            );
-            context.fillStyle = '#f4f0df';
-            context.fillText(resource === 'ore' ? 'Ore' : 'Wood', point.x + 23, point.y + 21);
-          }
-    }
-    const drawEntitySprite = (sprite: SpriteId, x: number, y: number) => {
-      const position = worldToScreen({
-        x: x - latestFocus.current.x,
-        y: y - latestFocus.current.y,
-      });
+    const drawEntitySprite = (sprite: SpriteId, x: number, y: number, opacity = 1) => {
+      const position = tilePoint(x, y);
       const assets = latestAssets.current;
       if (assets)
         drawSprite(
@@ -341,28 +268,331 @@ export const WorldCanvas = ({
           sprite,
           position.x + TILE_WIDTH / 2,
           position.y + TILE_HEIGHT / 2,
+          opacity,
         );
     };
-    for (const building of visibleByIsometricDepth(
+    /** A soft contact shadow grounds a sprite on its tile instead of letting it float. */
+    const drawContactShadow = (x: number, y: number, radius: number) => {
+      const position = tilePoint(x, y);
+      context.fillStyle = 'rgba(7, 13, 22, 0.32)';
+      context.beginPath();
+      context.ellipse(
+        position.x + TILE_WIDTH / 2,
+        position.y + TILE_HEIGHT / 2 + 2,
+        radius,
+        radius / 2.2,
+        0,
+        0,
+        Math.PI * 2,
+      );
+      context.fill();
+    };
+    const drawHealthBar = (x: number, y: number, ratio: number) => {
+      const position = tilePoint(x, y);
+      const width = 26;
+      const barX = position.x + TILE_WIDTH / 2 - width / 2;
+      const barY = position.y + TILE_HEIGHT / 2 - 34;
+      context.fillStyle = 'rgba(10, 16, 26, 0.85)';
+      context.fillRect(barX - 1, barY - 1, width + 2, 6);
+      context.fillStyle = ratio > 0.6 ? '#8fd694' : ratio > 0.3 ? '#f0c060' : '#e2706a';
+      context.fillRect(barX, barY, Math.max(1, Math.round(width * ratio)), 4);
+    };
+    const drawCargoTally = (x: number, y: number, cargo: number) => {
+      const position = tilePoint(x, y);
+      context.font = 'bold 10px system-ui';
+      context.fillStyle = '#0d1420';
+      context.beginPath();
+      context.roundRect(position.x + TILE_WIDTH / 2 + 4, position.y - 4, 15, 12, 3);
+      context.fill();
+      context.fillStyle = '#f6d365';
+      context.fillText(String(cargo), position.x + TILE_WIDTH / 2 + 8, position.y + 5);
+    };
+    const terrainAt = (x: number, y: number) => latestTerrain.current[`${x}:${y}`];
+    const levelAt = (x: number, y: number) => latestElevation.current[`${x}:${y}`] ?? 0;
+    const sectorOwnerAt = (x: number, y: number) =>
+      latestTerritory.current[`${Math.floor(x / 8)}:${Math.floor(y / 8)}`];
+    const chunks = visibleRenderChunks(tileBounds);
+    /**
+     * Raised tiles overlap whatever is behind them, so they cannot be drawn in the flat
+     * pass. They join the depth-sorted pass with buildings and threats instead.
+     */
+    const raisedTiles: Array<{ x: number; y: number; level: number }> = [];
+    const resourceTiles: Array<{ x: number; y: number; sprite: SpriteId }> = [];
+    // Pass 1: flat ground, plus the inset pond or outcrop surface where a tile has one.
+    for (const chunk of chunks)
+      for (let x = chunk.minX; x <= chunk.maxX; x += 1)
+        for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
+          const level = levelAt(x, y);
+          if (level > 0) {
+            raisedTiles.push({ x, y, level });
+            continue;
+          }
+          const point = tilePoint(x, y);
+          const layers = tileLayers(terrainAt(x, y), x, y);
+          diamond(point, layers.base);
+          if (!layers.patch) continue;
+          diamondPath(point, layers.patch.inset);
+          context.fillStyle = layers.patch.fill;
+          context.fill();
+          if (!layers.patch.sheen) continue;
+          diamondPath(point, layers.patch.inset + 5);
+          context.fillStyle = layers.patch.sheen;
+          context.fill();
+        }
+    // Roads sit beneath deposits and buildings, keeping routes readable without hiding terrain.
+    for (const chunk of chunks)
+      for (let x = chunk.minX; x <= chunk.maxX; x += 1)
+        for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
+          if (!latestRoads.current[`${x}:${y}`]) continue;
+          const point = tilePoint(x, y);
+          context.beginPath();
+          context.moveTo(point.x + 15, point.y + TILE_HEIGHT / 2);
+          context.lineTo(point.x + TILE_WIDTH - 15, point.y + TILE_HEIGHT / 2);
+          context.strokeStyle = 'rgba(176, 132, 80, 0.95)';
+          context.lineWidth = 5;
+          context.stroke();
+        }
+    // Pass 2: sector ownership as borders rather than a wash that hides the terrain.
+    for (const own of [true, false]) {
+      context.beginPath();
+      for (const chunk of chunks)
+        for (let x = chunk.minX; x <= chunk.maxX; x += 1)
+          for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
+            const owner = sectorOwnerAt(x, y);
+            if (!owner || (owner === latestPlayerId.current) !== own) continue;
+            for (const side of borderSides(x, y, sectorOwnerAt)) addSide(tilePoint(x, y), side);
+          }
+      context.strokeStyle = own ? 'rgba(159, 226, 177, 0.95)' : 'rgba(126, 168, 232, 0.85)';
+      context.lineWidth = 2.5;
+      context.stroke();
+    }
+    // Collect deposits for the standing-object pass below. Drawing them here made every
+    // mountain cover them regardless of which tile was actually closer to the viewer.
+    for (const chunk of chunks)
+      for (let x = chunk.minX; x <= chunk.maxX; x += 1)
+        for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
+          const decoration = resourceDecorationSprite(
+            terrainAt(x, y),
+            latestMinedTiles.current[`${x}:${y}`] ?? 0,
+          );
+          if (decoration) resourceTiles.push({ x, y, sprite: decoration });
+        }
+    // Once found, landmarks remain useful orientation points on the explored map.
+    for (const discovery of latestDiscoveries.current) {
+      if (
+        discovery.x < tileBounds.minX ||
+        discovery.x > tileBounds.maxX ||
+        discovery.y < tileBounds.minY ||
+        discovery.y > tileBounds.maxY
+      )
+        continue;
+      const point = tilePoint(discovery.x, discovery.y);
+      context.beginPath();
+      context.arc(point.x + TILE_WIDTH / 2, point.y + TILE_HEIGHT / 2 - 8, 6, 0, Math.PI * 2);
+      context.fillStyle =
+        discovery.kind === 'ancient-ruin'
+          ? '#e7c56c'
+          : discovery.kind === 'fertile-grove'
+            ? '#70c985'
+            : '#c9d7ea';
+      context.fill();
+      context.strokeStyle = '#203040';
+      context.lineWidth = 2;
+      context.stroke();
+    }
+    // Pass 4: the hovered tile, so the pointer target is visible on the map itself.
+    const hoveredForHighlight = latestHoveredTile.current;
+    if (hoveredForHighlight) {
+      diamondPath(tilePoint(hoveredForHighlight.x, hoveredForHighlight.y));
+      context.strokeStyle = 'rgba(255, 243, 196, 0.8)';
+      context.lineWidth = 2;
+      context.stroke();
+    }
+    // Pass 5: tile markers. They belong to the ground, so sprites correctly occlude
+    // them instead of a flat marker being painted over a building.
+    const preview = latestPlacementPreview.current;
+    if (preview)
+      diamond(
+        tilePoint(preview.tile.x, preview.tile.y),
+        preview.valid ? 'rgba(107, 190, 123, 0.35)' : 'rgba(215, 82, 82, 0.35)',
+        preview.valid ? '#9fe2b1' : '#ff9d8a',
+      );
+    const selected = latestSelectedTile.current;
+    if (selected) drawEntitySprite('selection', selected.x, selected.y);
+    if (latestOperationsOverlay.current === 'resources') {
+      context.font = '10px system-ui';
+      for (const chunk of visibleRenderChunks(tileBounds))
+        for (let x = chunk.minX; x <= chunk.maxX; x += 1)
+          for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
+            const resource = latestTerrain.current[`${x}:${y}`];
+            if (resource !== 'ore' && resource !== 'wood' && resource !== 'mountain') continue;
+            const level = levelAt(x, y);
+            const point = tilePoint(x, y);
+            const raisedPoint = { x: point.x, y: point.y - level * ELEVATION_STEP };
+            diamond(
+              raisedPoint,
+              resource === 'ore'
+                ? 'rgba(159, 188, 255, 0.32)'
+                : resource === 'wood'
+                  ? 'rgba(139, 216, 134, 0.28)'
+                  : 'rgba(226, 214, 190, 0.3)',
+            );
+            context.fillStyle = '#f4f0df';
+            context.fillText(
+              resource === 'ore' ? 'Ore' : resource === 'wood' ? 'Wood' : 'Stone',
+              raisedPoint.x + 21,
+              raisedPoint.y + 21,
+            );
+          }
+    }
+    /**
+     * One depth-sorted pass for everything that stands above the ground. Mountains have
+     * to share it with entities: a range must hide what is behind it and be hidden by
+     * what stands in front of it, which separate passes cannot express.
+     */
+    const drawMountain = (x: number, y: number, level: number) => {
+      const point = tilePoint(x, y);
+      const top = { x: point.x, y: point.y - level * ELEVATION_STEP };
+      const colors = summitColors(x, y, level);
+      const west = { x: top.x, y: top.y + TILE_HEIGHT / 2 };
+      const east = { x: top.x + TILE_WIDTH, y: top.y + TILE_HEIGHT / 2 };
+      const south = { x: top.x + TILE_WIDTH / 2, y: top.y + TILE_HEIGHT };
+      // Walls are drawn towards the viewer only, and only as far down as the neighbour.
+      const wall = (from: { x: number; y: number }, to: { x: number; y: number }, drop: number) => {
+        if (drop <= 0) return;
+        context.beginPath();
+        context.moveTo(from.x, from.y);
+        context.lineTo(to.x, to.y);
+        context.lineTo(to.x, to.y + drop);
+        context.lineTo(from.x, from.y + drop);
+        context.closePath();
+        context.fill();
+      };
+      context.fillStyle = colors.lit;
+      wall(west, south, (level - levelAt(x, y + 1)) * ELEVATION_STEP);
+      context.fillStyle = colors.shaded;
+      wall(south, east, (level - levelAt(x + 1, y)) * ELEVATION_STEP);
+      diamondPath(top);
+      context.fillStyle = colors.top;
+      context.fill();
+      if (colors.facet) {
+        diamondPath({ x: top.x + 6, y: top.y - 3 }, 9);
+        context.fillStyle = colors.facet;
+        context.fill();
+      }
+      // Outline the silhouette of a range, not every tile inside it, so plateaus read as
+      // one landform instead of a grid.
+      const edges = borderSides(x, y, (tileX, tileY) =>
+        levelAt(tileX, tileY) === level ? `level-${level}` : undefined,
+      );
+      if (edges.length === 0) return;
+      context.beginPath();
+      for (const side of edges) addSide(top, side);
+      context.strokeStyle = 'rgba(20, 29, 46, 0.55)';
+      context.lineWidth = 1.5;
+      context.stroke();
+    };
+    const raised = raisedTiles.map((tile) => ({
+      depth: tile.x + tile.y,
+      y: tile.y,
+      order: 0,
+      draw: () => drawMountain(tile.x, tile.y, tile.level),
+    }));
+    const resourceDrawables = resourceTiles.map((resource) => ({
+      depth: resource.x + resource.y,
+      y: resource.y,
+      order: 1,
+      draw: () => drawEntitySprite(resource.sprite, resource.x, resource.y),
+    }));
+    const buildingDrawables = visibleByIsometricDepth(
       latestBuildings.current,
       tileBounds.center,
       visibleRadius,
-    )) {
-      drawEntitySprite(
-        building.constructionTicks > 0 ? 'construction' : building.kind,
-        building.x,
-        building.y,
-      );
-      if (latestDebug.current?.enabled && latestDebug.current.showEntityIds) {
-        const position = worldToScreen({
-          x: building.x - latestFocus.current.x,
-          y: building.y - latestFocus.current.y,
-        });
-        context.fillStyle = '#f4f0df';
-        context.font = '10px system-ui';
-        context.fillText(building.id, position.x + TILE_WIDTH / 2, position.y - 8);
-      }
-    }
+    ).map((building) => ({
+      depth: building.x + building.y,
+      y: building.y,
+      order: 2,
+      draw: () => {
+        drawContactShadow(building.x, building.y, building.kind === 'watchtower' ? 14 : 20);
+        drawEntitySprite(
+          building.constructionTicks > 0 ? 'construction' : building.kind,
+          building.x,
+          building.y,
+        );
+        if (building.constructionTicks === 0 && building.health < building.maxHealth)
+          drawHealthBar(building.x, building.y, building.health / building.maxHealth);
+        if (latestDebug.current?.enabled && latestDebug.current.showEntityIds) {
+          const position = tilePoint(building.x, building.y);
+          context.fillStyle = '#f4f0df';
+          context.font = '10px system-ui';
+          context.fillText(building.id, position.x + TILE_WIDTH / 2, position.y - 8);
+        }
+      },
+    }));
+    const threatDrawables = visibleByIsometricDepth(
+      latestThreats.current,
+      tileBounds.center,
+      visibleRadius,
+    ).map((threat) => ({
+      depth: threat.x + threat.y,
+      y: threat.y,
+      order: 3,
+      draw: () => {
+        drawContactShadow(threat.x, threat.y, 12);
+        drawEntitySprite('raider', threat.x, threat.y);
+        drawHealthBar(
+          threat.x,
+          threat.y,
+          Math.max(0, Math.min(1, threat.health / threatDefinitions['raider-swarm'].health)),
+        );
+      },
+    }));
+    const carrierDrawables = visibleByIsometricDepth(
+      latestCarriers.current,
+      tileBounds.center,
+      visibleRadius,
+    ).map((carrier) => ({
+      depth: carrier.x + carrier.y,
+      y: carrier.y,
+      order: 3,
+      draw: () => {
+        drawContactShadow(carrier.x, carrier.y, 11);
+        drawEntitySprite('carrier', carrier.x, carrier.y);
+        if (carrier.cargo > 0) drawCargoTally(carrier.x, carrier.y, carrier.cargo);
+      },
+    }));
+    /**
+     * The armed building follows the pointer as a translucent ghost, and joins the sorted
+     * pass so a range or a neighbour standing in front of the site hides it exactly as the
+     * finished structure would. A refused site keeps the ghost fainter than a valid one.
+     */
+    const armed = preview?.armed;
+    const ghostDrawables =
+      armed && preview
+        ? [
+            {
+              depth: preview.tile.x + preview.tile.y,
+              y: preview.tile.y,
+              order: 2,
+              draw: () =>
+                drawEntitySprite(
+                  armed.kind,
+                  preview.tile.x,
+                  preview.tile.y,
+                  preview.valid ? 0.7 : 0.35,
+                ),
+            },
+          ]
+        : [];
+    for (const drawable of [
+      ...raised,
+      ...resourceDrawables,
+      ...buildingDrawables,
+      ...threatDrawables,
+      ...carrierDrawables,
+      ...ghostDrawables,
+    ].sort(compareIsometricDrawables))
+      drawable.draw();
     const operationsOverlay = latestOperationsOverlay.current;
     if (operationsOverlay === 'logistics') {
       const buildingsById = new Map(
@@ -374,17 +604,19 @@ export const WorldCanvas = ({
         const source = buildingsById.get(link.sourceBuildingId);
         const target = buildingsById.get(link.targetBuildingId);
         if (!source || !target) continue;
-        const sourcePoint = worldToScreen({
-          x: source.x - latestFocus.current.x,
-          y: source.y - latestFocus.current.y,
-        });
-        const targetPoint = worldToScreen({
-          x: target.x - latestFocus.current.x,
-          y: target.y - latestFocus.current.y,
-        });
+        const sourcePoint = tilePoint(source.x, source.y);
+        const targetPoint = tilePoint(target.x, target.y);
+        // Drawn along the route the carrier actually walks, so a detour around a range or
+        // the payoff of a paved stretch is visible instead of implied by a straight line.
+        const route = link.route ?? [];
         context.beginPath();
         context.moveTo(sourcePoint.x + TILE_WIDTH / 2, sourcePoint.y + TILE_HEIGHT / 2);
-        context.lineTo(targetPoint.x + TILE_WIDTH / 2, targetPoint.y + TILE_HEIGHT / 2);
+        for (let step = 0; step < route.length; step += 2) {
+          const point = tilePoint(route[step]!, route[step + 1]!);
+          context.lineTo(point.x + TILE_WIDTH / 2, point.y + TILE_HEIGHT / 2);
+        }
+        if (route.length === 0)
+          context.lineTo(targetPoint.x + TILE_WIDTH / 2, targetPoint.y + TILE_HEIGHT / 2);
         context.strokeStyle = logisticsStatusColor(link.status);
         context.lineWidth = 3;
         context.setLineDash(link.status === 'transferred' ? [] : [5, 3]);
@@ -393,7 +625,7 @@ export const WorldCanvas = ({
         context.fillStyle = '#f4f0df';
         context.font = '10px system-ui';
         context.fillText(
-          `${link.item} ${link.throughputPerTick}/t`,
+          `${link.item} ${link.capacityPerTrip}/trip`,
           (sourcePoint.x + targetPoint.x) / 2 + TILE_WIDTH / 2,
           (sourcePoint.y + targetPoint.y) / 2 + TILE_HEIGHT / 2,
         );
@@ -409,10 +641,7 @@ export const WorldCanvas = ({
           building.productionState,
         );
         if (operationsOverlay === 'bottlenecks' && !bottleneck) continue;
-        const point = worldToScreen({
-          x: building.x - latestFocus.current.x,
-          y: building.y - latestFocus.current.y,
-        });
+        const point = tilePoint(building.x, building.y);
         context.font = '11px system-ui';
         context.fillStyle = bottleneck ? '#ffd07a' : '#d7f2ff';
         const label =
@@ -421,48 +650,43 @@ export const WorldCanvas = ({
             : building.productionState.replaceAll('-', ' ');
         context.fillText(label, point.x + TILE_WIDTH / 2, point.y - 7);
       }
-    const selected = latestSelectedTile.current;
-    if (selected) {
-      drawEntitySprite('selection', selected.x, selected.y);
-    }
-    const preview = latestPlacementPreview.current;
-    if (preview) {
-      diamond(
-        worldToScreen({
-          x: preview.tile.x - latestFocus.current.x,
-          y: preview.tile.y - latestFocus.current.y,
-        }),
-        preview.valid ? 'rgba(107, 190, 123, 0.35)' : 'rgba(215, 82, 82, 0.35)',
-        preview.valid ? '#9fe2b1' : '#ff9d8a',
-      );
-    }
-    for (const threat of visibleByIsometricDepth(
-      latestThreats.current,
-      tileBounds.center,
-      visibleRadius,
-    )) {
-      drawEntitySprite('raider', threat.x, threat.y);
-    }
     const debugState = latestDebug.current;
     if (debugState?.enabled) {
       context.font = '10px ui-monospace, monospace';
+      if (debugState.showPaths) {
+        const buildingsById = new Map(
+          latestBuildings.current.map((building) => [building.id, building]),
+        );
+        context.strokeStyle = 'rgba(255, 208, 122, 0.9)';
+        context.lineWidth = 2;
+        context.setLineDash([6, 4]);
+        for (const threat of visibleByIsometricDepth(
+          latestThreats.current,
+          tileBounds.center,
+          visibleRadius,
+        )) {
+          const target = buildingsById.get(threat.targetBuildingId);
+          if (!target) continue;
+          const from = tilePoint(threat.x, threat.y);
+          const to = tilePoint(target.x, target.y);
+          context.beginPath();
+          context.moveTo(from.x + TILE_WIDTH / 2, from.y + TILE_HEIGHT / 2);
+          context.lineTo(to.x + TILE_WIDTH / 2, to.y + TILE_HEIGHT / 2);
+          context.stroke();
+        }
+        context.setLineDash([]);
+      }
       if (debugState.showCoordinates)
         for (const chunk of visibleRenderChunks(tileBounds))
           for (let x = chunk.minX; x <= chunk.maxX; x += 1)
             for (let y = chunk.minY; y <= chunk.maxY; y += 1) {
-              const point = worldToScreen({
-                x: x - latestFocus.current.x,
-                y: y - latestFocus.current.y,
-              });
+              const point = tilePoint(x, y);
               context.fillStyle = 'rgba(244, 240, 223, 0.72)';
               context.fillText(`${x},${y}`, point.x + 27, point.y + 35);
             }
       if (debugState.showChunks)
         for (const chunk of visibleRenderChunks(tileBounds)) {
-          const point = worldToScreen({
-            x: chunk.x * 16 - latestFocus.current.x,
-            y: chunk.y * 16 - latestFocus.current.y,
-          });
+          const point = tilePoint(chunk.x * 16, chunk.y * 16);
           context.strokeStyle = '#80d4ff';
           context.lineWidth = 2;
           context.strokeRect(point.x + 32, point.y + 32, 1, 1);
@@ -470,6 +694,85 @@ export const WorldCanvas = ({
           context.fillText(`chunk ${chunk.x}:${chunk.y}`, point.x + 34, point.y + 28);
         }
     }
+    context.restore();
+
+    const hovered = latestHoveredTile.current;
+    if (hovered) {
+      const hoveredLevel = latestElevation.current[`${hovered.x}:${hovered.y}`] ?? 0;
+      const flatHoveredPoint = worldToScreen({
+        x: hovered.x - latestFocus.current.x,
+        y: hovered.y - latestFocus.current.y,
+      });
+      const hoveredPoint = {
+        x: flatHoveredPoint.x,
+        y: flatHoveredPoint.y - hoveredLevel * ELEVATION_STEP,
+      };
+      const screenPoint = {
+        x: origin.x + view.panX + (hoveredPoint.x + TILE_WIDTH / 2) * view.scale,
+        y: origin.y + view.panY + (hoveredPoint.y + TILE_HEIGHT / 2) * view.scale,
+      };
+      const territoryOwner =
+        latestTerritory.current[`${Math.floor(hovered.x / 8)}:${Math.floor(hovered.y / 8)}`];
+      const previewForHover =
+        latestPlacementPreview.current?.tile.x === hovered.x &&
+        latestPlacementPreview.current.tile.y === hovered.y
+          ? latestPlacementPreview.current
+          : undefined;
+      const lines = tileHoverLines({
+        tile: hovered,
+        terrain: latestTerrain.current[`${hovered.x}:${hovered.y}`],
+        elevation: latestElevation.current[`${hovered.x}:${hovered.y}`] ?? 0,
+        minedAmount: latestMinedTiles.current[`${hovered.x}:${hovered.y}`] ?? 0,
+        resourceReachable: resourceIsReachable(hovered, latestPlayerPlot.current),
+        territoryOwner,
+        playerId: latestPlayerId.current,
+        placementValid: Boolean(previewForHover?.valid),
+        ...(previewForHover?.armed
+          ? {
+              armedPlacement: {
+                name: previewForHover.armed.name,
+                valid: previewForHover.valid,
+                reason: previewForHover.armed.reason,
+              },
+            }
+          : {}),
+        building: latestBuildings.current.find(
+          (candidate) => candidate.x === hovered.x && candidate.y === hovered.y,
+        ),
+        threat: latestThreats.current.find(
+          (candidate) => candidate.x === hovered.x && candidate.y === hovered.y,
+        ),
+        carrier: latestCarriers.current.find(
+          (candidate) => candidate.x === hovered.x && candidate.y === hovered.y,
+        ),
+      });
+      const hoverDescription = lines.join('. ');
+      if (element.getAttribute('aria-description') !== hoverDescription)
+        element.setAttribute('aria-description', hoverDescription);
+      context.font = '12px system-ui';
+      const padding = 9;
+      const lineHeight = 17;
+      const boxWidth =
+        Math.max(...lines.map((line) => context.measureText(line).width)) + padding * 2;
+      const boxHeight = lines.length * lineHeight + padding * 2;
+      const preferredY = screenPoint.y - boxHeight - 18;
+      const boxX = Math.max(8, Math.min(width - boxWidth - 8, screenPoint.x + 18));
+      const boxY =
+        preferredY >= 8 ? preferredY : Math.min(height - boxHeight - 8, screenPoint.y + 18);
+      context.fillStyle = 'rgba(12, 20, 32, 0.96)';
+      context.strokeStyle = '#86a997';
+      context.lineWidth = 1;
+      context.beginPath();
+      context.roundRect(boxX, boxY, boxWidth, boxHeight, 5);
+      context.fill();
+      context.stroke();
+      lines.forEach((line, index) => {
+        context.font = index === 0 ? 'bold 12px system-ui' : '12px system-ui';
+        context.fillStyle = index === lines.length - 1 ? '#d9c27a' : '#f4f0df';
+        context.fillText(line, boxX + padding, boxY + padding + lineHeight * (index + 0.78));
+      });
+    } else if (element.hasAttribute('aria-description'))
+      element.removeAttribute('aria-description');
   };
 
   useEffect(() => {
@@ -518,22 +821,26 @@ export const WorldCanvas = ({
             return `${Math.floor((x ?? 0) / 16)}:${Math.floor((y ?? 0) / 16)}`;
           }),
         );
+        const renderedTiles =
+          (metricsBounds.maxX - metricsBounds.minX + 1) *
+          (metricsBounds.maxY - metricsBounds.minY + 1);
+        const visibleBuildings = visibleByIsometricDepth(
+          latestBuildings.current,
+          metricsBounds.center,
+          metricsRadius,
+        ).length;
+        const visibleThreats = visibleByIsometricDepth(
+          latestThreats.current,
+          metricsBounds.center,
+          metricsRadius,
+        ).length;
         latestMetrics.current?.({
           framesPerSecond: Math.round((renderedFrames * 1_000) / elapsed),
-          renderedTiles:
-            (metricsBounds.maxX - metricsBounds.minX + 1) *
-            (metricsBounds.maxY - metricsBounds.minY + 1),
-          visibleBuildings: visibleByIsometricDepth(
-            latestBuildings.current,
-            metricsBounds.center,
-            metricsRadius,
-          ).length,
-          visibleThreats: visibleByIsometricDepth(
-            latestThreats.current,
-            metricsBounds.center,
-            metricsRadius,
-          ).length,
+          renderedTiles,
+          visibleBuildings,
+          visibleThreats,
           activeChunks: chunks.size,
+          renderObjectCount: renderedTiles + visibleBuildings + visibleThreats,
         });
         renderedFrames = 0;
         sampleStartedAt = now;
@@ -550,14 +857,28 @@ export const WorldCanvas = ({
     const tileAtPointer = (event: PointerEvent) => {
       const rectangle = element.getBoundingClientRect();
       const view = viewport.current;
-      const world = screenToTile({
-        x: (event.clientX - rectangle.left - rectangle.width / 2 - view.panX) / view.scale,
-        y: (event.clientY - rectangle.top - 80 - view.panY) / view.scale,
-      });
-      return {
-        x: world.x + latestFocus.current.x,
-        y: world.y + latestFocus.current.y,
+      const origin = cameraOrigin(rectangle.width, rectangle.height);
+      const focus = latestFocus.current;
+      const point = {
+        x: (event.clientX - rectangle.left - origin.x - view.panX) / view.scale,
+        y: (event.clientY - rectangle.top - origin.y - view.panY) / view.scale,
       };
+      const flat = screenToTile(point);
+      const groundTile = { x: flat.x + focus.x, y: flat.y + focus.y };
+      /**
+       * A mountain accepts no command, so rock standing in front of an entity must not
+       * swallow the click: when the ground tile under the pointer is occupied, that entity
+       * wins. Nothing is lost for the mountain and players keep access to their buildings.
+       */
+      if (entityAtTile(groundTile, latestBuildings.current, latestThreats.current))
+        return groundTile;
+      // Picking runs in focus-relative tile space, so the elevation lookup shifts too.
+      const raised = screenToRaisedTile(
+        point,
+        (x, y) => latestElevation.current[`${x + focus.x}:${y + focus.y}`] ?? 0,
+        MAX_ELEVATION,
+      );
+      return { x: raised.x + focus.x, y: raised.y + focus.y };
     };
     const onPointerDown = (event: PointerEvent) => {
       dragging = true;
@@ -586,7 +907,8 @@ export const WorldCanvas = ({
       dragging = false;
       if (draggedDistance < 8) {
         const tile = tileAtPointer(event);
-        latestSelectTile.current?.(tile);
+        // Shift travels with the click so a placement can keep the building armed for the next one.
+        latestSelectTile.current?.(tile, { shift: event.shiftKey });
         latestSelectEntity.current?.(
           entityAtTile(tile, latestBuildings.current, latestThreats.current),
         );
@@ -617,7 +939,10 @@ export const WorldCanvas = ({
                 : undefined;
       if (direction) {
         event.preventDefault();
-        latestSelectTile.current?.({ x: selected.x + direction.x, y: selected.y + direction.y });
+        latestSelectTile.current?.(
+          { x: selected.x + direction.x, y: selected.y + direction.y },
+          { shift: event.shiftKey },
+        );
         return;
       }
       const pan = 48;

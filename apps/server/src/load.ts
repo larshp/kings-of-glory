@@ -29,6 +29,7 @@ console.log(
     durationMs,
     ticksPerSecond: ticks / (durationMs / 1_000),
     commandCount: result.commandCount,
+    botActions: result.botActions,
     stateHash: result.hash,
     entities: Object.keys(result.state.buildings).length,
     logisticsLinks: Object.keys(result.state.logisticsLinks).length,

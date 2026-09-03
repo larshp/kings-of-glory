@@ -1,4 +1,6 @@
 /** Content schemas deliberately use plain data so the same definitions work in builds and on the server. */
+export const CONTENT_VERSION = 7 as const;
+
 export interface ItemDefinition {
   readonly id: string;
   readonly displayName: string;
@@ -9,6 +11,7 @@ export interface RecipeDefinition {
   readonly input: Readonly<Record<string, number>>;
   readonly output: Readonly<Record<string, number>>;
   readonly ticks: number;
+  readonly requiredTechnology: string | null;
 }
 export interface BuildingDefinition {
   readonly id: string;
@@ -23,20 +26,46 @@ export interface BuildingDefinition {
   readonly serviceSatisfaction?: number;
   readonly defenseDamage?: number;
 }
+/**
+ * A permanent second tier for one building kind. Upgrading re-enters the ordinary
+ * construction pipeline — the building stops working, needs a builder, and consumes
+ * the delivered materials — so a tier is paid for in downtime as well as bricks.
+ *
+ * `workRateMultiplier` scales recipe and extraction durations, so a value below one
+ * is faster; durations are rounded up and never fall below a single tick.
+ */
+export interface BuildingUpgradeDefinition {
+  readonly buildingId: string;
+  readonly tier: 2;
+  readonly cost: Readonly<Record<string, number>>;
+  readonly constructionTicks: number;
+  readonly workRateMultiplier: number;
+  readonly inventoryCapacityMultiplier: number;
+  readonly maxHealthMultiplier: number;
+  readonly requiredTechnology: string | null;
+}
 export interface TechnologyDefinition {
   readonly id: string;
   readonly displayName: string;
   readonly prerequisites: readonly string[];
   readonly cost: Readonly<Record<string, number>>;
   readonly ticks: number;
+  /** Technologies in the same group are mutually exclusive permanent choices. */
+  readonly exclusiveGroup?: string;
 }
 export interface ResourceNodeDefinition {
   readonly id: string;
-  readonly terrain: 'ore' | 'wood';
+  readonly terrain: ResourceTerrain;
   readonly item: string;
   readonly yield: number;
   readonly renewable: boolean;
 }
+/**
+ * Terrain a deposit can sit on. Ore and timber are their own tiles; stone is cut out of
+ * the mountain ranges that already exist, so quarrying gives relief a use beyond blocking
+ * movement without adding a terrain type or moving a single existing tile.
+ */
+export type ResourceTerrain = 'ore' | 'wood' | 'mountain';
 export interface ProducerDefinition {
   readonly buildingId: string;
   readonly recipeIds: readonly string[];
@@ -46,40 +75,187 @@ export interface StorageDefinition {
   readonly buildingId: string;
   readonly capacity: number;
 }
+/**
+ * An extractor automates a gathering action: a staffed, completed extractor pulls
+ * from the nearest deposit in range instead of requiring one click per item. Deposits
+ * stay finite, so extractors change the effort a chain costs, not the world's supply.
+ */
+export interface ExtractorDefinition {
+  readonly buildingId: string;
+  readonly terrain: ResourceTerrain;
+  readonly item: string;
+  /** Manhattan tiles searched around the extractor for a deposit with yield left. */
+  readonly range: number;
+  readonly ticksPerUnit: number;
+}
 export interface LogisticsLinkDefinition {
   readonly id: string;
   readonly acceptedSourceKinds: readonly string[];
   readonly acceptedTargetKinds: readonly string[];
-  readonly throughputPerTick: number;
+  /** Items one carrier loads for a single round trip along the link's route. */
+  readonly carrierCapacity: number;
+}
+export interface RenewerDefinition {
+  readonly buildingId: string;
+  readonly terrain: 'wood';
+  readonly range: number;
+  readonly ticksPerUnit: number;
+  readonly waterBonusTicksPerUnit: number;
+}
+export interface CooperativeObjectiveDefinition {
+  readonly id: string;
+  readonly displayName: string;
+  readonly description: string;
+  readonly contributionItem: string;
+  readonly targetAmount: number;
+  readonly reward: Readonly<Record<string, number>>;
+}
+export interface SettlementInitiativeDefinition {
+  readonly id: string;
+  readonly displayName: string;
+  readonly description: string;
+  readonly cost: Readonly<Record<string, number>>;
+  readonly durationTicks: number;
 }
 
 export const items = {
   ore: { id: 'ore', displayName: 'Ore', stackLimit: 100 },
   wood: { id: 'wood', displayName: 'Wood', stackLimit: 100 },
+  stone: { id: 'stone', displayName: 'Stone', stackLimit: 100 },
   ingot: { id: 'ingot', displayName: 'Ingot', stackLimit: 100 },
+  brick: { id: 'brick', displayName: 'Brick', stackLimit: 100 },
   tool: { id: 'tool', displayName: 'Tool', stackLimit: 100 },
+  /**
+   * The civic age's finished good, and the first item both first-age chains have to meet
+   * to produce: steel needs refined ore and fired brick together.
+   */
+  steel: { id: 'steel', displayName: 'Steel', stackLimit: 100 },
 } as const satisfies Readonly<Record<string, ItemDefinition>>;
 
 export type ItemId = keyof typeof items;
 
+/**
+ * Deposits keyed by the terrain they are cut from, because every rule that reaches for a
+ * deposit starts from a tile: gathering, extraction, and depletion all look up the tile's
+ * terrain. The stone entry therefore lives under `mountain`, the terrain it is quarried
+ * from, rather than under its item name.
+ */
 export const resources = {
   ore: { id: 'ore', terrain: 'ore', item: 'ore', yield: 10, renewable: false },
-  wood: { id: 'wood', terrain: 'wood', item: 'wood', yield: 10, renewable: false },
+  wood: { id: 'wood', terrain: 'wood', item: 'wood', yield: 10, renewable: true },
+  mountain: { id: 'stone', terrain: 'mountain', item: 'stone', yield: 12, renewable: false },
 } as const satisfies Readonly<Record<string, ResourceNodeDefinition>>;
 
+/**
+ * Mountain generation. Only mountains carry elevation: every other tile stays at level
+ * zero, so construction, logistics, population, and combat keep working on flat ground
+ * while ranges give the world a readable silhouette and block movement.
+ *
+ * Heights come from ridged fractal Perlin noise, so ranges are connected chains with
+ * tall cores and foothill fringes rather than isolated spikes on a grid.
+ *
+ * `ridgeScale` is how many tiles span one noise cell, so it sets how long a range runs.
+ * `octaves` layers finer detail over that base shape. `threshold` is the normalised ridge
+ * strength a tile must reach to rise at all, so raising it shrinks the mountains. The band
+ * between `threshold` and full strength is mapped onto whole levels up to `maxLevel`.
+ */
+export const terrainRules = {
+  /**
+   * Measured coverage at these values is 13-15% of tiles, matching the footprint ranges
+   * had before, with roughly two thirds of them above level one and crests reaching
+   * `maxLevel`. A coarse cell is what makes ranges connect: at a cell of 14 the same
+   * coverage broke into speckle, because a high threshold keeps only crest fragments.
+   */
+  mountain: { ridgeScale: 32, octaves: 2, threshold: 0.81, maxLevel: 5 },
+  movement: { roughTerrainDelayTicks: 1 },
+  /** Height is sight: any defence building beside a range reaches this much further. */
+  defense: { mountainRangeBonus: 2 },
+} as const;
+
+export const landmarks = {
+  'ancient-ruin': {
+    id: 'ancient-ruin',
+    displayName: 'Ancient ruin',
+    description: 'Recovered knowledge grants one ingot when first discovered.',
+  },
+  'fertile-grove': {
+    id: 'fertile-grove',
+    displayName: 'Fertile grove',
+    description: 'Foresters in this chunk restore timber twice as quickly.',
+  },
+  'mountain-pass': {
+    id: 'mountain-pass',
+    displayName: 'Mountain pass',
+    description: 'Survey supplies grant one tool when first discovered.',
+  },
+} as const;
+
+export type LandmarkId = keyof typeof landmarks;
+
 export const recipes = {
-  smeltOre: { id: 'smelt-ore', input: { ore: 1 }, output: { ingot: 1 }, ticks: 3 },
+  smeltOre: {
+    id: 'smelt-ore',
+    input: { ore: 1 },
+    output: { ingot: 1 },
+    ticks: 3,
+    requiredTechnology: null,
+  },
   forgeTool: {
     id: 'forge-tool',
     input: { ingot: 1, wood: 1 },
     output: { tool: 1 },
     ticks: 5,
+    requiredTechnology: null,
   },
   forgeToolWithoutWood: {
     id: 'forge-tool-without-wood',
     input: { ingot: 2 },
-    output: { tool: 1 },
-    ticks: 4,
+    output: { tool: 2 },
+    ticks: 6,
+    requiredTechnology: 'engineering',
+  },
+  stewardToolBatch: {
+    id: 'steward-tool-batch',
+    input: { ingot: 1, wood: 2 },
+    output: { tool: 2 },
+    ticks: 7,
+    requiredTechnology: 'stewardship',
+  },
+  /** Masonry's core conversion: quarried stone fired with timber into building brick. */
+  fireBrick: {
+    id: 'fire-brick',
+    input: { stone: 2, wood: 1 },
+    output: { brick: 1 },
+    ticks: 6,
+    requiredTechnology: null,
+  },
+  /**
+   * The civic age's core conversion, and the first recipe that consumes the output of both
+   * first-age chains: a settlement that only smelts or only fires brick cannot cast steel
+   * on its own materials.
+   */
+  castSteel: {
+    id: 'cast-steel',
+    input: { ingot: 2, brick: 1 },
+    output: { steel: 1 },
+    ticks: 8,
+    requiredTechnology: 'metalcasting',
+  },
+  /** Precision casting spends brick where the base recipe spends ingots, and is quicker. */
+  castSteelPrecise: {
+    id: 'cast-steel-precise',
+    input: { ingot: 1, brick: 2 },
+    output: { steel: 1 },
+    ticks: 6,
+    requiredTechnology: 'precision-casting',
+  },
+  /** Bulk casting is the cheapest steel per unit and the slowest to arrive. */
+  castSteelBulk: {
+    id: 'cast-steel-bulk',
+    input: { ingot: 3, brick: 2 },
+    output: { steel: 2 },
+    ticks: 11,
+    requiredTechnology: 'bulk-casting',
   },
 } as const satisfies Readonly<Record<string, RecipeDefinition>>;
 
@@ -158,14 +334,227 @@ export const buildings = {
     defenseDamage: 1,
     requiredTechnology: 'metallurgy',
   },
+  mine: {
+    id: 'mine',
+    displayName: 'Mine',
+    cost: { wood: 4 },
+    inventoryCapacity: 20,
+    populationCapacity: 0,
+    maxHealth: 10,
+    constructionTicks: 8,
+    requiredTechnology: null,
+  },
+  'lumber-camp': {
+    id: 'lumber-camp',
+    displayName: 'Lumber camp',
+    cost: { wood: 3 },
+    inventoryCapacity: 20,
+    populationCapacity: 0,
+    maxHealth: 10,
+    constructionTicks: 8,
+    requiredTechnology: null,
+  },
+  forester: {
+    id: 'forester',
+    displayName: 'Forester',
+    cost: { wood: 4 },
+    inventoryCapacity: 0,
+    populationCapacity: 0,
+    maxHealth: 12,
+    constructionTicks: 8,
+    requiredTechnology: 'stewardship',
+  },
+  quarry: {
+    id: 'quarry',
+    displayName: 'Quarry',
+    cost: { wood: 5 },
+    inventoryCapacity: 20,
+    populationCapacity: 0,
+    maxHealth: 12,
+    constructionTicks: 10,
+    requiredTechnology: 'masonry',
+  },
+  brickworks: {
+    id: 'brickworks',
+    displayName: 'Brickworks',
+    cost: { wood: 5 },
+    inventoryCapacity: 30,
+    populationCapacity: 0,
+    maxHealth: 15,
+    constructionTicks: 12,
+    requiredTechnology: 'masonry',
+    recipe: 'fire-brick',
+  },
+  /**
+   * The first building whose durability is the point. Brick costs a whole production
+   * chain, and buys a wall that outlasts every timber structure by a wide margin while
+   * blocking raider routes exactly as any other building does.
+   */
+  wall: {
+    id: 'wall',
+    displayName: 'Wall',
+    cost: { brick: 1 },
+    inventoryCapacity: 0,
+    populationCapacity: 0,
+    maxHealth: 40,
+    constructionTicks: 6,
+    requiredTechnology: 'masonry',
+  },
+  /**
+   * The civic age's producer. It is placed like any other, but it only runs on materials
+   * from two chains at once, so the age is entered by a settlement that finished both or
+   * by two that trade.
+   */
+  foundry: {
+    id: 'foundry',
+    displayName: 'Foundry',
+    cost: { brick: 3, wood: 2 },
+    inventoryCapacity: 30,
+    populationCapacity: 0,
+    maxHealth: 20,
+    constructionTicks: 14,
+    requiredTechnology: 'metalcasting',
+    recipe: 'cast-steel',
+  },
+  /**
+   * A watchtower answers one raider; a bastion answers a raid. It is the first building
+   * that spends steel, so the civic age pays for its own defence.
+   */
+  bastion: {
+    id: 'bastion',
+    displayName: 'Bastion',
+    cost: { brick: 3, steel: 1 },
+    inventoryCapacity: 0,
+    populationCapacity: 0,
+    maxHealth: 60,
+    constructionTicks: 12,
+    defenseDamage: 3,
+    requiredTechnology: 'fortification',
+  },
+  /**
+   * A second service rather than a larger hearth: satisfaction counts one contribution per
+   * kind of service, so a guild hall is worth building beside a hearth and worthless twice.
+   */
+  'guild-hall': {
+    id: 'guild-hall',
+    displayName: 'Guild hall',
+    cost: { brick: 4, tool: 1 },
+    inventoryCapacity: 0,
+    populationCapacity: 0,
+    maxHealth: 25,
+    constructionTicks: 12,
+    serviceSatisfaction: 25,
+    requiredTechnology: 'civic-charter',
+  },
 } as const satisfies Readonly<Record<string, BuildingDefinition>>;
+
+/**
+ * Every kind that can be upgraded, and what the tier buys. Producers and extractors gain
+ * throughput, storage gains room, and all of them gain durability. Tools plus brick keep
+ * both the metallurgy and the masonry chains relevant after research finishes.
+ */
+export const buildingUpgrades = {
+  smelter: {
+    buildingId: 'smelter',
+    tier: 2,
+    cost: { tool: 1, brick: 2 },
+    constructionTicks: 12,
+    workRateMultiplier: 0.6,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'masonry',
+  },
+  workshop: {
+    buildingId: 'workshop',
+    tier: 2,
+    cost: { tool: 1, brick: 3 },
+    constructionTicks: 14,
+    workRateMultiplier: 0.6,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'masonry',
+  },
+  brickworks: {
+    buildingId: 'brickworks',
+    tier: 2,
+    cost: { tool: 1, brick: 3 },
+    constructionTicks: 14,
+    workRateMultiplier: 0.6,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'masonry',
+  },
+  mine: {
+    buildingId: 'mine',
+    tier: 2,
+    cost: { tool: 1, brick: 2 },
+    constructionTicks: 12,
+    workRateMultiplier: 0.5,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'masonry',
+  },
+  'lumber-camp': {
+    buildingId: 'lumber-camp',
+    tier: 2,
+    cost: { tool: 1, brick: 2 },
+    constructionTicks: 12,
+    workRateMultiplier: 0.5,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'masonry',
+  },
+  quarry: {
+    buildingId: 'quarry',
+    tier: 2,
+    cost: { tool: 1, brick: 2 },
+    constructionTicks: 12,
+    workRateMultiplier: 0.5,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'masonry',
+  },
+  storage: {
+    buildingId: 'storage',
+    tier: 2,
+    cost: { brick: 4 },
+    constructionTicks: 10,
+    workRateMultiplier: 1,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'masonry',
+  },
+  /** The one tier paid for in steel, so the civic age's output feeds its own throughput. */
+  foundry: {
+    buildingId: 'foundry',
+    tier: 2,
+    cost: { steel: 1, brick: 3 },
+    constructionTicks: 16,
+    workRateMultiplier: 0.6,
+    inventoryCapacityMultiplier: 2,
+    maxHealthMultiplier: 1.5,
+    requiredTechnology: 'metalcasting',
+  },
+} as const satisfies Readonly<Record<string, BuildingUpgradeDefinition>>;
+
+export type UpgradableBuildingKind = keyof typeof buildingUpgrades;
 
 export const producers = {
   smelter: { buildingId: 'smelter', recipeIds: ['smelt-ore'], defaultRecipeId: 'smelt-ore' },
   workshop: {
     buildingId: 'workshop',
-    recipeIds: ['forge-tool', 'forge-tool-without-wood'],
+    recipeIds: ['forge-tool', 'forge-tool-without-wood', 'steward-tool-batch'],
     defaultRecipeId: 'forge-tool',
+  },
+  brickworks: {
+    buildingId: 'brickworks',
+    recipeIds: ['fire-brick'],
+    defaultRecipeId: 'fire-brick',
+  },
+  foundry: {
+    buildingId: 'foundry',
+    recipeIds: ['cast-steel', 'cast-steel-precise', 'cast-steel-bulk'],
+    defaultRecipeId: 'cast-steel',
   },
 } as const satisfies Readonly<Record<string, ProducerDefinition>>;
 
@@ -173,14 +562,62 @@ export const storage = {
   storage: { buildingId: 'storage', capacity: 200 },
 } as const satisfies Readonly<Record<string, StorageDefinition>>;
 
+export const extractors = {
+  mine: { buildingId: 'mine', terrain: 'ore', item: 'ore', range: 4, ticksPerUnit: 4 },
+  'lumber-camp': {
+    buildingId: 'lumber-camp',
+    terrain: 'wood',
+    item: 'wood',
+    range: 4,
+    ticksPerUnit: 4,
+  },
+  /** Cuts stone out of a range: slower per unit than ore, but every range is a deposit. */
+  quarry: { buildingId: 'quarry', terrain: 'mountain', item: 'stone', range: 4, ticksPerUnit: 5 },
+} as const satisfies Readonly<Record<string, ExtractorDefinition>>;
+
+export const renewers = {
+  forester: {
+    buildingId: 'forester',
+    terrain: 'wood',
+    range: 4,
+    ticksPerUnit: 20,
+    waterBonusTicksPerUnit: 10,
+  },
+} as const satisfies Readonly<Record<string, RenewerDefinition>>;
+
 export const logisticsLinks = {
   internalInventory: {
     id: 'internal-inventory',
-    acceptedSourceKinds: ['storage', 'smelter', 'workshop'],
-    acceptedTargetKinds: ['smelter', 'workshop'],
-    throughputPerTick: 1,
+    acceptedSourceKinds: [
+      'storage',
+      'smelter',
+      'workshop',
+      'brickworks',
+      'foundry',
+      'mine',
+      'lumber-camp',
+      'quarry',
+    ],
+    acceptedTargetKinds: ['smelter', 'workshop', 'brickworks', 'foundry', 'storage'],
+    carrierCapacity: 4,
   },
 } as const satisfies Readonly<Record<string, LogisticsLinkDefinition>>;
+
+/**
+ * Roads pay for themselves in movement. `baseTilesPerTick` is the movement budget a
+ * carrier spends each tick; a paved step costs `roadStepCost` and unpaved ground costs
+ * `groundStepCost`, so a route worth paving carries roughly twice as much.
+ */
+export const roadRules = {
+  woodCost: 1,
+  baseTilesPerTick: 4,
+  engineeringTilesPerTick: 6,
+  roadDistanceDiscount: 1,
+  roadStepCost: 1,
+  groundStepCost: 2,
+  /** Bounds one link's stored route, and with it the per-carrier state a world retains. */
+  maxRouteTiles: 96,
+} as const;
 
 export const technologies = {
   metallurgy: {
@@ -197,6 +634,81 @@ export const technologies = {
     cost: { tool: 2 },
     ticks: 20,
   },
+  engineering: {
+    id: 'engineering',
+    displayName: 'Engineering',
+    prerequisites: ['metallurgy'],
+    cost: { tool: 1 },
+    ticks: 15,
+    exclusiveGroup: 'development-path',
+  },
+  stewardship: {
+    id: 'stewardship',
+    displayName: 'Stewardship',
+    prerequisites: ['metallurgy'],
+    cost: { tool: 1 },
+    ticks: 15,
+    exclusiveGroup: 'development-path',
+  },
+  /**
+   * Deliberately outside the exclusive development path: masonry opens the stone chain,
+   * walls, and every building tier, so making it compete with Engineering or Stewardship
+   * would turn one permanent choice into a dead end.
+   */
+  masonry: {
+    id: 'masonry',
+    displayName: 'Masonry',
+    prerequisites: ['metallurgy'],
+    cost: { ingot: 2 },
+    ticks: 18,
+  },
+  /**
+   * The civic age's gate, and deliberately expensive in both first-age currencies: entering
+   * the age is what a settlement does once the metallurgy and masonry chains both run, not
+   * a step it can reach with one of them.
+   */
+  'civic-charter': {
+    id: 'civic-charter',
+    displayName: 'Civic Charter',
+    prerequisites: ['territorial-charter', 'masonry'],
+    cost: { brick: 3, tool: 2 },
+    ticks: 25,
+  },
+  metalcasting: {
+    id: 'metalcasting',
+    displayName: 'Metalcasting',
+    prerequisites: ['civic-charter'],
+    cost: { brick: 2, ingot: 3 },
+    ticks: 22,
+  },
+  fortification: {
+    id: 'fortification',
+    displayName: 'Fortification',
+    prerequisites: ['civic-charter'],
+    cost: { brick: 4, tool: 1 },
+    ticks: 22,
+  },
+  /**
+   * The civic age's permanent choice. Like the first one it splits a recipe rather than
+   * gating a building, so neither branch closes the foundry or the steel the world's shared
+   * projects ask for — the choice is which chain a settlement would rather spend.
+   */
+  'precision-casting': {
+    id: 'precision-casting',
+    displayName: 'Precision Casting',
+    prerequisites: ['metalcasting'],
+    cost: { steel: 1 },
+    ticks: 20,
+    exclusiveGroup: 'casting-path',
+  },
+  'bulk-casting': {
+    id: 'bulk-casting',
+    displayName: 'Bulk Casting',
+    prerequisites: ['metalcasting'],
+    cost: { steel: 1 },
+    ticks: 20,
+    exclusiveGroup: 'casting-path',
+  },
 } as const satisfies Readonly<Record<string, TechnologyDefinition>>;
 
 export const threats = {
@@ -207,6 +719,11 @@ export const threats = {
     damage: 2,
     spawnDistance: { min: 6, max: 12 },
     watchtowerRange: 8,
+    newPlayerProtectionTicks: 300,
+    inactiveAfterTicks: 300,
+    inactiveHealthFloorPercent: 50,
+    maxInactiveThreatsPerPlayer: 1,
+    settlementBufferTiles: 2,
   },
 } as const;
 
@@ -217,6 +734,124 @@ export const environmentalEvents = {
     intervalTicks: 100,
     damage: 1,
   },
+} as const;
+
+/**
+ * The world's shared projects. Each one rewards the currency of the age below it, so a
+ * finished project pays back into the chain the next one will ask for.
+ */
+export const cooperativeObjectives = {
+  'frontier-beacon': {
+    id: 'frontier-beacon',
+    displayName: 'Frontier Beacon',
+    description: 'Settlements contribute tools to establish a shared warning beacon.',
+    contributionItem: 'tool',
+    targetAmount: 20,
+    reward: { ingot: 2 },
+  },
+  'great-causeway': {
+    id: 'great-causeway',
+    displayName: 'Great Causeway',
+    description: 'Settlements lay brick for a paved road across the frontier.',
+    contributionItem: 'brick',
+    targetAmount: 24,
+    reward: { tool: 2 },
+  },
+  'grand-foundry': {
+    id: 'grand-foundry',
+    displayName: 'Grand Foundry',
+    description: 'Settlements pool steel to raise a foundry the whole world can draw on.',
+    contributionItem: 'steel',
+    targetAmount: 12,
+    reward: { brick: 4 },
+  },
+} as const satisfies Readonly<Record<string, CooperativeObjectiveDefinition>>;
+
+/** Repeatable, opt-in sinks for mature settlements rather than punitive upkeep. */
+export const settlementInitiatives = {
+  'freight-charter': {
+    id: 'freight-charter',
+    displayName: 'Freight charter',
+    description: 'Carriers move farther and load two extra items for five minutes.',
+    cost: { tool: 2, brick: 2 },
+    durationTicks: 300,
+  },
+  'builders-festival': {
+    id: 'builders-festival',
+    displayName: "Builders' festival",
+    description: 'Construction crews complete two worker ticks at a time for five minutes.',
+    cost: { tool: 1, brick: 3 },
+    durationTicks: 300,
+  },
+} as const satisfies Readonly<Record<string, SettlementInitiativeDefinition>>;
+
+export type SettlementInitiativeId = keyof typeof settlementInitiatives;
+
+export type CooperativeObjectiveId = keyof typeof cooperativeObjectives;
+
+/**
+ * How the world works through its shared projects. One is open at a time, and the world
+ * never runs out of them: the order wraps, and every completed lap raises each project's
+ * target. A permanent world would otherwise finish its only project once and leave every
+ * player who arrived afterwards with nothing shared left to build.
+ *
+ * A finished project stays open for `claimWindowTicks` so its contributors can collect
+ * before the next one opens. Growth is added and capped rather than multiplied, because a
+ * target has to stay reachable by the number of players a world actually holds.
+ */
+export const worldProjectRules = {
+  order: ['frontier-beacon', 'great-causeway', 'grand-foundry'],
+  claimWindowTicks: 300,
+  targetGrowthPerLap: 8,
+  maxTargetAmount: 60,
+} as const satisfies {
+  readonly order: readonly CooperativeObjectiveId[];
+  readonly claimWindowTicks: number;
+  readonly targetGrowthPerLap: number;
+  readonly maxTargetAmount: number;
+};
+
+/** Server-enforced social limits; terms are placeholders for a reviewed deployment list. */
+export const socialRules = {
+  playerNameLength: { min: 3, max: 24 },
+  settlementNameLength: { min: 3, max: 32 },
+  chatMessageMaxLength: 280,
+  reportReasonMaxLength: 200,
+  chatCooldownTicks: 5,
+  retainedMessages: 500,
+  retainedReports: 1_000,
+  moderatedTerms: ['admin', 'moderator', 'system'],
+} as const;
+
+/**
+ * Bounds the authoritative ledgers that would otherwise grow for the lifetime of
+ * a permanent world. Every bound must exceed the matching runtime safety limit so
+ * a full tick of pending work still fits inside its window.
+ */
+export const worldRetention = {
+  /**
+   * Command-ID window used to reject duplicate retries. Retries older than the
+   * window are still rejected by the per-player command sequence, so the window
+   * only has to cover the commands a client can still have in flight.
+   */
+  processedCommands: 1_024,
+  /** Completed player-to-player transfers retained for auditing. */
+  transfers: 1_000,
+  /**
+   * Contribution and reward records one shared project retains. Projects repeat for the
+   * life of the world, so this audit trail is the one that would otherwise grow forever.
+   */
+  objectiveHistory: 1_000,
+} as const;
+
+/**
+ * An unfinished starter settlement keeps its reservation only while its owner
+ * is active. Completing the first smelter turns that temporary lease into a
+ * permanent settlement reservation.
+ */
+export const onboardingRules = {
+  abandonedReservationTicks: 36_000,
+  securingBuildingKind: 'smelter',
 } as const;
 
 export type TechnologyId = keyof typeof technologies;
@@ -286,6 +921,8 @@ export const validateContent = (): string[] => {
     for (const item of [...Object.keys(recipe.input), ...Object.keys(recipe.output)])
       if (!(item in items)) errors.push(`${recipe.id} references unknown item ${item}`);
     if (recipe.ticks < 1) errors.push(`${recipe.id} must take at least one tick`);
+    if (recipe.requiredTechnology && !(recipe.requiredTechnology in technologies))
+      errors.push(`${recipe.id} references unknown technology ${recipe.requiredTechnology}`);
   }
   for (const resource of Object.values(resources)) {
     if (!(resource.item in items))
@@ -309,6 +946,63 @@ export const validateContent = (): string[] => {
       !Object.values(recipes).some((recipe) => recipe.id === building.recipe)
     )
       errors.push(`${building.id} references unknown recipe ${building.recipe}`);
+  for (const threat of Object.values(threats)) {
+    if (
+      !Number.isInteger(threat.spawnIntervalTicks) ||
+      threat.spawnIntervalTicks < 1 ||
+      !Number.isInteger(threat.newPlayerProtectionTicks) ||
+      threat.newPlayerProtectionTicks < 0 ||
+      !Number.isInteger(threat.inactiveAfterTicks) ||
+      threat.inactiveAfterTicks < 1 ||
+      !Number.isInteger(threat.inactiveHealthFloorPercent) ||
+      threat.inactiveHealthFloorPercent < 1 ||
+      threat.inactiveHealthFloorPercent > 100 ||
+      !Number.isInteger(threat.maxInactiveThreatsPerPlayer) ||
+      threat.maxInactiveThreatsPerPlayer < 1 ||
+      !Number.isInteger(threat.settlementBufferTiles) ||
+      threat.settlementBufferTiles < 1
+    )
+      errors.push(`${threat.id} has invalid protection rules`);
+  }
+  if (
+    socialRules.playerNameLength.min < 1 ||
+    socialRules.playerNameLength.max < socialRules.playerNameLength.min ||
+    socialRules.settlementNameLength.min < 1 ||
+    socialRules.settlementNameLength.max < socialRules.settlementNameLength.min ||
+    socialRules.chatMessageMaxLength < 1 ||
+    socialRules.reportReasonMaxLength < 1 ||
+    socialRules.chatCooldownTicks < 1 ||
+    socialRules.retainedMessages < 1 ||
+    socialRules.retainedReports < 1 ||
+    socialRules.moderatedTerms.some((term) => term !== term.toLowerCase() || !term.trim())
+  )
+    errors.push('social rules are invalid');
+  if (
+    !Number.isInteger(onboardingRules.abandonedReservationTicks) ||
+    onboardingRules.abandonedReservationTicks < 1 ||
+    !buildings[onboardingRules.securingBuildingKind]
+  )
+    errors.push('onboarding rules are invalid');
+  for (const [name, bound] of Object.entries(worldRetention))
+    if (!Number.isSafeInteger(bound) || bound < 1)
+      errors.push(`world retention bound ${name} is invalid`);
+  const mountain = terrainRules.mountain;
+  if (
+    !Number.isInteger(mountain.ridgeScale) ||
+    mountain.ridgeScale < 2 ||
+    !Number.isInteger(mountain.octaves) ||
+    mountain.octaves < 1 ||
+    // Octaves past the tile grid only add noise finer than a tile can show.
+    mountain.octaves > 8 ||
+    !Number.isInteger(mountain.maxLevel) ||
+    mountain.maxLevel < 1 ||
+    !Number.isFinite(mountain.threshold) ||
+    // A threshold at or below zero would wall the whole world off; one at or above one
+    // would leave no mountains at all.
+    mountain.threshold <= 0 ||
+    mountain.threshold >= 1
+  )
+    errors.push('mountain terrain rules are invalid');
   for (const producer of Object.values(producers)) {
     if (!buildings[producer.buildingId as keyof typeof buildings])
       errors.push(`producer references unknown building ${producer.buildingId}`);
@@ -318,6 +1012,94 @@ export const validateContent = (): string[] => {
       if (!Object.values(recipes).some((recipe) => recipe.id === recipeId))
         errors.push(`producer references unknown recipe ${recipeId}`);
   }
+  for (const extractor of Object.values(extractors)) {
+    const building = buildings[extractor.buildingId as keyof typeof buildings];
+    if (!building) errors.push(`extractor references unknown building ${extractor.buildingId}`);
+    else if (building.inventoryCapacity < 1)
+      errors.push(`extractor ${extractor.buildingId} has no inventory to extract into`);
+    if (producers[extractor.buildingId as keyof typeof producers])
+      errors.push(`extractor ${extractor.buildingId} must not also be a recipe producer`);
+    const resource = resources[extractor.terrain];
+    if (!resource) errors.push(`extractor ${extractor.buildingId} references unknown terrain`);
+    else if (resource.item !== extractor.item)
+      errors.push(
+        `extractor ${extractor.buildingId} does not extract the ${extractor.terrain} item`,
+      );
+    if (
+      !Number.isInteger(extractor.range) ||
+      extractor.range < 1 ||
+      !Number.isInteger(extractor.ticksPerUnit) ||
+      extractor.ticksPerUnit < 1
+    )
+      errors.push(`extractor ${extractor.buildingId} has invalid extraction values`);
+  }
+  for (const renewer of Object.values(renewers)) {
+    if (!buildings[renewer.buildingId as keyof typeof buildings])
+      errors.push(`renewer references unknown building ${renewer.buildingId}`);
+    if (!resources[renewer.terrain]?.renewable)
+      errors.push(`renewer ${renewer.buildingId} references a finite resource`);
+    if (
+      !Number.isInteger(renewer.range) ||
+      renewer.range < 1 ||
+      !Number.isInteger(renewer.ticksPerUnit) ||
+      renewer.ticksPerUnit < 1 ||
+      !Number.isInteger(renewer.waterBonusTicksPerUnit) ||
+      renewer.waterBonusTicksPerUnit < 1 ||
+      renewer.waterBonusTicksPerUnit > renewer.ticksPerUnit
+    )
+      errors.push(`renewer ${renewer.buildingId} has invalid renewal values`);
+  }
+  if (
+    !Number.isInteger(roadRules.woodCost) ||
+    roadRules.woodCost < 1 ||
+    !Number.isInteger(roadRules.baseTilesPerTick) ||
+    roadRules.baseTilesPerTick < 1 ||
+    !Number.isInteger(roadRules.engineeringTilesPerTick) ||
+    roadRules.engineeringTilesPerTick < roadRules.baseTilesPerTick ||
+    !Number.isInteger(roadRules.roadDistanceDiscount) ||
+    roadRules.roadDistanceDiscount < 1 ||
+    !Number.isInteger(roadRules.roadStepCost) ||
+    roadRules.roadStepCost < 1 ||
+    !Number.isInteger(roadRules.groundStepCost) ||
+    // Paving has to be the cheaper step, or a road would slow its own carriers down.
+    roadRules.groundStepCost <= roadRules.roadStepCost ||
+    // One tick must always advance a carrier at least one unpaved tile.
+    roadRules.baseTilesPerTick < roadRules.groundStepCost ||
+    !Number.isInteger(roadRules.maxRouteTiles) ||
+    roadRules.maxRouteTiles < 1
+  )
+    errors.push('road rules are invalid');
+  // Widened deliberately: the authored table is `as const`, so comparing its literal
+  // multipliers against their own values would be a type error rather than a check.
+  for (const upgrade of Object.values(buildingUpgrades) as readonly BuildingUpgradeDefinition[]) {
+    const building = buildings[upgrade.buildingId as keyof typeof buildings];
+    if (!building) errors.push(`upgrade references unknown building ${upgrade.buildingId}`);
+    if (!Number.isInteger(upgrade.constructionTicks) || upgrade.constructionTicks < 1)
+      errors.push(`upgrade ${upgrade.buildingId} has invalid construction ticks`);
+    for (const [item, amount] of Object.entries(upgrade.cost)) {
+      if (!(item in items)) errors.push(`upgrade ${upgrade.buildingId} references unknown ${item}`);
+      if (!Number.isInteger(amount) || amount < 1)
+        errors.push(`upgrade ${upgrade.buildingId} has an invalid cost for ${item}`);
+    }
+    if (Object.keys(upgrade.cost).length === 0)
+      errors.push(`upgrade ${upgrade.buildingId} must cost something`);
+    if (
+      !(upgrade.workRateMultiplier > 0) ||
+      upgrade.workRateMultiplier > 1 ||
+      !(upgrade.inventoryCapacityMultiplier >= 1) ||
+      !(upgrade.maxHealthMultiplier >= 1)
+    )
+      errors.push(`upgrade ${upgrade.buildingId} has invalid tier multipliers`);
+    // An upgrade that changed nothing measurable would still cost bricks and downtime.
+    if (
+      upgrade.workRateMultiplier === 1 &&
+      upgrade.inventoryCapacityMultiplier === 1 &&
+      upgrade.maxHealthMultiplier === 1
+    )
+      errors.push(`upgrade ${upgrade.buildingId} grants no benefit`);
+    if (upgrade.requiredTechnology && !(upgrade.requiredTechnology in technologies))
+      errors.push(`upgrade ${upgrade.buildingId} references unknown technology`);
+  }
   for (const entry of Object.values(storage)) {
     const building = buildings[entry.buildingId as keyof typeof buildings];
     if (!building) errors.push(`storage references unknown building ${entry.buildingId}`);
@@ -325,8 +1107,8 @@ export const validateContent = (): string[] => {
       errors.push(`storage ${entry.buildingId} capacity does not match its building`);
   }
   for (const link of Object.values(logisticsLinks)) {
-    if (!Number.isInteger(link.throughputPerTick) || link.throughputPerTick < 1)
-      errors.push(`logistics link ${link.id} has invalid throughput`);
+    if (!Number.isInteger(link.carrierCapacity) || link.carrierCapacity < 1)
+      errors.push(`logistics link ${link.id} has an invalid carrier capacity`);
     for (const kind of [...link.acceptedSourceKinds, ...link.acceptedTargetKinds])
       if (!buildings[kind as keyof typeof buildings])
         errors.push(`logistics link ${link.id} references unknown building ${kind}`);
@@ -352,6 +1134,44 @@ export const validateContent = (): string[] => {
   for (const event of Object.values(environmentalEvents)) {
     if (event.intervalTicks < 1 || event.damage < 1)
       errors.push(`${event.id} has invalid environmental-event values`);
+  }
+  for (const objective of Object.values(cooperativeObjectives)) {
+    if (!(objective.contributionItem in items))
+      errors.push(`${objective.id} references unknown contribution item`);
+    if (!Number.isSafeInteger(objective.targetAmount) || objective.targetAmount < 1)
+      errors.push(`${objective.id} has an invalid target`);
+    if (objective.targetAmount > worldProjectRules.maxTargetAmount)
+      errors.push(`${objective.id} starts above the shared-project target ceiling`);
+    for (const [item, amount] of Object.entries(objective.reward)) {
+      if (!(item in items)) errors.push(`${objective.id} references unknown reward item ${item}`);
+      if (!Number.isSafeInteger(amount) || amount < 1)
+        errors.push(`${objective.id} has an invalid reward for ${item}`);
+    }
+  }
+  if (
+    worldProjectRules.order.length < 1 ||
+    // A rotation that repeated a project would give one of them two turns per lap.
+    new Set(worldProjectRules.order).size !== worldProjectRules.order.length ||
+    worldProjectRules.order.some((id) => !(id in cooperativeObjectives)) ||
+    Object.keys(cooperativeObjectives).some(
+      (id) => !(worldProjectRules.order as readonly string[]).includes(id),
+    ) ||
+    !Number.isSafeInteger(worldProjectRules.claimWindowTicks) ||
+    worldProjectRules.claimWindowTicks < 1 ||
+    !Number.isSafeInteger(worldProjectRules.targetGrowthPerLap) ||
+    worldProjectRules.targetGrowthPerLap < 0 ||
+    !Number.isSafeInteger(worldProjectRules.maxTargetAmount) ||
+    worldProjectRules.maxTargetAmount < 1
+  )
+    errors.push('world project rules are invalid');
+  for (const initiative of Object.values(settlementInitiatives)) {
+    if (!Number.isSafeInteger(initiative.durationTicks) || initiative.durationTicks < 1)
+      errors.push(`${initiative.id} has an invalid duration`);
+    for (const [item, amount] of Object.entries(initiative.cost)) {
+      if (!(item in items)) errors.push(`${initiative.id} references unknown cost item ${item}`);
+      if (!Number.isSafeInteger(amount) || amount < 1)
+        errors.push(`${initiative.id} has an invalid cost for ${item}`);
+    }
   }
   return errors;
 };

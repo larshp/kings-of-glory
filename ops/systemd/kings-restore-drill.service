@@ -1,0 +1,19 @@
+[Unit]
+Description=Kings of Glory isolated restore drill
+RequiresMountsFor=/mnt/kings-backups
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kings-restore
+Group=kings-restore
+WorkingDirectory=/opt/kings-of-glory
+EnvironmentFile=/etc/kings-of-glory/restore-drill.env
+Environment=BACKUP_OFFSITE_DIR=/mnt/kings-backups
+ExecStart=/usr/bin/node /opt/kings-of-glory/apps/server/dist/restore-latest.js
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/mnt/kings-backups

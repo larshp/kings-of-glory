@@ -1,0 +1,21 @@
+[Unit]
+Description=Kings of Glory verified PostgreSQL backup
+RequiresMountsFor=/mnt/kings-backups
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kings-backup
+Group=kings-backup
+WorkingDirectory=/opt/kings-of-glory
+EnvironmentFile=/etc/kings-of-glory/backup.env
+Environment=BACKUP_DIR=/var/lib/kings-of-glory/backup-staging
+Environment=BACKUP_OFFSITE_DIR=/mnt/kings-backups
+Environment=BACKUP_RETENTION_ENABLED=true
+ExecStart=/usr/bin/node /opt/kings-of-glory/apps/server/dist/backup.js
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/kings-of-glory/backup-staging /mnt/kings-backups

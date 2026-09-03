@@ -1,0 +1,77 @@
+groups:
+  - name: kings-of-glory
+    rules:
+      - alert: KingsWorldNotReady
+        expr: up{job="kings-of-glory"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: The authoritative world is not being scraped
+      - alert: KingsTickBudgetExceeded
+        expr: kings_tick_duration_ms > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Server ticks exceed the first-release 20 ms budget
+      - alert: KingsTickFailure
+        expr: increase(kings_tick_failures_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: The authoritative simulation reported a failed tick
+      - alert: KingsCheckpointFailure
+        expr: increase(kings_checkpoint_failures_total[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: A durable checkpoint failed
+      - alert: KingsCommandPersistenceFailure
+        expr: increase(kings_command_persistence_failures_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Accepted command durability is failing
+      - alert: KingsJournalLag
+        expr: kings_journal_lag_ticks > 600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: The checkpoint is more than one minute behind the world
+      - alert: KingsCommandQueuePressure
+        expr: kings_commands_pending > 192
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: The command queue is above 75 percent of its safety limit
+      - alert: KingsOutboundBackpressure
+        expr: kings_outbound_buffered_bytes > 8388608
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Clients are accumulating more than 8 MiB of outbound data
+      - alert: KingsConnectionSpike
+        expr: kings_connected_players > 30
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Connections exceed 150 percent of the verified target
+      - alert: KingsMemoryPressure
+        expr: kings_process_resident_memory_bytes > 1610612736
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: World-host resident memory exceeds 1.5 GiB
+      - alert: KingsBackupStale
+        expr: time() - kings_backup_last_success_timestamp_seconds > 86400
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: No verified off-host backup has completed in 24 hours

@@ -1,8 +1,9 @@
 # Operational runbooks
 
 These runbooks apply to the single authoritative world host. They describe the current first-slice
-behavior; do not operate a public world until the authentication and credential-management work in
-the implementation plan is complete.
+behavior. Production authentication is implemented, but public operation still requires the
+least-privilege credentials, monitored off-host backups, restore drill, and release gates in the
+[deployment architecture](../deployment.md).
 
 ## Failed deployment or incompatible release
 
@@ -61,7 +62,8 @@ the implementation plan is complete.
 
 ## Credentials and public-service boundary
 
-The current client uses a development player identifier and has no account or secret-management
-flow. There is therefore no safe lost-credential recovery procedure yet. Do not expose this build as
-a public service; complete the plan's authentication, least-privilege database role, backup, and
-credential-rotation requirements first.
+Production identity is derived only from signed, HTTP-only sessions; a browser cannot select its
+player ID. Rotate signing secrets using the [session-secret runbook](session-secret-rotation.md).
+Account recovery is an operator-owned support action and must use an audited administrative flow;
+never disclose or manually copy a session token. Do not expose the build publicly until separate
+runtime, migration, and backup roles plus a successful restore drill have been verified.

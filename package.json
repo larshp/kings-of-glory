@@ -8,13 +8,16 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "node scripts/run-pnpm.mjs -r build",
-    "test": "node scripts/run-pnpm.mjs -r test",
+    "test": "node scripts/run-pnpm.mjs -r --filter \"./packages/**\" build && node scripts/run-pnpm.mjs -r test",
+    "test:e2e": "playwright test",
     "typecheck": "node scripts/run-pnpm.mjs build",
     "lint": "node scripts/run-pnpm.mjs -r lint",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "audit": "pnpm audit --prod --audit-level high"
   },
   "devDependencies": {
     "@eslint/js": "^9.27.0",
+    "@playwright/test": "^1.62.0",
     "@types/node": "^22.15.3",
     "@typescript-eslint/eslint-plugin": "^8.32.0",
     "@typescript-eslint/parser": "^8.32.0",

@@ -1,4 +1,5 @@
 export * from './world.js';
+export * from './migrations.js';
 export * from './commands.js';
 export * from './changes.js';
 export * from './fixed-step.js';
@@ -6,3 +7,4 @@ export * from './hash.js';
 export * from './random.js';
 export * from './scenario.js';
 export * from './spatial.js';
+export * from './terrain.js';
